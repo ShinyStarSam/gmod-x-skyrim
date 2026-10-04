@@ -6,6 +6,7 @@ local gmsky = gmsky
 
 -- Collision (Phase 1 step 3): the client builds the same collision, for movement prediction.
 gmsky.Include("terrain")
+gmsky.Include("field")
 
 local frames = 0
 hook.Add("Think", "gmsky_count_frames", function()
@@ -27,8 +28,9 @@ end
 -- the first test with piece reuse on), so errors are caught and logged here instead.
 timer.Create("gmsky_client_status", 5, 0, function()
 	local ok, err = pcall(function()
-		gmsky.Log(string.format("client frames in last 5 s: %d (%.0f fps) fps_max_nofocus=%s%s",
-			frames, frames / 5, NoFocusCap(), gmsky.terrain and gmsky.terrain.Status(LocalPlayer()) or ""))
+		gmsky.Log(string.format("client frames in last 5 s: %d (%.0f fps) fps_max_nofocus=%s%s%s",
+			frames, frames / 5, NoFocusCap(), gmsky.terrain and gmsky.terrain.Status(LocalPlayer()) or "",
+			gmsky.field and gmsky.field.Status(LocalPlayer()) or ""))
 	end)
 	if not ok then gmsky.Log("ERROR in client status: " .. tostring(err)) end
 	frames = 0

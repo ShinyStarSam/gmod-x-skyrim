@@ -13,6 +13,8 @@ end
 -- Collision (Phase 1 step 3), shared with the client side.
 gmsky.Include("terrain")
 local T = gmsky.terrain
+-- Collision field (re-plan step A): triangles answered from Lua, no physics objects.
+gmsky.Include("field")
 if GetPlayer() and T then T.home = T.MeasureRoom(GetPlayer():GetPos() + Vector(0, 0, 40)) end
 local anchored = 0 -- the origin epoch Garry's Mod is anchored to
 
@@ -65,8 +67,6 @@ local view -- the view angles we drive while input comes from Skyrim
 local hold
 local inputStats = { cmds = 0, dx = 0, dy = 0, buttons = 0 }
 
-local function AngleGap(a, b)
-	return math.max(math.abs(math.NormalizeAngle(a.y - b.y)), math.abs(a.p - b.p))
 -- V in Skyrim's window (step 3e): what Garry's Mod's own `noclip` command does. The gamemode's
 -- PlayerNoClip hook decides whether it's allowed (Sandbox: always in single-player).
 local function ToggleNoclip(ply)
@@ -78,6 +78,8 @@ local function ToggleNoclip(ply)
 		allowed and "done" or "refused by the PlayerNoClip hook"))
 end
 
+local function AngleGap(a, b)
+	return math.max(math.abs(math.NormalizeAngle(a.y - b.y)), math.abs(a.p - b.p))
 end
 
 hook.Add("StartCommand", "gmsky_input", function(ply, cmd)
@@ -111,9 +113,9 @@ hook.Add("StartCommand", "gmsky_input", function(ply, cmd)
 		view.r = 0
 		gmsky.Log("input from Skyrim: ON")
 	end
+	for _ = 1, noclipPresses do ToggleNoclip(ply) end
 	local k = 0.022 * sensitivity:GetFloat()
 	view.y = math.NormalizeAngle(view.y - dx * k)
-	for _ = 1, noclipPresses do ToggleNoclip(ply) end
 	view.p = math.Clamp(view.p + dy * k, -89, 89)
 
 	local b = 0
@@ -165,6 +167,7 @@ timer.Create("gmsky_status", 1, 0, function()
 	local input = view and string.format(" input=ON cmds/s=%d buttons=0x%x mouse=(%d, %d)",
 		inputStats.cmds, inputStats.buttons, inputStats.dx, inputStats.dy) or " input=off"
 	local terrain = T and (T.Status(ply) .. (ply and T.GroundStatus(ply) or "")) or ""
+	if gmsky.field then terrain = terrain .. gmsky.field.Status(ply) end
 	gmsky.Log(string.format("tick=%d %s skyrim=%s epoch=%d skyrim_frame=%d writes/s=%d%s%s%s",
 		engine.TickCount(), where, connected and "CONNECTED" or "not connected", epoch, skyrimFrame,
 		writes - lastWrites, input, err and (" error=" .. err) or "", terrain))
