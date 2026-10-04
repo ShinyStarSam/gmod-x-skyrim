@@ -101,3 +101,19 @@ Skipped: header stuck at INIT if a process dies mid-initialization (tiny window;
 **Result:** protocol 4/4 passed; HARNESS PASSED 27/27; the older fake_gmod logged "another Garry's Mod-side process took over the link; pausing" and resumed after the newer exited; plugin built with no warnings from our code and was copied to `Data/SKSE/Plugins`.
 **Still broken / not tested:** all Skyrim-side changes untested in Skyrim. Whether client `Think` really runs while Garry's Mod single-player is paused is **not tested** (I believe so, not sure).
 **Next:** the step 5 in-game test (unchanged procedure).
+
+## 2026-10-04 Phase 0 step 5: in-game test, measured scale, harness log fix
+
+**Changed:** `protocol/gmsky_protocol.h`: scale `kGmodPerSkyrim` 72/128 → **64/120.5** (eye heights), comments record which conventions are verified; `protocol_test.cpp` updated. `gmod/module/src/lib.rs`: honours `GMSKY_LOG_DIR`; `gmod/harness` sets it to `build/harness/logs`. README "what works".
+**Why:** results of the user's Skyrim test; and the harness had overwritten the user's in-game `gmod_server.log`.
+**Tested how:** user ran Garry's Mod (`lua_run require("gmsky")`, walked, looked down), then Skyrim via `skse64_loader.exe` with an outdoor save (stood, walked straight, looked down). I read `logs/skyrim.log` (copied to `build/logs-ingame-test-2/`). That run used the plugin built before the review fixes (loaded 01:05:45). After the changes: protocol test, `gmod_harness.exe`, plugin rebuild.
+**Result:**
+- Plugin: `gmsky 0.1.0 loading (runtime 1-7-104-0)`, `shared memory opened (already created by Garry's Mod)`, `hooked PlayerCharacter::Update`, `published origin epoch 1 at (12155.9, -71991.3, 6010.5) worldspace 0000003C`. Garry's Mod read live every second (`GMOD alive=true`, tick 3851 → 6684). **The C++ plugin and the Rust module share memory correctly between the two real games.**
+- **Skyrim heading convention verified:** walking straight, `facing-minus-moving` = 0.0, 0.1, 0.2, -0.1, -0.2 (heading 295.4, movement 295.1–295.6).
+- **Pitch sign verified:** looking down gave Skyrim `pitch=90.0` and Garry's Mod `pitch=89.0`. Both positive = down.
+- **Scale measured:** standing, Skyrim camera-minus-feet = 120.5 (every standing sample); height 131.8. Garry's Mod eye 64, so eye ratio 0.5311 (hull ratio would be 0.5461). Chose eye ratio. While walking the Skyrim camera reads 124–139 (head bob); standing value used.
+- Garry's Mod yaw convention: this run's Garry's Mod walk was lost (see failure). Re-analysed the first test's saved `fake_skyrim.log`: on straight stretches movement and facing agree (-18.4/-18.6, -90.6/-90.9), which a mirrored convention would not give. Supported, not cleanly isolated.
+- After changes: PROTOCOL TEST PASSED; HARNESS PASSED; `logs/gmod_server.log` timestamp unchanged by the harness run; plugin rebuilt and copied.
+**Failure:** my harness run at 01:12 overwrote `logs/gmod_server.log` / `gmod_client.log` from the user's in-game session (the module always logged to `logs/`). The user's Garry's Mod facing-vs-moving data is gone. Fixed with `GMSKY_LOG_DIR`. The frozen stub still appends harness lines to `logs/stub.log` (append only, pid-tagged; can't change the stub).
+**Still broken / not tested:** the review fixes (`6ced355`) and the new scale are not yet run in game.
+**Next:** step 6, Skyrim's player follows Garry's Mod.

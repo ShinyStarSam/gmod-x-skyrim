@@ -51,7 +51,8 @@ fn log(side: u32, msg: &str) {
     let mut logs = LOGS.lock().unwrap_or_else(|e| e.into_inner());
     let slot = &mut logs[(side == SIDE_CLIENT) as usize];
     if slot.is_none() {
-        let dir = root().join("logs");
+        // GMSKY_LOG_DIR lets the test harness log elsewhere, so it never overwrites in-game logs.
+        let dir = std::env::var_os("GMSKY_LOG_DIR").map(PathBuf::from).unwrap_or_else(|| root().join("logs"));
         let _ = std::fs::create_dir_all(&dir);
         *slot = OpenOptions::new().create(true).write(true).truncate(true)
             .open(dir.join(format!("gmod_{}.log", side_name(side)))).ok();

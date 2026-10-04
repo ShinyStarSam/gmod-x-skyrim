@@ -4,7 +4,7 @@ Play Skyrim as a Garry's Mod player: Garry's Mod movement, weapons, health and H
 Skyrim world. Both games run at the same time and talk through shared memory, the same approach as
 [SkyCraft](https://github.com/chasmlol/SkyCraft). See [docs/DESIGN.md](docs/DESIGN.md).
 
-> **Status: early.** Phase 0 (linking the two games) is in progress: the Garry's Mod side works, the Skyrim side isn't written yet.
+> **Status: early.** Phase 0 (linking the two games) is in progress: both games are linked; Skyrim doesn't follow Garry's Mod yet.
 > Single-player and offline only. Garry's Mod is always started with `-insecure` (VAC off).
 
 ## What works
@@ -14,9 +14,13 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   shared memory 66 times a second, and a test program (`fake_skyrim`) reads them. Closing Garry's
   Mod is detected within half a second.
 
+- **Skyrim plugin, read-only** (tested in game 2026-10-04): loads through SKSE on 1.7.104, hooks the
+  player's per-frame update, and reads Garry's Mod's live state through shared memory. It logs
+  both players side by side to `logs/skyrim.log`. It doesn't change anything in Skyrim yet.
+
 ## What doesn't work yet
 
-- Skyrim plugin: not written yet (Phase 0 steps 5–6).
+- Skyrim's player following Garry's Mod (Phase 0 step 6).
 - Loading gmsky automatically when Garry's Mod starts (`+lua_run` doesn't work; type it in the console).
 - Everything else in [docs/DESIGN.md](docs/DESIGN.md) §12.
 

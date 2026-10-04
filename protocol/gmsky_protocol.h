@@ -165,9 +165,11 @@ inline bool SlotRead(Slot& slot, T& out, uint32_t* seq_out = nullptr) {
 //
 // Both games are Z-up. Garry's Mod works in a local frame:
 //   skyrim = origin + (gmod - anchor) / scale
-// kGmodPerSkyrim is a first guess (Garry's Mod player 72 tall, Skyrim player ~128).
-// NOT MEASURED YET: Phase 0 step 5 logs the real Skyrim height and pins it.
-constexpr double kGmodPerSkyrim = 72.0 / 128.0;
+// kGmodPerSkyrim matches eye heights, so the view sits at the same height in both games:
+// Garry's Mod standing eye 64 / Skyrim first-person camera above the feet 120.5 (measured in game
+// 2026-10-04, standing, logs/skyrim.log; that character's height was 131.8). Other races/heights
+// will differ slightly; making this per-character is a later job.
+constexpr double kGmodPerSkyrim = 64.0 / 120.5;
 constexpr double kPi = 3.14159265358979323846;
 
 struct Vec3 {
@@ -194,10 +196,13 @@ inline double WrapRad(double r) {
 
 // Skyrim heading: 0 = north (+Y), clockwise seen from above. Source yaw: 0 = +X (east),
 // counter-clockwise. So heading = 90deg - yaw.
-// NOT VERIFIED IN GAME YET: Phase 0 step 5 checks this with logged numbers.
+// Skyrim side VERIFIED in game 2026-10-04: walking straight, heading minus movement direction
+// atan2(dx, dy) was 0.0-0.2 deg. Garry's Mod side supported by the first in-game test (straight
+// stretches: moving -18.4 / facing -18.6, moving -90.6 / facing -90.9) but not cleanly isolated yet.
 inline double GmodYawToSkyrimHeading(double yaw_deg) { return WrapRad((90.0 - yaw_deg) * kPi / 180.0); }
 
-// Both games: positive pitch looks down (assumed, NOT VERIFIED IN GAME YET).
+// Both games: positive pitch looks down. VERIFIED in game 2026-10-04: looking straight down gave
+// Skyrim 90.0 deg and Garry's Mod 89.0 deg.
 inline double GmodPitchToSkyrimPitch(double pitch_deg) { return pitch_deg * kPi / 180.0; }
 
 }  // namespace gmsky

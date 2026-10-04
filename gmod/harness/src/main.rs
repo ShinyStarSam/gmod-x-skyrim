@@ -111,6 +111,11 @@ fn main() {
         if !ok { failures += 1; }
     };
 
+    // Log to build/harness/logs, never to logs/ (that holds the real in-game logs).
+    let log_dir = root.join("build").join("harness").join("logs");
+    std::fs::create_dir_all(&log_dir).unwrap();
+    std::env::set_var("GMSKY_LOG_DIR", &log_dir);
+
     unsafe {
         // 1. Garry's Mod's own Lua (lua_shared.dll needs tier0.dll / vstdlib.dll from bin/win64).
         SetDllDirectoryW(wide(&gmod.join("bin").join("win64")).as_ptr());
@@ -217,12 +222,12 @@ fn main() {
         }
     }
 
-    let server_log = std::fs::read_to_string(root.join("logs").join("gmod_server.log")).unwrap_or_default();
+    let server_log = std::fs::read_to_string(log_dir.join("gmod_server.log")).unwrap_or_default();
     check(server_log.contains("server.lua loaded"), "gmod_server.log: server.lua loaded");
     check(server_log.contains("new origin epoch 1"), "gmod_server.log: new origin epoch 1");
     check(server_log.matches("ERROR").count() == 1 && server_log.contains("another process (pid 424242)"),
           "gmod_server.log: exactly one ERROR, the expected takeover message");
-    let client_log = std::fs::read_to_string(root.join("logs").join("gmod_client.log")).unwrap_or_default();
+    let client_log = std::fs::read_to_string(log_dir.join("gmod_client.log")).unwrap_or_default();
     check(client_log.contains("client frames in last 5 s: 200"), "gmod_client.log: counted 200 frames");
 
     println!("{}", if failures == 0 { "HARNESS PASSED" } else { "HARNESS FAILED" });

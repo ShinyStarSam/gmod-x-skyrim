@@ -41,10 +41,10 @@ static void TestPosition() {
     // Standing on the anchor = standing on the origin.
     auto s = gmsky::GmodToSkyrim(anchor, anchor, origin);
     CHECK(Near(s.x, origin[0]) && Near(s.y, origin[1]) && Near(s.z, origin[2]));
-    // 72 Garry's Mod units = 128 Skyrim units (one player height) with the default scale.
-    const double g[3] = {72.0, 0.0, -12000.0 + 72.0};
+    // 64 Garry's Mod units (eye height) = 120.5 Skyrim units (first-person camera height).
+    const double g[3] = {64.0, 0.0, -12000.0 + 64.0};
     s = gmsky::GmodToSkyrim(g, anchor, origin);
-    CHECK(Near(s.x, origin[0] + 128.0) && Near(s.z, origin[2] + 128.0));
+    CHECK(Near(s.x, origin[0] + 120.5) && Near(s.z, origin[2] + 120.5));
     // Round trip.
     const double sv[3] = {s.x, s.y, s.z};
     auto back = gmsky::SkyrimToGmod(sv, anchor, origin);
