@@ -192,6 +192,25 @@ fn main() {
         }
         check(sky.peer_alive(), "Skyrim sees Garry's Mod heartbeat");
 
+        // 6. Another Garry's Mod-side process takes over: we must stop writing, then resume
+        //    when it exits (pid back to 0).
+        use std::sync::atomic::Ordering;
+        let h = &sky.shared().header;
+        let seq_before = sky.shared().player_state.seq();
+        h.gmod_pid.store(424242, Ordering::Release);
+        lua.run(ls, "HARNESS_ADVANCE() hook.Run('Tick')").unwrap();
+        check(sky.shared().player_state.seq() == seq_before, "no writes while another process owns the side");
+        check(h.gmod_pid.load(Ordering::Acquire) == 424242, "other owner's pid left alone");
+        h.gmod_pid.store(0, Ordering::Release);
+        lua.run(ls, "HARNESS_ADVANCE() hook.Run('Tick')").unwrap();
+        check(sky.shared().player_state.seq() == seq_before + 2, "writes resume after the other process exits");
+        check(h.gmod_pid.load(Ordering::Acquire) == std::process::id(), "side re-claimed");
+
+        // 7. Client heartbeat keeps the link alive without server ticks (paused single-player).
+        h.gmod_heartbeat.store(0, Ordering::Release);
+        lua.run(lc, "hook.Run('Think')").unwrap();
+        check(sky.peer_alive(), "client Think alone keeps the heartbeat fresh");
+
         for (l, close, _) in states {
             close(l);
             (lua.close)(l);
@@ -201,7 +220,8 @@ fn main() {
     let server_log = std::fs::read_to_string(root.join("logs").join("gmod_server.log")).unwrap_or_default();
     check(server_log.contains("server.lua loaded"), "gmod_server.log: server.lua loaded");
     check(server_log.contains("new origin epoch 1"), "gmod_server.log: new origin epoch 1");
-    check(!server_log.contains("ERROR"), "gmod_server.log: no ERROR lines");
+    check(server_log.matches("ERROR").count() == 1 && server_log.contains("another process (pid 424242)"),
+          "gmod_server.log: exactly one ERROR, the expected takeover message");
     let client_log = std::fs::read_to_string(root.join("logs").join("gmod_client.log")).unwrap_or_default();
     check(client_log.contains("client frames in last 5 s: 200"), "gmod_client.log: counted 200 frames");
 

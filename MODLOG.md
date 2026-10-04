@@ -85,3 +85,19 @@
 **Result:** configure 102 s (vcpkg built the dependencies), build exit 0, no warnings from our code. Visual Studio 2022 builds CommonLibSSE-NG fine (open question §14.3 answered). Build copied `gmsky.dll` + `gmsky.pdb` to `Skyrim Special Edition\Data\SKSE\Plugins`. Exports `SKSEPlugin_Load/Query/Version`. Harness passed; the new check printed `facing-minus-moving=45.0` for a fake player facing 45° and moving along +X (correct).
 **Still broken / not tested:** nothing tested in Skyrim. Unknown until the in-game test: whether the plugin loads, whether the hook fires, Skyrim's real eye height, and whether my heading/pitch conventions are right.
 **Next:** user runs the in-game test; then pin the scale/heading/pitch numbers in `gmsky_protocol.h`.
+
+## 2026-10-04 Code review of steps 1–5, and fixes
+
+**Changed:** review of `cdb7e98..b13b9ea` found 8 issues; 6 fixed, 2 skipped.
+1. `skse/src/Probe.cpp`: origin epoch restarted at 1 on every Skyrim launch, so a still-running Garry's Mod (already on epoch 1) never re-anchored. Now continues from the epoch already in shared memory.
+2. `skse/src/Probe.cpp`: Garry's Mod's position was converted with the newest origin even when its anchor belonged to an older epoch (or none). Now converted only when `origin_epoch` matches; otherwise logs "not anchored to the current origin yet".
+3. Heartbeat came only from the server Tick, which stops while single-player is paused. New `gmsky.Heartbeat()`, called every client frame (`client.lua`).
+4. A failed shared-memory open was never retried (Rust `OnceLock`; Skyrim plugin disabled itself). Both now retry every 2 s and log only when the error changes.
+5. `protocol/src/shm.rs`: dropping a Mapping cleared its side's pid even if another process owned it. Now only clears its own pid.
+6. Nothing enforced one writer per slot. New `owns_side()` (Rust) / `OwnsSide()` (C++): newest process wins, the older one logs once and pauses, and re-claims the side when the other exits. Used by the module, both fakes and the Skyrim plugin.
+Skipped: header stuck at INIT if a process dies mid-initialization (tiny window; closing both games recovers); harness duplicates the module's Lua bindings (test-only code).
+**Failure on the way:** my first version of the Skyrim retry reset its 2 s timer every frame, so it would never have retried. Caught on re-read before testing; fixed.
+**Tested how:** `cargo test -p gmsky-protocol` (new test: ownership + pid clearing); `gmod_harness.exe` (new checks: takeover stops writes, writes resume and side re-claimed after the other exits, client Think alone keeps the heartbeat fresh); two `fake_gmod` at once; `cmake --build --preset release` for the plugin.
+**Result:** protocol 4/4 passed; HARNESS PASSED 27/27; the older fake_gmod logged "another Garry's Mod-side process took over the link; pausing" and resumed after the newer exited; plugin built with no warnings from our code and was copied to `Data/SKSE/Plugins`.
+**Still broken / not tested:** all Skyrim-side changes untested in Skyrim. Whether client `Think` really runs while Garry's Mod single-player is paused is **not tested** (I believe so, not sure).
+**Next:** the step 5 in-game test (unchanged procedure).

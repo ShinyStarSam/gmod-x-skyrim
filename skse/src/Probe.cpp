@@ -12,7 +12,9 @@ namespace gmsky::Probe
 		constexpr double kRadToDeg = 180.0 / kPi;
 
 		uint64_t g_frame = 0;
-		uint32_t g_epoch = 0;
+		GmskyOrigin g_origin{};  // the origin we published last (epoch 0 = none yet)
+		uint64_t g_lastOpenTry = 0;
+		bool g_lostOwnershipLogged = false;
 		bool g_needOrigin = true;
 		float g_logTimer = 0.0f;
 		RE::NiPoint3 g_lastLogPos{};
@@ -37,13 +39,21 @@ namespace gmsky::Probe
 		void PublishOrigin(RE::PlayerCharacter* a_player, const RE::NiPoint3& a_pos)
 		{
 			auto* ws = a_player->GetWorldspace();
+			// Continue from the epoch already in shared memory: Garry's Mod may still be anchored
+			// to an epoch published by an earlier Skyrim session, and must see a new number.
+			GmskyOrigin cur{};
+			uint32_t last = g_origin.epoch;
+			if (SlotRead(Link::Get().Shared().origin, cur)) {
+				last = std::max(last, cur.epoch);
+			}
 			GmskyOrigin o{};
-			o.epoch = ++g_epoch;
+			o.epoch = last + 1;
 			o.worldspace_form_id = ws ? ws->GetFormID() : 0;
 			o.skyrim_origin[0] = a_pos.x;
 			o.skyrim_origin[1] = a_pos.y;
 			o.skyrim_origin[2] = a_pos.z;
 			SlotWrite(Link::Get().Shared().origin, o);
+			g_origin = o;
 			logger::info("published origin epoch {} at ({:.1f}, {:.1f}, {:.1f}) worldspace {:08X}",
 				o.epoch, a_pos.x, a_pos.y, a_pos.z, o.worldspace_form_id);
 		}
@@ -88,7 +98,6 @@ namespace gmsky::Probe
 				logger::info("GMOD  no player state yet (alive={})", link.PeerAlive());
 				return;
 			}
-			const auto sk = GmodToSkyrim(g.pos, g.anchor, link.Shared().origin.data.skyrim_origin);
 			const double gHeading = GmodYawToSkyrimHeading(g.yaw_deg) * kRadToDeg;
 			std::string gmove = "standing";
 			const double gspeed = std::sqrt(double(g.vel[0]) * g.vel[0] + double(g.vel[1]) * g.vel[1]);
@@ -102,6 +111,14 @@ namespace gmsky::Probe
 			logger::info("GMOD  alive={} tick={} epoch={} pos=({:.1f}, {:.1f}, {:.1f}) yaw={:.1f} pitch={:.1f} eye={:.1f} flags={:#x} | {}",
 				link.PeerAlive(), g.tick, g.origin_epoch, g.pos[0], g.pos[1], g.pos[2], g.yaw_deg, g.pitch_deg,
 				g.eye_height, g.flags, gmove);
+			// Garry's Mod's anchor belongs to g.origin_epoch. Converting with any other origin
+			// (it hasn't seen our newest one yet, or none at all) gives a wrong position.
+			if (g.origin_epoch == 0 || g.origin_epoch != g_origin.epoch) {
+				logger::info("  as skyrim: not anchored to the current origin yet (gmod epoch {}, current {})",
+					g.origin_epoch, g_origin.epoch);
+				return;
+			}
+			const auto sk = GmodToSkyrim(g.pos, g.anchor, g_origin.skyrim_origin);
 			logger::info("  as skyrim: pos=({:.1f}, {:.1f}, {:.1f}) heading={:.1f} pitch={:.1f}",
 				sk.x, sk.y, sk.z, gHeading, GmodPitchToSkyrimPitch(g.pitch_deg) * kRadToDeg);
 		}
@@ -117,9 +134,28 @@ namespace gmsky::Probe
 	void PerFrame(RE::PlayerCharacter* a_player, float a_delta)
 	{
 		auto& link = Link::Get();
-		if (!link.IsOpen() || !a_player) {
+		if (!a_player) {
 			return;
 		}
+		if (!link.IsOpen()) {
+			const auto now = GetTickCount64();
+			if (now - g_lastOpenTry < 2000) {
+				return;
+			}
+			g_lastOpenTry = now;
+			if (!link.Open()) {
+				return;
+			}
+		}
+		if (!link.OwnsSide()) {
+			if (!g_lostOwnershipLogged) {
+				logger::error("another Skyrim-side process (pid {}) is writing the link; not writing until it exits",
+					link.Shared().header.skyrim_pid);
+				g_lostOwnershipLogged = true;
+			}
+			return;
+		}
+		g_lostOwnershipLogged = false;
 		++g_frame;
 		link.Heartbeat();
 

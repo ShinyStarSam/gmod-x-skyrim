@@ -68,12 +68,9 @@ impl Mapping {
         }
         let m = Mapping { handle, view, side };
         m.init_header()?;
-        let pid = unsafe { GetCurrentProcessId() };
-        let h = &m.shared().header;
-        match side {
-            Side::Skyrim => h.skyrim_pid.store(pid, Ordering::Release),
-            Side::Gmod => h.gmod_pid.store(pid, Ordering::Release),
-        }
+        // Register this process as the writer for its side. The newest process wins; an older
+        // one notices through owns_side() and stops writing.
+        m.side_pid().store(unsafe { GetCurrentProcessId() }, Ordering::Release);
         m.heartbeat();
         Ok(m)
     }
@@ -110,6 +107,23 @@ impl Mapping {
         self.side
     }
 
+    fn side_pid(&self) -> &std::sync::atomic::AtomicU32 {
+        let h = &self.shared().header;
+        match self.side {
+            Side::Skyrim => &h.skyrim_pid,
+            Side::Gmod => &h.gmod_pid,
+        }
+    }
+
+    /// Each slot has exactly one writer process (the seqlock relies on it). True if this process
+    /// is the registered writer for its side, re-claiming the side if its previous owner exited
+    /// (pid 0). False if another process of the same side has taken over: stop writing then.
+    pub fn owns_side(&self) -> bool {
+        let pid = unsafe { GetCurrentProcessId() };
+        let cur = self.side_pid().load(Ordering::Acquire);
+        cur == pid || (cur == 0 && self.side_pid().compare_exchange(0, pid, Ordering::AcqRel, Ordering::Acquire).is_ok())
+    }
+
     pub fn heartbeat(&self) {
         let h = &self.shared().header;
         match self.side {
@@ -131,11 +145,10 @@ impl Mapping {
 
 impl Drop for Mapping {
     fn drop(&mut self) {
-        let h = &self.shared().header;
-        match self.side {
-            Side::Skyrim => h.skyrim_pid.store(0, Ordering::Release),
-            Side::Gmod => h.gmod_pid.store(0, Ordering::Release),
-        }
+        // Only clear the pid if it is ours: a Mapping that failed to open, or that another process
+        // took over from, must not wipe the registration of the process that is really connected.
+        let pid = unsafe { GetCurrentProcessId() };
+        let _ = self.side_pid().compare_exchange(pid, 0, Ordering::AcqRel, Ordering::Acquire);
         unsafe {
             UnmapViewOfFile(self.view as *const c_void);
             CloseHandle(self.handle);

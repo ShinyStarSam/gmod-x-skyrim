@@ -30,8 +30,18 @@ fn main() {
     let mut last_seq = 0u32;
     let mut was_alive = false;
     let mut updates_since_print = 0u32;
+    let mut lost = false;
     while now_ms() < end {
         frame += 1;
+        if !m.owns_side() {
+            if !lost {
+                log.line("another Skyrim-side process took over the link; pausing until it exits");
+                lost = true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+        lost = false;
         m.heartbeat();
         s.skyrim_state.write(&SkyrimState {
             frame, pos: [19000.0, -7000.0, -3300.0], height: 128.0, cell_form_id: 0, ..Default::default()

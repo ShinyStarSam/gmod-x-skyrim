@@ -29,8 +29,18 @@ fn main() {
     let mut anchor = [0.0f64; 3];
     let mut last_print = 0u64;
     const FLOOR_Z: f64 = -12700.0; // like gm_flatgrass' floor
+    let mut lost = false;
     while now_ms() < end {
         tick += 1;
+        if !m.owns_side() {
+            if !lost {
+                log.line("another Garry's Mod-side process took over the link; pausing until it exits");
+                lost = true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+        lost = false;
         m.heartbeat();
         let t = (now_ms() - start) as f64 / 1000.0;
         let a = t * std::f64::consts::TAU / 10.0;

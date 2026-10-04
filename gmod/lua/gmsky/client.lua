@@ -7,6 +7,8 @@ local gmsky = gmsky
 local frames = 0
 hook.Add("Think", "gmsky_count_frames", function()
 	frames = frames + 1
+	-- Keeps the link alive while single-player is paused (the server's Tick stops then).
+	gmsky.Heartbeat()
 end)
 
 timer.Create("gmsky_client_status", 5, 0, function()

@@ -184,6 +184,27 @@ mod tests {
         assert_eq!(h.skyrim_pid.load(Ordering::Acquire), std::process::id());
     }
 
+    #[test]
+    fn owns_side_and_drop_only_clears_own_pid() {
+        let name = unique_name("own");
+        let a = Mapping::open_named(&name, Side::Gmod).unwrap();
+        assert!(a.owns_side());
+        // Another process takes over the Gmod side: we no longer own it, and dropping our
+        // mapping must not clear its pid.
+        let h = &a.shared().header;
+        h.gmod_pid.store(12345, Ordering::Release);
+        assert!(!a.owns_side());
+        let b = Mapping::open_named(&name, Side::Skyrim).unwrap();
+        drop(a);
+        assert_eq!(b.shared().header.gmod_pid.load(Ordering::Acquire), 12345);
+        // The other process exits (pid 0): a remaining writer may re-claim the side.
+        b.shared().header.gmod_pid.store(0, Ordering::Release);
+        let c = Mapping::open_named(&name, Side::Gmod).unwrap();
+        b.shared().header.gmod_pid.store(0, Ordering::Release);
+        assert!(c.owns_side());
+        assert_eq!(b.shared().header.gmod_pid.load(Ordering::Acquire), std::process::id());
+    }
+
     /// A reader must never see a half-written value while a writer hammers the slot.
     #[test]
     fn seqlock_never_tears() {

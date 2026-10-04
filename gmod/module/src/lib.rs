@@ -19,6 +19,7 @@ use std::sync::{Mutex, OnceLock};
 /// Must match STUB_ABI_VERSION in gmod/stub. Changing it means re-installing the stubs.
 const ABI_VERSION: u32 = 1;
 
+const SIDE_SERVER: u32 = 0;
 const SIDE_CLIENT: u32 = 1;
 
 fn side_name(side: u32) -> &'static str {
@@ -26,7 +27,12 @@ fn side_name(side: u32) -> &'static str {
 }
 
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
-static MAPPING: OnceLock<Result<Mapping, String>> = OnceLock::new();
+static MAPPING: OnceLock<Mapping> = OnceLock::new();
+/// Last failed open: (time in ms, error). A failed open is retried at most every RETRY_MS.
+static OPEN_ERROR: Mutex<Option<(u64, String)>> = Mutex::new(None);
+const RETRY_MS: u64 = 2000;
+/// Set once we've logged that another process took over the Garry's Mod side.
+static LOST_OWNERSHIP_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static LOGS: Mutex<[Option<File>; 2]> = Mutex::new([None, None]);
 
 #[derive(Default)]
@@ -56,8 +62,46 @@ fn log(side: u32, msg: &str) {
     }
 }
 
-fn mapping() -> Result<&'static Mapping, &'static str> {
-    MAPPING.get_or_init(|| Mapping::open(Side::Gmod)).as_ref().map_err(|e| e.as_str())
+/// The shared memory, opening it on first use. A failure (e.g. a protocol-version mismatch with a
+/// Skyrim that is still running) is retried every RETRY_MS, so it recovers without a restart.
+fn mapping() -> Result<&'static Mapping, String> {
+    if let Some(m) = MAPPING.get() {
+        return Ok(m);
+    }
+    let mut err = OPEN_ERROR.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, e)) = err.as_ref() {
+        if now_ms().saturating_sub(*at) < RETRY_MS {
+            return Err(e.clone());
+        }
+    }
+    match Mapping::open(Side::Gmod) {
+        Ok(m) => {
+            *err = None;
+            Ok(MAPPING.get_or_init(|| m))
+        }
+        Err(e) => {
+            if err.as_ref().map_or(true, |(_, prev)| *prev != e) {
+                log(SIDE_SERVER, &format!("ERROR opening shared memory (retrying every {RETRY_MS} ms): {e}"));
+            }
+            *err = Some((now_ms(), e.clone()));
+            Err(e)
+        }
+    }
+}
+
+/// The mapping, if this process may write the Garry's Mod side. Logs once if another
+/// Garry's Mod-side process (e.g. a forgotten fake_gmod) has taken over.
+fn writable_mapping() -> Option<&'static Mapping> {
+    let m = mapping().ok()?;
+    if m.owns_side() {
+        LOST_OWNERSHIP_LOGGED.store(false, std::sync::atomic::Ordering::Relaxed);
+        return Some(m);
+    }
+    if !LOST_OWNERSHIP_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log(SIDE_SERVER, &format!("ERROR: another process (pid {}) is writing the Garry's Mod side; not writing until it exits",
+            m.shared().header.gmod_pid.load(std::sync::atomic::Ordering::Acquire)));
+    }
+    None
 }
 
 #[no_mangle]
@@ -101,8 +145,9 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 5] = [
+    let funcs: [(&str, lua::CFn); 6] = [
         ("Log", l_log),
+        ("Heartbeat", l_heartbeat),
         ("WritePlayerState", l_write_player_state),
         ("Status", l_status),
         ("Root", l_root),
@@ -152,6 +197,17 @@ unsafe extern "C" fn l_log(l: *mut State) -> c_int {
     })
 }
 
+/// gmsky.Heartbeat(): tells Skyrim this Garry's Mod is alive. Called every client frame, which
+/// keeps running while single-player is paused (server ticks stop then).
+unsafe extern "C" fn l_heartbeat(l: *mut State) -> c_int {
+    guarded(l, |_, _| {
+        if let Some(m) = writable_mapping() {
+            m.heartbeat();
+        }
+        0
+    })
+}
+
 /// gmsky.Root() -> project folder
 unsafe extern "C" fn l_root(l: *mut State) -> c_int {
     guarded(l, |a, _| {
@@ -174,7 +230,7 @@ unsafe extern "C" fn l_write_player_state(l: *mut State) -> c_int {
     guarded(l, |a, side| {
         let n = |i: c_int| (a.tonumber)(l, i);
         let pos = [n(2), n(3), n(4)];
-        let Ok(m) = mapping() else { (a.pushnumber)(l, 0.0); return 1 };
+        let Some(m) = writable_mapping() else { (a.pushnumber)(l, 0.0); return 1 };
         m.heartbeat();
         let s = m.shared();
         let mut link = LINK.lock().unwrap_or_else(|e| e.into_inner());
@@ -223,7 +279,7 @@ unsafe extern "C" fn l_status(l: *mut State) -> c_int {
                 (a.pushnumber)(l, 0.0);
                 (a.pushnumber)(l, 0.0);
                 (a.pushnumber)(l, link.writes as f64);
-                lua::push_str(a, l, e);
+                lua::push_str(a, l, &e);
             }
         }
         5

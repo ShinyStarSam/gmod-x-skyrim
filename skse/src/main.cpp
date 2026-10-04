@@ -21,10 +21,8 @@ namespace
 	{
 		switch (a_msg->type) {
 		case SKSE::MessagingInterface::kDataLoaded:
-			if (!gmsky::Link::Get().Open()) {
-				logger::error("gmsky disabled: could not open shared memory");
-				return;
-			}
+			// If this fails, the per-frame probe retries every 2 s.
+			gmsky::Link::Get().Open();
 			gmsky::Probe::Install();
 			break;
 		case SKSE::MessagingInterface::kPostLoadGame:
