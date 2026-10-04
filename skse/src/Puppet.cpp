@@ -1,8 +1,8 @@
 // Phase 0 step 6: Skyrim's player follows Garry's Mod's player.
 //
-// Garry's Mod decides left/right/forward position and where the player looks. Height comes from
-// Skyrim's own ground under that spot (a downward ray cast), because Garry's Mod still stands on a
-// flat test floor; Phase 1 replaces that with Skyrim's real shape inside Garry's Mod.
+// Garry's Mod decides the position (height too, since Phase 1 step 3d: it walks on Skyrim's ground
+// itself) and where the player looks. Skyrim's own ground ray is kept only to measure Garry's Mod's
+// feet against Skyrim's ground in the log.
 // Approach as in SkyCraft: set the position after Skyrim's own update every frame, and zero the
 // character controller's own velocity and fall tracking so Skyrim adds no momentum or fall damage.
 #include "Puppet.h"
@@ -15,7 +15,7 @@ namespace gmsky::Puppet
 {
 	namespace
 	{
-		constexpr float kRayUp = 100.0f;    // start the ground ray this far above the current feet
+		constexpr float kRayUp = 100.0f;    // start the measuring ray this far above Garry's Mod's feet
 		constexpr float kRayDown = 600.0f;  // and end it this far below
 		constexpr float kTeleportThreshold = 300.0f;
 		constexpr double kRadToDeg = 180.0 / kPi;
@@ -27,7 +27,12 @@ namespace gmsky::Puppet
 
 		// Per-second statistics for the log.
 		uint32_t g_sets = 0, g_groundRay = 0, g_groundLand = 0, g_groundKeep = 0, g_bigSteps = 0;
-		float g_maxStep = 0.0f, g_maxDrift = 0.0f;
+		float g_maxStep = 0.0f, g_maxDrift = 0.0f, g_maxDriftZ = 0.0f;
+		// Garry's Mod's feet minus Skyrim's ground under them (step 3d check), only where the ray hit.
+		float g_aboveMin = 0.0f, g_aboveMax = 0.0f;
+		uint32_t g_aboveSamples = 0;
+		bool g_noclip = false;     // Garry's Mod's player is in noclip (GMSKY_PF_NOCLIP)
+		uint32_t g_noclipFrames = 0;
 		RE::NiPoint3 g_lastTargetRaw{};
 		double g_lastHeadingDeg = 0.0, g_lastPitchDeg = 0.0;
 		// View lag and prediction (Phase 1 step 1b), per second.
@@ -175,13 +180,27 @@ namespace gmsky::Puppet
 			g_maxDrift = std::max(g_maxDrift, std::sqrt(dx * dx + dy * dy));
 		}
 
+			g_maxDriftZ = std::max(g_maxDriftZ, std::abs(cur.z - g_lastSet.z));
 		const auto drawn = Smooth::Position(g);
+		const bool noclip = (g.flags & GMSKY_PF_NOCLIP) != 0;
+		if (noclip != g_noclip) {
+			logger::info("PUPPET Garry's Mod noclip {}", noclip ? "ON" : "OFF");
+			g_noclip = noclip;
+		}
+		g_noclipFrames += noclip ? 1 : 0;
 		const auto t = GmodToSkyrim(drawn.data(), g.anchor, a_origin.skyrim_origin);
-		g_lastTargetRaw = RE::NiPoint3{ float(t.x), float(t.y), float(t.z) };
+		const RE::NiPoint3 pos{ float(t.x), float(t.y), float(t.z) };
+		g_lastTargetRaw = pos;
+		// Measuring only (step 3d): Skyrim's own ground under Garry's Mod's feet.
 		Ground how;
-		const float z = GroundZ(a_player, float(t.x), float(t.y), cur.z, how);
+		const float ground = GroundZ(a_player, pos.x, pos.y, pos.z, how);
 		(how == Ground::kRay ? g_groundRay : how == Ground::kLand ? g_groundLand : g_groundKeep)++;
-		const RE::NiPoint3 pos{ float(t.x), float(t.y), z };
+		if (how == Ground::kRay) {
+			const float above = pos.z - ground;
+			g_aboveMin = g_aboveSamples ? std::min(g_aboveMin, above) : above;
+			g_aboveMax = g_aboveSamples ? std::max(g_aboveMax, above) : above;
+			++g_aboveSamples;
+		}
 
 		if (g_haveLastSet) {
 			const float step = pos.GetDistance(g_lastSet);
@@ -237,9 +256,12 @@ namespace gmsky::Puppet
 		if (!g_active) {
 			logger::info("PUPPET off: {}", g_offReason);
 		} else {
-			logger::info("PUPPET on: sets={} ground ray/land/keep={}/{}/{} set=({:.1f}, {:.1f}, {:.1f}) gmod-as-skyrim z={:.1f} heading={:.1f} pitch={:.1f} max-step={:.1f} max-drift={:.1f} big-steps={}",
-				g_sets, g_groundRay, g_groundLand, g_groundKeep, g_lastSet.x, g_lastSet.y, g_lastSet.z, g_lastTargetRaw.z,
-				g_lastHeadingDeg, g_lastPitchDeg, g_maxStep, g_maxDrift, g_bigSteps);
+			logger::info("PUPPET on: sets={} set=({:.1f}, {:.1f}, {:.1f}) heading={:.1f} pitch={:.1f} max-step={:.1f} max-drift xy={:.1f} z={:.1f} big-steps={} noclip frames={}",
+				g_sets, g_lastSet.x, g_lastSet.y, g_lastSet.z, g_lastHeadingDeg, g_lastPitchDeg, g_maxStep, g_maxDrift, g_maxDriftZ,
+				g_bigSteps, g_noclipFrames);
+			logger::info("PUPPET height (step 3d): z from Garry's Mod; Skyrim's ground ray under it hit/land/none={}/{}/{}, Garry's Mod feet minus Skyrim's ground {}",
+				g_groundRay, g_groundLand, g_groundKeep,
+				g_aboveSamples ? fmt::format("min={:.1f} max={:.1f}", g_aboveMin, g_aboveMax) : std::string("- (no ray hit)"));
 			Smooth::LogSecond();
 			if (g_lagSamples) {
 				logger::info("VIEW lag (Skyrim frames, 1 = newest) avg={:.2f} max={} | prediction {}: frames={} ahead max={:.2f} deg, last frame {:.2f} deg",
@@ -251,6 +273,7 @@ namespace gmsky::Puppet
 		g_lagSum = 0;
 		g_aheadMax = 0.0;
 		g_sets = g_groundRay = g_groundLand = g_groundKeep = g_bigSteps = 0;
-		g_maxStep = g_maxDrift = 0.0f;
+		g_maxStep = g_maxDrift = g_maxDriftZ = 0.0f;
+		g_aboveSamples = g_noclipFrames = 0;
 	}
 }
