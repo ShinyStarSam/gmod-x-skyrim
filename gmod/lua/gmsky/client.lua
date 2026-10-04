@@ -16,5 +16,13 @@ timer.Create("gmsky_client_status", 5, 0, function()
 	frames = 0
 end)
 
+-- Garry's Mod sleeps between frames while its window isn't in front, which makes its ticks
+-- arrive in bursts (Phase 0 finding). Skyrim's window is in front now, so turn that off.
+RunConsoleCommand("engine_no_focus_sleep", "0")
+timer.Simple(1, function()
+	local cv = GetConVar("engine_no_focus_sleep")
+	gmsky.Log("engine_no_focus_sleep is now " .. (cv and cv:GetString() or "(no such setting)"))
+end)
+
 gmsky.Log("client.lua loaded")
 print("[gmsky] client side loaded")

@@ -235,6 +235,33 @@ Each phase ends with something you can test, and each step inside a phase is one
    (set by the user in their Skyrim.ini) so Skyrim keeps running while Garry's Mod has focus.
    Phase 0 done when this works in game.
 
+### Phase 1 steps (planned 2026-10-04)
+
+Goal: play from the Skyrim window with Garry's Mod movement on Skyrim's real ground.
+
+1. **Input bridge.** Skyrim keeps keyboard focus. The Skyrim plugin reads Skyrim's keyboard and
+   mouse events (as SkyCraft does) and, while the puppet is on, (a) swallows them from Skyrim's own
+   player controls (`PlayerControls` hook) and (b) writes a new **`GmskyInput`** latest-value slot:
+   held actions as bits (forward, back, left, right, jump, duck, sprint, walk, attack, attack2,
+   reload) and *cumulative* mouse x/y and wheel counts. Garry's Mod (server `StartCommand` hook)
+   turns that into the player's command: buttons, forward/side move, and view angles. **Garry's
+   Mod integrates the mouse itself** (Source formula: degrees = counts × 0.022 × sensitivity, with
+   a `gmsky_sensitivity` setting), so Garry's Mod stays in charge of where the player looks.
+   Skyrim keeps: Esc (menu), ~ (console), J (journal), M (map), F9 (quickload), and **E = Skyrim
+   activate** (doors, talking, looting) via the crosshair target, as SkyCraft does with G.
+   Garry's Mod must not slow down in the background: `client.lua` sets `engine_no_focus_sleep 0`.
+   Protocol version 2 (new slot). Test: from the Skyrim window, walk, sprint, look, open a door.
+2. **Smooth position.** Send the position Garry's Mod *draws* each frame (client side, between
+   ticks) instead of the raw 66/s tick position (Phase 0 finding: ticks arrive in bursts at low
+   frame rates). Test: per-frame step sizes in the log are even.
+3. **Collision, stage A.** Skyrim casts a grid of downward rays around the player (SkyCraft's
+   stage A) and streams height patches; Garry's Mod builds invisible static meshes from them, so
+   Garry's Mod's own movement walks on Skyrim's ground, hills and rocks. Then the puppet uses
+   Garry's Mod's height and the step-6 ground ray is removed. Needs event queues in the protocol.
+   Test: jump, crouch, walk up and down hills; Skyrim z follows Garry's Mod z.
+4. **Camera.** Skyrim's camera from Garry's Mod's eye (crouch height, view bob) and FOV.
+5. **Floating origin re-centre** (§5): move the origin when the player is far from it.
+
 ## 13. Repo layout
 
 ```

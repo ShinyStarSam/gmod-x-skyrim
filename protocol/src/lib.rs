@@ -11,13 +11,25 @@ pub const SHM_NAME: &str = r"Local\GmodSkyrim_v1";
 pub const MAP_SIZE: usize = 65536;
 pub const MAGIC: u32 = 0x594B_534D;
 pub const MAGIC_INIT: u32 = 0x5449_4E49;
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2; // 2: added Input
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
 
 pub const PF_ON_GROUND: u32 = 0x1;
 pub const PF_CROUCHING: u32 = 0x2;
 pub const PF_ALIVE: u32 = 0x4;
 pub const PF_NOCLIP: u32 = 0x8;
+
+pub const IN_FORWARD: u32 = 0x1;
+pub const IN_BACK: u32 = 0x2;
+pub const IN_LEFT: u32 = 0x4;
+pub const IN_RIGHT: u32 = 0x8;
+pub const IN_JUMP: u32 = 0x10;
+pub const IN_DUCK: u32 = 0x20;
+pub const IN_SPEED: u32 = 0x40;
+pub const IN_WALK: u32 = 0x80;
+pub const IN_ATTACK: u32 = 0x100;
+pub const IN_ATTACK2: u32 = 0x200;
+pub const IN_RELOAD: u32 = 0x400;
 
 #[repr(C)]
 pub struct Header {
@@ -66,6 +78,18 @@ pub struct PlayerState {
     pub roll_deg: f32,
     pub vel: [f32; 3],
     pub fov_deg: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Input {
+    pub frame: u64,
+    pub active: u32,
+    pub buttons: u32,
+    pub mouse_x_total: i64,
+    pub mouse_y_total: i64,
+    pub wheel_total: i32,
+    pub reserved0: u32,
 }
 
 /// A latest-value slot guarded by a seqlock. `seq == 0` means never written.
@@ -121,6 +145,7 @@ pub struct Shared {
     pub origin: Slot<Origin>,
     pub skyrim_state: Slot<SkyrimState>,
     pub player_state: Slot<PlayerState>,
+    pub input: Slot<Input>,
 }
 
 // ---- Layout checks: the same numbers as gmsky_protocol.h ----
@@ -141,11 +166,15 @@ const _: () = {
     assert!(offset_of!(PlayerState, eye_height) == 64);
     assert!(offset_of!(PlayerState, vel) == 80);
     assert!(offset_of!(PlayerState, fov_deg) == 92);
+    assert!(size_of::<Input>() == 40);
+    assert!(offset_of!(Input, mouse_x_total) == 16);
+    assert!(offset_of!(Input, wheel_total) == 32);
     assert!(offset_of!(Slot<Origin>, data) == 8);
     assert!(offset_of!(Shared, origin) == 40);
     assert!(offset_of!(Shared, skyrim_state) == 80);
     assert!(offset_of!(Shared, player_state) == 144);
-    assert!(size_of::<Shared>() == 248);
+    assert!(offset_of!(Shared, input) == 248);
+    assert!(size_of::<Shared>() == 296);
     assert!(size_of::<Shared>() <= MAP_SIZE);
 };
 

@@ -80,6 +80,26 @@ function hook.Run(ev, ...) for _, fn in pairs(hook._h[ev] or {}) do fn(...) end 
 timer = { _t = {} }
 function timer.Create(name, delay, reps, fn) timer._t[name] = fn end
 function timer.Run(name) timer._t[name]() end
+function timer.Simple(delay, fn) HARNESS_SIMPLE = fn end
+function RunConsoleCommand(name, value) HARNESS_CONVARS = HARNESS_CONVARS or {}; HARNESS_CONVARS[name] = value end
+function GetConVar(name) local v = (HARNESS_CONVARS or {})[name]; return v and { GetString = function() return v end } end
+FCVAR_ARCHIVE = 128
+function CreateConVar(name, default) return { GetFloat = function() return tonumber(default) end } end
+function math.NormalizeAngle(a) return (a + 180) % 360 - 180 end
+function math.Clamp(v, lo, hi) return math.max(lo, math.min(hi, v)) end
+-- Garry's Mod's real IN_* values
+IN_ATTACK, IN_JUMP, IN_DUCK, IN_FORWARD, IN_BACK = 1, 2, 4, 8, 16
+IN_MOVELEFT, IN_MOVERIGHT, IN_ATTACK2, IN_RELOAD, IN_SPEED, IN_WALK = 512, 1024, 2048, 8192, 131072, 262144
+function HARNESS_NEW_CMD()
+	local c = { calls = 0 }
+	function c:ClearButtons() self.calls = self.calls + 1 end
+	function c:ClearMovement() self.calls = self.calls + 1 end
+	function c:SetButtons(b) self.buttons = b end
+	function c:SetForwardMove(f) self.fwd = f end
+	function c:SetSideMove(s) self.side = s end
+	function c:SetViewAngles(a) self.p, self.y = a.p, a.y end
+	return c
+end
 function IsValid(x) return x ~= nil end
 MOVETYPE_WALK = 2
 MOVETYPE_NOCLIP = 8
@@ -97,6 +117,7 @@ function ply:EyePos() return vec(100 + t, 50, -12700 + 64) end
 function ply:GetFOV() return 75 end
 function ply:SendLua(s) HARNESS_SENT_LUA = s end
 player = { GetAll = function() return { ply } end }
+HARNESS_PLY = ply
 engine = { TickCount = function() return t end }
 function HARNESS_ADVANCE() t = t + 1 end
 "#;
@@ -216,6 +237,28 @@ fn main() {
         lua.run(lc, "hook.Run('Think')").unwrap();
         check(sky.peer_alive(), "client Think alone keeps the heartbeat fresh");
 
+        // 8. Input from Skyrim's window turns into the player's command.
+        use gmsky_protocol::{Input, IN_FORWARD, IN_SPEED};
+        let run_cmd = |code: &str| lua.run(ls, &format!(
+            "HARNESS_CMD = HARNESS_NEW_CMD() hook.Run('StartCommand', HARNESS_PLY, HARNESS_CMD) {code}"));
+        sky.heartbeat();
+        sky.shared().input.write(&Input { frame: 1, active: 1, buttons: IN_FORWARD | IN_SPEED, mouse_x_total: 1000, ..Default::default() });
+        run_cmd("").unwrap();
+        sky.shared().input.write(&Input { frame: 2, active: 1, buttons: IN_FORWARD | IN_SPEED, mouse_x_total: 1100, mouse_y_total: -50, ..Default::default() });
+        let r = run_cmd("return string.format('%d %d %d %.2f %.2f', HARNESS_CMD.buttons, HARNESS_CMD.fwd, HARNESS_CMD.side, HARNESS_CMD.y, HARNESS_CMD.p)");
+        // buttons IN_FORWARD(8) | IN_SPEED(131072); yaw 45 - 100*0.022*3 = 38.4; pitch 10 - 50*0.066 = 6.7
+        check(r == Ok(Some("131080 10000 0 38.40 6.70".into())), &format!("forward+sprint and mouse look: {r:?}"));
+        sky.shared().input.write(&Input { frame: 3, active: 0, mouse_x_total: 1100, ..Default::default() });
+        let r = run_cmd("return HARNESS_CMD.calls");
+        check(r == Ok(Some("0".into())), &format!("active=0 leaves the command alone: {r:?}"));
+        sky.shared().input.write(&Input { frame: 4, active: 1, buttons: IN_FORWARD, mouse_x_total: 1100, ..Default::default() });
+        run_cmd("").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let r = run_cmd("return HARNESS_CMD.calls");
+        check(r == Ok(Some("0".into())), &format!("input not rewritten for 300 ms counts as stale: {r:?}"));
+        let r = lua.run(lc, "HARNESS_SIMPLE() return HARNESS_CONVARS.engine_no_focus_sleep");
+        check(r == Ok(Some("0".into())), &format!("client turns engine_no_focus_sleep off: {r:?}"));
+
         for (l, close, _) in states {
             close(l);
             (lua.close)(l);
@@ -229,6 +272,10 @@ fn main() {
           "gmod_server.log: exactly one ERROR, the expected takeover message");
     let client_log = std::fs::read_to_string(log_dir.join("gmod_client.log")).unwrap_or_default();
     check(client_log.contains("client frames in last 5 s: 200"), "gmod_client.log: counted 200 frames");
+    check(client_log.contains("engine_no_focus_sleep is now 0"), "gmod_client.log: engine_no_focus_sleep logged");
+    let server_log = std::fs::read_to_string(log_dir.join("gmod_server.log")).unwrap_or_default();
+    check(server_log.contains("input from Skyrim: ON") && server_log.contains("input from Skyrim: OFF"),
+          "gmod_server.log: input ON and OFF logged");
 
     println!("{}", if failures == 0 { "HARNESS PASSED" } else { "HARNESS FAILED" });
     std::process::exit(if failures == 0 { 0 } else { 1 });

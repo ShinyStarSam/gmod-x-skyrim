@@ -43,6 +43,17 @@ struct LinkState {
 }
 static LINK: Mutex<LinkState> = Mutex::new(LinkState { epoch: 0, anchor: [0.0; 3], writes: 0 });
 
+/// Input from Skyrim is used only while Skyrim keeps writing it: Skyrim writes every frame, so a
+/// slot that hasn't changed for this long means Skyrim paused or stopped.
+const INPUT_STALE_MS: u64 = 250;
+struct InputTrack {
+    last_seq: u32,
+    last_change_ms: u64,
+    /// Mouse/wheel totals already applied; None = start fresh on the next active read.
+    base: Option<(i64, i64, i32)>,
+}
+static INPUT: Mutex<InputTrack> = Mutex::new(InputTrack { last_seq: 0, last_change_ms: 0, base: None });
+
 fn root() -> PathBuf {
     ROOT.get().cloned().unwrap_or_else(|| PathBuf::from("."))
 }
@@ -146,9 +157,10 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 6] = [
+    let funcs: [(&str, lua::CFn); 7] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
+        ("ReadInput", l_read_input),
         ("WritePlayerState", l_write_player_state),
         ("Status", l_status),
         ("Root", l_root),
@@ -206,6 +218,49 @@ unsafe extern "C" fn l_heartbeat(l: *mut State) -> c_int {
             m.heartbeat();
         }
         0
+    })
+}
+
+/// gmsky.ReadInput() -> active, buttons, mouse_dx, mouse_dy, wheel_delta
+/// active is false unless Skyrim is alive, routing input (GmskyInput.active) and wrote it within
+/// INPUT_STALE_MS. The deltas are since the previous call that returned active.
+unsafe extern "C" fn l_read_input(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let mut t = INPUT.lock().unwrap_or_else(|e| e.into_inner());
+        let now = now_ms();
+        let read = mapping().ok().and_then(|m| m.shared().input.read().map(|(i, seq)| (m, i, seq)));
+        let mut result = None;
+        if let Some((m, inp, seq)) = read {
+            if seq != t.last_seq {
+                t.last_seq = seq;
+                t.last_change_ms = now;
+            }
+            if inp.active == 1 && m.peer_alive() && now.saturating_sub(t.last_change_ms) < INPUT_STALE_MS {
+                let (bx, by, bw) = t.base.unwrap_or((inp.mouse_x_total, inp.mouse_y_total, inp.wheel_total));
+                let (mut dx, mut dy) = (inp.mouse_x_total - bx, inp.mouse_y_total - by);
+                if dx.abs() > 100_000 || dy.abs() > 100_000 {
+                    dx = 0; // totals restarted (Skyrim restarted): start again from here
+                    dy = 0;
+                }
+                result = Some((inp.buttons, dx, dy, inp.wheel_total.wrapping_sub(bw)));
+                t.base = Some((inp.mouse_x_total, inp.mouse_y_total, inp.wheel_total));
+            }
+        }
+        match result {
+            Some((buttons, dx, dy, dw)) => {
+                (a.pushboolean)(l, 1);
+                (a.pushnumber)(l, buttons as f64);
+                (a.pushnumber)(l, dx as f64);
+                (a.pushnumber)(l, dy as f64);
+                (a.pushnumber)(l, dw as f64);
+            }
+            None => {
+                t.base = None;
+                (a.pushboolean)(l, 0);
+                for _ in 0..4 { (a.pushnumber)(l, 0.0); }
+            }
+        }
+        5
     })
 }
 

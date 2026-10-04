@@ -26,6 +26,60 @@ hook.Add("Tick", "gmsky_player_state", function()
 		ply:EyePos().z - pos.z, vel.x, vel.y, vel.z, flags, ply:GetFOV())
 end)
 
+-- Input typed into Skyrim's window (Phase 1 step 1). While Skyrim routes input here, it replaces
+-- the player's own command: buttons, movement and view angles. The mouse is turned into view
+-- angles here, with Garry's Mod's own formula (degrees = counts * 0.022 * sensitivity).
+local sensitivity = CreateConVar("gmsky_sensitivity", "3", FCVAR_ARCHIVE,
+	"Mouse sensitivity for input from Skyrim's window (same scale as Garry's Mod's sensitivity)")
+local IN_MAP = { -- GMSKY_IN_* bit -> Garry's Mod IN_* button
+	{ 0x1, IN_FORWARD }, { 0x2, IN_BACK }, { 0x4, IN_MOVELEFT }, { 0x8, IN_MOVERIGHT },
+	{ 0x10, IN_JUMP }, { 0x20, IN_DUCK }, { 0x40, IN_SPEED }, { 0x80, IN_WALK },
+	{ 0x100, IN_ATTACK }, { 0x200, IN_ATTACK2 }, { 0x400, IN_RELOAD },
+}
+local FULL = 10000 -- "full stick"; Garry's Mod clamps it to the player's speed
+local view -- the view angles we drive while input comes from Skyrim
+local inputStats = { cmds = 0, dx = 0, dy = 0, buttons = 0 }
+
+hook.Add("StartCommand", "gmsky_input", function(ply, cmd)
+	if ply ~= GetPlayer() then return end
+	local active, buttons, dx, dy = gmsky.ReadInput()
+	if not active then
+		if view then gmsky.Log("input from Skyrim: OFF") end
+		view = nil
+		return
+	end
+	if not view then
+		view = ply:EyeAngles()
+		view.r = 0
+		gmsky.Log("input from Skyrim: ON")
+	end
+	local k = 0.022 * sensitivity:GetFloat()
+	view.y = math.NormalizeAngle(view.y - dx * k)
+	view.p = math.Clamp(view.p + dy * k, -89, 89)
+
+	local b = 0
+	for _, m in ipairs(IN_MAP) do
+		if bit.band(buttons, m[1]) ~= 0 then b = bit.bor(b, m[2]) end
+	end
+	local fwd, side = 0, 0
+	if bit.band(buttons, 0x1) ~= 0 then fwd = fwd + FULL end
+	if bit.band(buttons, 0x2) ~= 0 then fwd = fwd - FULL end
+	if bit.band(buttons, 0x8) ~= 0 then side = side + FULL end
+	if bit.band(buttons, 0x4) ~= 0 then side = side - FULL end
+
+	cmd:ClearButtons()
+	cmd:ClearMovement()
+	cmd:SetButtons(b)
+	cmd:SetForwardMove(fwd)
+	cmd:SetSideMove(side)
+	cmd:SetViewAngles(view)
+
+	inputStats.cmds = inputStats.cmds + 1
+	inputStats.dx = inputStats.dx + dx
+	inputStats.dy = inputStats.dy + dy
+	inputStats.buttons = buttons
+end)
+
 -- Once a second: write what we're sending to the log, so it can be checked from numbers.
 local lastWrites = 0
 timer.Create("gmsky_status", 1, 0, function()
@@ -46,10 +100,13 @@ timer.Create("gmsky_status", 1, 0, function()
 			where = where .. string.format(" moving yaw=%.1f speed=%.0f facing-minus-moving=%.1f", moveYaw, speed, diff)
 		end
 	end
-	gmsky.Log(string.format("tick=%d %s skyrim=%s epoch=%d skyrim_frame=%d writes/s=%d%s",
+	local input = view and string.format(" input=ON cmds/s=%d buttons=0x%x mouse=(%d, %d)",
+		inputStats.cmds, inputStats.buttons, inputStats.dx, inputStats.dy) or " input=off"
+	gmsky.Log(string.format("tick=%d %s skyrim=%s epoch=%d skyrim_frame=%d writes/s=%d%s%s",
 		engine.TickCount(), where, connected and "CONNECTED" or "not connected", epoch, skyrimFrame,
-		writes - lastWrites, err and (" error=" .. err) or ""))
+		writes - lastWrites, input, err and (" error=" .. err) or ""))
 	lastWrites = writes
+	inputStats.cmds, inputStats.dx, inputStats.dy = 0, 0, 0
 end)
 
 -- Load the client side too: new players when they spawn, and anyone already in game now.

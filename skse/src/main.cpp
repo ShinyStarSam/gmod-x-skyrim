@@ -1,3 +1,4 @@
+#include "Input.h"
 #include "Link.h"
 #include "Probe.h"
 
@@ -24,6 +25,7 @@ namespace
 			// If this fails, the per-frame probe retries every 2 s.
 			gmsky::Link::Get().Open();
 			gmsky::Probe::Install();
+			gmsky::Input::Install();
 			break;
 		case SKSE::MessagingInterface::kPostLoadGame:
 		case SKSE::MessagingInterface::kNewGame:

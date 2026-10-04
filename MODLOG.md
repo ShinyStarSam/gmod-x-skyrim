@@ -127,3 +127,27 @@ Skipped: header stuck at INIT if a process dies mid-initialization (tiny window;
 **Result:** builds with no warnings from our code; copied to `Data/SKSE/Plugins`.
 **Still broken / not tested:** nothing tested in game. Not sure: whether the ray cast ignores the player's own capsule as intended (if not, `ground` would read ~player height above the ground and the player would climb each frame: watch `set` z rising while standing still); whether `bAlwaysActive=1` keeps Skyrim fully running in the background; how the first-person camera looks when the position is set every frame.
 **Next:** user's in-game test.
+
+## 2026-10-04 Phase 0 step 6: in-game test — Phase 0 done
+
+**Changed:** `gmsky_protocol.h` comment (Garry's Mod yaw convention now verified), README. No code changes.
+**Tested how:** user set `bAlwaysActive=1`, ran Garry's Mod + `lua_run require("gmsky")`, Skyrim via SKSE with an outdoor save, walked/turned/looked in Garry's Mod, then closed Garry's Mod. Logs copied to `build/logs-ingame-test-3/`.
+**Result:**
+- `PUPPET ON` 0.05 s after origin epoch 1 was published; `sets=` 50–61 per second (= Skyrim's frame rate); `ground ray/land/keep` = ray every frame (land/keep 0).
+- Player walked ~2,000 units and climbed Skyrim's hills (z 6010 → 7290) by the ray-cast ground height. **Standing still, z stayed constant** (6361.4, 7290.3, 6010.1): the ray does not hit the player's own capsule.
+- `max-drift` 0.0–0.5: Skyrim doesn't push back against the puppet. `max-step` 11–13 per frame walking, up to 48 on steep slopes.
+- Closing Garry's Mod: `PUPPET OFF: Garry's Mod not connected (no heartbeat)` within ~1 s.
+- **Garry's Mod yaw convention verified:** walking straight, `facing-minus-moving=0.0` in 11/11 samples; strafing ±90 (89.6, 90.0), diagonals ±45/±135 (42.6, -46.8, 134.6). All conventions now verified.
+**Findings (not code bugs, cause not known yet):**
+1. Skyrim paused ~17 s while Garry's Mod had focus (Garry's Mod logged `skyrim=not connected`; Skyrim frame 319 → 330). When it resumed the puppet made one 1,819-unit `big step` to catch up. Possibly `bAlwaysActive` not yet set at that moment — asked the user.
+2. Garry's Mod froze ~9 s (9.3 s hole in its logs, client frames stopped). Skyrim correctly logged `PUPPET OFF` and took back control, then `PUPPET ON` when Garry's Mod returned. Cause unknown — asked the user.
+**Next:** Phase 1 plan in DESIGN.md, then step 1.1 (input from the Skyrim window).
+
+## 2026-10-04 Phase 1 plan, and step 1.1: input bridge (built, not tested in game)
+
+**Changed:** DESIGN.md "Phase 1 steps". Protocol **version 2**: new `GmskyInput` slot (held actions as bits, running mouse/wheel totals) in `gmsky_protocol.h` and `protocol/src/lib.rs` (`GmskyShared` 248 → 296 bytes). New `skse/src/Input.h/.cpp`; `Puppet::IsActive()`; `Probe.cpp` and `main.cpp` call it. `gmod/module`: `gmsky.ReadInput()`. `server.lua`: `StartCommand` hook and `gmsky_sensitivity` setting (default 3). `client.lua`: `engine_no_focus_sleep 0`. Harness: fakes for the new Garry's Mod functions and 6 new checks.
+**What it does:** while the puppet is on, Skyrim's window is in front and no Skyrim menu has the input, the Skyrim plugin listens to Skyrim's keyboard/mouse and (a) swallows them from Skyrim's own player (`PlayerControls` hook), (b) lets only Esc, ~, J, M, F9 reach Skyrim's menus (`MenuControls` hook), (c) E activates Skyrim's crosshair target, (d) publishes W/A/S/D, Space, Left Ctrl, Left Shift, Left Alt, R, left/right mouse as held actions plus mouse totals. Garry's Mod's `StartCommand` replaces the player's command with them: Garry's Mod buttons, forward/side move, and view angles from the mouse (counts × 0.022 × `gmsky_sensitivity`, pitch clamped ±89). Ignored unless Skyrim rewrote the slot within 250 ms. The mouse wheel is sent but not used yet.
+**Tested how:** `cargo test -p gmsky-protocol`; C++ `protocol_test`; `cargo build --release`; `gmod_harness.exe`; plugin `cmake --build --preset release`.
+**Result:** protocol 4/4 and PROTOCOL TEST PASSED (`sizeof(GmskyShared)=296`); HARNESS PASSED 33/33, including: forward+sprint → buttons 131080 (IN_FORWARD|IN_SPEED), forwardmove 10000; mouse +100/-50 counts → yaw 45→38.40, pitch 10→6.70; `active=0` and 300 ms stale input both leave the command untouched; `engine_no_focus_sleep` set to 0. Plugin built (no warnings from our code) and copied.
+**Still broken / not tested:** nothing tested in game. Not sure: whether server-side `StartCommand` changes are fully honoured in single-player (Garry's Mod's wiki says it is the hook for this); whether `engine_no_focus_sleep` can be set from Lua (the log will say); whether Skyrim's raw mouse counts feel right at sensitivity 3. Both games must be restarted (protocol version 2 refuses to talk to version 1).
+**Next:** user's in-game test.

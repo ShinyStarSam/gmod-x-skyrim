@@ -14,6 +14,9 @@ namespace gmsky::Puppet
 	// fast travel, console). The caller then publishes a new origin.
 	bool SkyrimMovedPlayer(const RE::NiPoint3& a_pos);
 
+	// The puppet moved the player on the latest frame.
+	bool IsActive();
+
 	// Stop puppeting until conditions are met again (game load, new origin).
 	void Reset(const char* a_reason);
 

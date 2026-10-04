@@ -15,7 +15,7 @@
 #define GMSKY_MAP_SIZE 65536u
 #define GMSKY_MAGIC 0x594B534Du      // "MSKY": layout initialized and ready
 #define GMSKY_MAGIC_INIT 0x54494E49u // "INIT": one side is initializing right now
-#define GMSKY_VERSION 1u
+#define GMSKY_VERSION 2u  // 2: added GmskyInput
 #define GMSKY_HEARTBEAT_TIMEOUT_MS 2000u
 
 // GmskyPlayerState.flags
@@ -23,6 +23,19 @@
 #define GMSKY_PF_CROUCHING 0x2u
 #define GMSKY_PF_ALIVE 0x4u
 #define GMSKY_PF_NOCLIP 0x8u
+
+// GmskyInput.buttons: actions held in Skyrim's window (not raw keys; the key choice is Skyrim-side)
+#define GMSKY_IN_FORWARD 0x1u
+#define GMSKY_IN_BACK 0x2u
+#define GMSKY_IN_LEFT 0x4u
+#define GMSKY_IN_RIGHT 0x8u
+#define GMSKY_IN_JUMP 0x10u
+#define GMSKY_IN_DUCK 0x20u
+#define GMSKY_IN_SPEED 0x40u   // sprint
+#define GMSKY_IN_WALK 0x80u
+#define GMSKY_IN_ATTACK 0x100u
+#define GMSKY_IN_ATTACK2 0x200u
+#define GMSKY_IN_RELOAD 0x400u
 
 typedef struct GmskyHeader {
     uint32_t magic;            // GMSKY_MAGIC once initialized
@@ -70,6 +83,19 @@ typedef struct GmskyPlayerState {
     float fov_deg;
 } GmskyPlayerState;
 
+// Skyrim -> Garry's Mod. Input typed into Skyrim's window while Garry's Mod drives the player.
+// Mouse and wheel are running totals, so a reader that misses a write loses nothing: it applies
+// the difference since the totals it saw last.
+typedef struct GmskyInput {
+    uint64_t frame;          // Skyrim frame of this write
+    uint32_t active;         // 1 = route this input to Garry's Mod's player; 0 = ignore it
+    uint32_t buttons;        // GMSKY_IN_* held right now
+    int64_t mouse_x_total;   // mouse counts since Skyrim started, + = right
+    int64_t mouse_y_total;   // + = down
+    int32_t wheel_total;     // wheel notches, + = up
+    uint32_t reserved0;
+} GmskyInput;
+
 // A "latest value" slot guarded by a sequence lock (seqlock):
 // the writer makes seq odd, writes, makes seq even. A reader retries if seq was odd or changed.
 // seq == 0 means "never written".
@@ -83,12 +109,14 @@ typedef struct GmskyPlayerState {
 GMSKY_DEFINE_SLOT(GmskyOriginSlot, GmskyOrigin);
 GMSKY_DEFINE_SLOT(GmskySkyrimStateSlot, GmskySkyrimState);
 GMSKY_DEFINE_SLOT(GmskyPlayerStateSlot, GmskyPlayerState);
+GMSKY_DEFINE_SLOT(GmskyInputSlot, GmskyInput);
 
 typedef struct GmskyShared {
     GmskyHeader header;
     GmskyOriginSlot origin;            // written by Skyrim
     GmskySkyrimStateSlot skyrim_state; // written by Skyrim
     GmskyPlayerStateSlot player_state; // written by Garry's Mod
+    GmskyInputSlot input;              // written by Skyrim
 } GmskyShared;
 
 // ---- Layout checks. The same numbers are asserted in protocol/src/lib.rs. ----
@@ -112,11 +140,15 @@ GMSKY_ASSERT(offsetof(GmskyPlayerState, pos) == 40);
 GMSKY_ASSERT(offsetof(GmskyPlayerState, eye_height) == 64);
 GMSKY_ASSERT(offsetof(GmskyPlayerState, vel) == 80);
 GMSKY_ASSERT(offsetof(GmskyPlayerState, fov_deg) == 92);
+GMSKY_ASSERT(sizeof(GmskyInput) == 40);
+GMSKY_ASSERT(offsetof(GmskyInput, mouse_x_total) == 16);
+GMSKY_ASSERT(offsetof(GmskyInput, wheel_total) == 32);
 GMSKY_ASSERT(offsetof(GmskyOriginSlot, data) == 8);
 GMSKY_ASSERT(offsetof(GmskyShared, origin) == 40);
 GMSKY_ASSERT(offsetof(GmskyShared, skyrim_state) == 80);
 GMSKY_ASSERT(offsetof(GmskyShared, player_state) == 144);
-GMSKY_ASSERT(sizeof(GmskyShared) == 248);
+GMSKY_ASSERT(offsetof(GmskyShared, input) == 248);
+GMSKY_ASSERT(sizeof(GmskyShared) == 296);
 GMSKY_ASSERT(sizeof(GmskyShared) <= GMSKY_MAP_SIZE);
 
 #ifdef __cplusplus
@@ -196,9 +228,9 @@ inline double WrapRad(double r) {
 
 // Skyrim heading: 0 = north (+Y), clockwise seen from above. Source yaw: 0 = +X (east),
 // counter-clockwise. So heading = 90deg - yaw.
-// Skyrim side VERIFIED in game 2026-10-04: walking straight, heading minus movement direction
-// atan2(dx, dy) was 0.0-0.2 deg. Garry's Mod side supported by the first in-game test (straight
-// stretches: moving -18.4 / facing -18.6, moving -90.6 / facing -90.9) but not cleanly isolated yet.
+// VERIFIED in game 2026-10-04 on both sides. Skyrim: walking straight, heading minus movement
+// direction atan2(dx, dy) was 0.0-0.2 deg. Garry's Mod: walking straight, yaw minus atan2(vy, vx)
+// was 0.0 in 11 of 11 samples, and strafing gave +-90 / diagonals +-45, +-135 as predicted.
 inline double GmodYawToSkyrimHeading(double yaw_deg) { return WrapRad((90.0 - yaw_deg) * kPi / 180.0); }
 
 // Both games: positive pitch looks down. VERIFIED in game 2026-10-04: looking straight down gave

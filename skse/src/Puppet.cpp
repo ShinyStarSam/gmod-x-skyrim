@@ -82,6 +82,11 @@ namespace gmsky::Puppet
 		return g_active && g_haveLastSet && a_pos.GetDistance(g_lastSet) > kTeleportThreshold;
 	}
 
+	bool IsActive()
+	{
+		return g_active;
+	}
+
 	void Reset(const char* a_reason)
 	{
 		Off(a_reason);
