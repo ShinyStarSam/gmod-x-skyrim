@@ -316,3 +316,115 @@ Skipped: header stuck at INIT if a process dies mid-initialization (tiny window;
 - The large differences (+981 to +2,676 at 02:56:57–59) are the puppet's fault, not the grid's: sprinting up a ~55° mountainside (feet z 1,290 → 5,712 in 4 s), the Phase 0 ground ray (starts only 100 units above the feet) fell behind and the Skyrim player went *inside* the mountain. Step 3d (height from Garry's Mod's collision) replaces that ray.
 - **Actor hits: up to 8 rays per grid** near NPCs/animals (0 away from them). These would become bumps in the ground. To fix.
 - **gm_largeemptyplane room:** from (−13150, 7438, 106): down 42, **up 3,734**, +x 28,190, −x 2,018, +y 7,218, −y 22,478. As wide as gm_flatgrass (~30,000) but only **~3,776 units tall** (≈7,100 Skyrim units), against 27,600 (≈52,000) for gm_flatgrass. This walk alone covered Skyrim z −351 … 18,928.
+
+## 2026-10-04 Step 3b fix: rays that hit an NPC or animal are cast again (not tested in game)
+
+**Changed:** `Terrain.cpp`: when a ray hits an actor, cast again from 1 unit below the hit (inside the actor) down to the same bottom, up to 3 times; the log line now says `actor hits=N (still on an actor after re-casting: M)`.
+**Tested how:** `cmake --build --preset release` (no warnings from our code; copied to Skyrim).
+**Not sure:** that a Havok ray starting inside an actor's capsule passes out of it (it should: rays report entering a surface, not leaving one). `M` above 0 in the log would mean it doesn't.
+**Next:** tested together with step 3c.
+
+## 2026-10-04 Map: gm_flatmap (user's find)
+
+**Measured** (user loaded it with gmsky running; `gmod_server.log`): from (−32, 32, −16215): down 73, up 32,535, +x 16,352, −x 16,288, +y 16,288, −y 16,352. So x and y −16,320…16,320 and z −16,288…~16,320: the engine's whole ±16,384 box (≈61,000 Skyrim units each way). Workshop item 3669476334. Chosen over gm_largeemptyplane (only ~3,776 tall) and gm_flatgrass (~27,600 tall, a building on the floor).
+**Changed:** launch script's main-menu hint; DESIGN.md §6.
+
+## 2026-10-04 Phase 1 step 3c: Garry's Mod walks on Skyrim's ground (not tested in game)
+
+**Changed:** `terrain.lua`: grids cached by id on both sides (last 4); `T.GridHeight` (bilinear, nil off the grid or on a miss), `T.FootprintTop` (highest ground under the 32×32 hull, 3a's rule), `T.GridMesh` (8,192 triangles, squares touching a miss left out); the `gmsky_terrain` entity also builds from a Skyrim grid (`GridId`), the client as soon as it has that grid; `MeasureRoom` returns "home" = the middle of the map's open space. Server: `T.BeforeAnchor` moves the player home when Skyrim publishes a new origin, so the anchor is there; `T.UpdateGround` builds each new grid for the anchored origin (then removes the old entity), **holds** the player (SetupMove: no velocity, fixed origin) while there's no Skyrim ground under it and Skyrim is connected, releases it 4 above the highest ground under its footprint, and **lifts** it out if it is more than 12 units inside the ground. Status line: `ground: grid N (X ms to build), feet minus ground …, standing on Skyrim's ground/…, lifts, held ticks`. `server.lua` calls these every tick. Module: `gmsky.OriginEpoch()`. Harness: grid height lookup (centre point −11,978.88), 8,190 triangles with one missed corner, entity spawned for grid 7, held then released on top.
+**Skyrim side unchanged** in 3c: Skyrim's player still takes its height from its own ground ray. The PUPPET line's `set=(…, z)` (ray) vs `gmod-as-skyrim z=` (Garry's Mod's height, converted) shows whether Garry's Mod now walks at Skyrim's ground height; that is 3c's test. 3d then switches Skyrim to Garry's Mod's height.
+**Tested how:** `cargo build --release`; `gmod_harness.exe`.
+**Result:** HARNESS PASSED 54/54.
+**Not sure:** entity build time on real grids (3a: 18–25 ms per side; a ~20 ms hitch in Garry's Mod about once a second while moving); whether replacing the ground entity under a moving player causes a stumble; interiors (rays from 4,000 above hit ceilings and roofs: stage A limit, avoid for now).
+**Next:** user's test on gm_flatmap.
+
+## 2026-10-04 In-game test 12 (step 3c): Garry's Mod crashed building the second grid — fix attempt 1 (not tested in game)
+
+**Result (logs: `build/logs-ingame-test-12/`):** user: Garry's Mod crashed when they tried to jump. Before that, 3c worked: `new origin epoch 1: player moved home (0, 0, 16)`, grid 1 arrived 344 ms later, `built Skyrim grid 1: 8192 triangles in 24.6 ms` (client 24.7 ms), `released at z 21.1`, then walking/sprinting from the Skyrim window `standing on Skyrim's ground` with feet 1.6–4.4 above it (Garry's Mod z rose 17.8 → 76.1 going uphill). Then `terrain: grid 2 from Skyrim …` on both sides, and nothing more: no `built Skyrim grid 2`.
+**Crash dump** `GarrysMod/crashes/gmod_win64_20261004_031529_1_accessviolation.mdmp` (read with a small script in the scratchpad: exception, module list, stack words): `0xc0000005` **write** at `0x20ba15f5000` (a page boundary: writing past the end of a block) in **`vphysics.dll+0xaaff0`**; stack, top first: vphysics (98 frames) ← `server.dll+0x2eb909` ← `lua_shared.dll` ← … So our Lua called into Garry's Mod's physics, which crashed: building grid 2's `PhysicsFromMesh` (8,192 triangles in one entity). Grid 1 and three test hills of the same size built fine, so it depends on the data; why is unknown (inside Garry's Mod).
+**Changed (attempt 1):** each grid is built as **16 pieces** (4×4 entities of 16×16 squares = 512 triangles), one per tick, nearest the player first; the old grid's pieces are removed once all 16 exist. Each piece is logged *before* `PhysicsFromMesh` (`terrain: building Skyrim grid N piece K: 512 triangles...`), so a repeat names the piece. The module records each grid the server receives to `logs/terrain/grid_<id>.bin` (raw `GmskyTerrain`, last 20 kept) for replay. A new origin removes all ground. Client status no longer mistakes ground pieces for the test hill. Harness: one piece = 512 triangles; 16 pieces built over 16 ticks, then grid 7 swapped in and the player released; `SysTime` fake.
+**Tested how:** `cargo build --release`; `gmod_harness.exe`.
+**Result:** HARNESS PASSED 56/56; `build/harness/logs/terrain/grid_7.bin` written (16,952 bytes).
+**Not sure:** that smaller pieces avoid the crash. If it crashes again, the log's last `building … piece K` line and the recorded grid file point at the exact data; that would be attempt 2, and per AGENTS.md I stop and write STATUS.md if that fails too.
+
+## 2026-10-04 In-game test 13: crashed again, on the first piece of grid 2 — cause narrowed down
+
+**Result (logs and grids: `build/logs-ingame-test-13/`):** user: crashed "the moment I got close to a fence". Grid 1 built as 16 pieces (23.3 ms in all, slowest 2.6 ms), player released and walking on it (feet 4.3 above). Grid 2 arrived; the last line is `building Skyrim grid 2 piece 10: 512 triangles...`. Crash dump `gmod_win64_20261004_032047_1_accessviolation.mdmp`: the **same** place, `vphysics.dll+0xaaff0`, a write at a page boundary.
+**The data rules out size and shape** (scratchpad `grid.py` on the recorded grids): grid 2 piece 10 is one of the gentlest pieces (largest step between neighbouring points 79 units, z 67–154). Grid 1 built fine with far harsher pieces (steps up to 1,409 units). Pieces of 512 triangles crash just like 8,192.
+**What differs, every time:** grid 2's pieces are created while grid 1's pieces still exist in the same place (the same triangles, overlapping). Grid 1 is built with no ground around it; 3a's test hill was removed *before* the next one was built. Hypothesis: Garry's Mod's physics crashes when a new mesh object is inserted overlapping an existing mesh object (mesh-against-mesh collision). Fits all 5 builds without a crash and both crashes; not yet proven.
+**Changed (fix attempt 2, not tested in game):** pieces never overlap. `Terrain.cpp`: grid centres snap to a 768-unit lattice (one piece = 16 squares × 48); a new grid starts when the lattice point nearest the player changes (so the player is at most ~384 units + travel from the centre; the grid reaches 1,536). `terrain.lua`: pieces are kept by their place on the lattice; each new grid builds only the pieces not yet there (nearest first, one per tick), then removes pieces outside it. A new origin removes everything. Log: `terrain: grid N is the ground now (X new pieces, Y kept, Z removed, … ms)`. Experiment command `gmsky_test_terrain overlap`: builds a second test hill exactly on top of the first without removing it (expect a crash if the hypothesis is right; logs `OVERLAP TEST: building…` / `survived`). Harness: a grid shifted by one piece builds only 4 new pieces (12 kept, 4 removed). HARNESS PASSED 58/58; plugin builds with no warnings from our code, copied.
+**Per AGENTS.md:** this is the second real attempt at the crash; if it still crashes, stop and write STATUS.md.
+
+## 2026-10-04 Experiment: overlapping meshes alone do NOT crash — hypothesis of test 13 wrong
+
+**Tested how:** user, Garry's Mod only (gm_flatmap): `gmsky_test_terrain`, then `gmsky_test_terrain overlap`.
+**Result:** no crash. `gmod_server.log`: `OVERLAP TEST: building test 2 on top of test 1...`, `built test 2: 8192 triangles in 21.8 ms`, `OVERLAP TEST: survived (hypothesis wrong)`. Caveat: the player was **not** touching the hill then (`off it … standing on the map`), so "overlap while the player stands on the old mesh" is still untested.
+**Consequence:** two real attempts at the crash have not held up (smaller pieces: crashed again; overlap: disproved). Per AGENTS.md, stopped and wrote STATUS.md instead of trying more variations. Fix attempt 2 (non-overlapping pieces) stays built but untested in game.
+
+## 2026-10-04 Crash investigation 1–4: the crash is a full 16-bit list inside the physics; replay tool (replay not tested in game)
+
+**Changed:** nothing in how the ground is built. Investigation only:
+- `gmod/module/src/lib.rs`: `gmsky.ReadGridFile(path)` reads a recorded `grid_<id>.bin` (project-relative path, no `..`) and returns the same values as `ReadTerrain`, or `false, error`.
+- `gmod/lua/gmsky/terrain.lua`: console command `gmsky_replay` (`<id> [dir]`, `order near|far`, `piece <id> <k> here|away`, `repeat <id> <k> <count>`, `clear`); replay mode acts as if Skyrim were connected. Every `building …` log line now adds the build number and triangle total on that side, and whether the player is over that mesh (distance from its middle, on the ground or in the air). In replay mode each build also logs `built …` after it returns. Pieces can be built farthest-first (`T.buildOrder`).
+- Harness: fake `concommand` keeps its function, fake `hook.Remove`, velocity as a Vector; 3 new checks.
+**Why:** STATUS.md troubleshooting steps 1–4.
+**Step 1 result (crash dumps, read-only, scratchpad `stackcheck.py`, `regs.py`, `stackwords.py`; vphysics.dll disassembled with `dumpbin`):**
+- **Not a stack overflow.** The crashing thread (the main thread) used ~36 KB of its 1 MB stack; the write target (`0x20ba15f5000`, `0x25b8f017000`) is a heap address, not the stack.
+- The real call chain is 13 vphysics frames under one call from `server.dll+0x2eb909` (our `PhysicsFromMesh`); the "98 vphysics frames" in STATUS.md were stale values further up the stack, not real calls. Nothing in the chain is about the player or other objects; it is all inside the mesh-to-collision conversion (not certain without symbols).
+- The crashing function (`vphysics.dll+0xaaed0`) adds an item to a sorted list (float key + pointer, 24 bytes per item) that numbers its items with **16-bit numbers**. When full it doubles, capped at 65,532 items. Registers at the crash, identical in both dumps: `rbp=0xfffd`, `r12=0xffff`, `r13=0xfffe`, `rcx=0x2fff7` (= 3 × 0xfffd). So the list was already at its cap, could not grow, and the item was written just past the end of its memory block: the page-boundary write. **Something put ~65,533 items in this list while converting a 512-triangle piece**, or the list keeps items from earlier builds.
+- Recorded grids (scratchpad `flat.py`): no misses, NaN or infinities; grid 2 piece 10 is unremarkable (6 of 256 squares perfectly flat, 216 distinct heights; grid 1's pieces have 0–61 flat squares and 159–289 distinct heights). Nothing in the data explains it yet.
+**Tested how:** `cargo build --release`; `gmod_harness.exe`.
+**Result:** HARNESS PASSED 61/61. The test 13 grid files are 16,952 bytes, the size the reader expects.
+**Not tested:** `gmsky_replay` in the real game; whether test 13's crash repeats with the replay.
+**Next:** the user runs the replay tests (STATUS.md).
+
+## 2026-10-04 Replay test (user, one session, several tests in a row): crashed — same crash, piece under the player
+
+**Result (logs still in `logs/`, not yet copied; dump `gmod_win64_20261004_034822_1_accessviolation.mdmp`):** same crash, same registers (`0xfffd/0xfffe/0xffff`), same call chain. In the session:
+- `replay 1` (16 pieces, player held over 4 of them, 40 above): OK. `replay 2` (7 new pieces, one with the player OVER it, feet exactly on its surface): OK.
+- **Test C passed:** `piece 2 10 away` (test 13's crash piece, nobody near it): built, "extra copy survived". So that piece's data alone does not crash.
+- `order far`, `replay 1`, `replay 2`: crashed on **grid 2 piece 15, the piece under the player** (10 units from its middle; the 7 pieces before it built fine; 38th build on the server). Player held in the air at z 58.0; grid 2 ground under its footprint 56.0–58.0: feet on the new surface (0.0). The no-crash piece 5 above had the same (0.0). So "player on the new mesh" happens in both the crash and a non-crash; not the whole answer yet.
+- **Replay is not exact for test 13:** test 13's grids are not on the 768-unit lattice (recorded before fix attempt 2), and `PieceKey` rounding treated 9 of grid 2's pieces as "kept" from grid 1 although they are in a different place. Grid 2 piece 10 was never rebuilt in place. Fix attempt 2's reuse must only match pieces that line up exactly (not rounding). Not fixed yet.
+- Build count is not the trigger alone: a crash on the 38th server build here, on the 17th (first of grid 2) in test 13.
+**Next:** see STATUS.md.
+
+## 2026-10-04 Fix: piece reuse only for pieces exactly on the lattice (replay now matches test 13)
+
+**Changed:** `terrain.lua` `PieceKey`: a piece more than 1 unit off the lattice gets a key of its own grid (`g<id>:ci:cj`) instead of being rounded onto a lattice place, so it is never "kept" in place of a piece somewhere else. Harness: grid 9, half a piece off the lattice, builds all 16 pieces (0 kept, 16 removed).
+**Why:** the replay showed test 13's grids (recorded before Skyrim snapped grid centres) being rounded: 9 of grid 2's pieces were treated as already built.
+**Tested how:** `cargo build --release`; `gmod_harness.exe`. **Result:** HARNESS PASSED 63/63.
+**Also:** the replay session's logs and dump saved to `build/logs-ingame-test-14/`.
+**Not tested in game.**
+
+## 2026-10-04 Replay tests A, B, E (user): no crash. The crash is in "collision rules changed", not PhysicsFromMesh
+
+**Result (logs: `TEMP LOGS TEST A/B/E/`, each a fresh Garry's Mod):**
+- **A** (`replay 1`, walk, `replay 2`, now with the lattice fix): grid 2 built in full (16 new, 16 removed, 18.9 ms), player standing still on the ground over pieces 4 and 8. No crash. Test 13's player was sprinting (speed 400) over piece 10's corner.
+- **B** (`piece 1 10 here`, player standing on it): survived.
+- **E** (`repeat 1 10 60`): all 60 copies built, 76 builds and ~39,000 triangles per side; survived. **Builds piling up is ruled out** (test 13 crashed on the 17th build).
+**Crash call site read (server.dll, read-only, dumpbin):** the return address `server.dll+0x2eb909` is in the function at `0x2eb870`, which checks the entity's physics object, warns "Changing collision rules within a callback is likely to cause crashes!" if inside a physics callback, gets up to 1,024 physics objects, and calls one method on each. That is Source's `CBaseEntity::CollisionRulesChanged()` calling `RecheckCollisionFilter()` (the method slot matches the SDK's order; the warning text confirms the function). So the crash is not inside `PhysicsFromMesh`, but in a call after it that changes collision rules: `SetSolid` or `EnableCustomCollisions` (both normally do). The physics then recomputes the new object's collision pairs, which involve the player's physics body when it is on the spot; the overflowing 16-bit list is in that.
+**Changed:** in replay mode, `BuildCollision` logs a line before `SetSolid`, `SetMoveType`, `EnableCustomCollisions` and the rest, so a crash names the call. `gmsky_replay hold <x> <y> <z>` / `hold off` puts and holds the player at an exact spot (to recreate test 14's crash position).
+**Tested how:** `gmod_harness.exe`: HARNESS PASSED 63/63 (the harness does not run `BuildCollision`). **Not tested in game.**
+**Next:** recreate test 14's crash exactly; if it repeats, try creating the entity solid and with its flags set *before* `PhysicsFromMesh`, so no collision-rules re-check happens on a live mesh.
+
+## 2026-10-04 Crash fix candidate: make the ground solid before its mesh exists (not tested in game)
+
+**Changed:** `terrain.lua` `BuildCollision`: with `gmsky_solid_first 1` (new default, saved, replicated to the client side) `SetSolid`, `SetMoveType` and `EnableCustomCollisions` run *before* `PhysicsFromMesh`, so Garry's Mod's collision-rules re-check never runs on a live mesh; `0` = the old order. A log line before each call (always, for now), and `built …` is always logged with the final `solid=` and `flags=` (expect solid=6). `gmsky_reuse_pieces 0` (not saved, back to 1 on every start) rebuilds all 16 pieces of every grid, as in tests 12/13, so fix attempt 2's reuse can't hide the crash. Harness: fake `FCVAR_REPLICATED`.
+**Why:** the crash is in `CollisionRulesChanged` → `RecheckCollisionFilter` (previous entry). User prefers testing with Skyrim running (tests 12/13 crashed at grid 2, 2 of 2).
+**Tested how:** `gmod_harness.exe`: HARNESS PASSED 63/63 (does not run `BuildCollision`). **Not tested in game.**
+**Not sure:** that `PhysicsFromMesh` keeps the solid type and flags set before it (the `built` line's `solid=`/`flags=` and "standing on Skyrim's ground" will show it).
+
+## 2026-10-04 In-game test 15 (Skyrim + Garry's Mod, `gmsky_reuse_pieces 0`, solid first): crashed the same way — solid-first reverted
+
+**Result (logs, grids and dump: `build/logs-ingame-test-15/`):** grid 1 built and walked on; grid 2 (one piece west, on the lattice) arrived; first piece built = piece 11, player OVER it (72 units from its middle), on the ground, walking (speed ~208). Last log line: `Skyrim grid 2 piece 11: PhysicsFromMesh...`. Dump `gmod_win64_20261004_170725_1_accessviolation.mdmp`: same instruction, same full 16-bit list (`rbp=0xfffd`, `r12=0xffff`, `r13=0xfffe`). The inner chain (`0xa0728` … `0x97c9b` → list add) is the same as before; it is now reached from object creation inside `PhysicsFromMesh` (`server.dll` → `vphysics.dll+0x1b687` … `+0x9736c`) instead of from `CollisionRulesChanged` (`+0x98cfc`). So the overflowing list belongs to the physics step that works out the new object's collision pairs with what touches it, which both paths run. Making the entity solid first only moved the crash.
+**Changed:** solid-first and `gmsky_solid_first` removed (back to the original order); the step log lines stay. `gmsky_reuse_pieces` stays (default 1, not saved).
+**Pattern over all runs** (from logs): a piece built under the player crashed 4 times (tests 12, 13, 15: player walking/sprinting/jumping on the old ground; replay test 14: player held after noclip). It did not crash with the player held still at "home" (grid 1, every run), standing still (replay A, B), or held still (replay 14 piece 5). Pieces away from the player never crashed (hundreds). Leading explanation, **not proven**: the crash needs a new ground mesh created where the player's physics body is touching it while that body is moving.
+**Tested how:** `gmod_harness.exe`: HARNESS PASSED 63/63.
+
+## 2026-10-04 In-game test 16: piece reuse on (fix attempt 2) — no crash in 65 grids; cleanup
+
+**Result (logs: `build/logs-ingame-test-16/`):** Skyrim + Garry's Mod, defaults (`gmsky_reuse_pieces 1`). User walked/sprinted ~2 minutes: grids 1–65, no crash. Grid 1: 16 pieces (22.7 ms); every later grid: `4 new pieces, 12 kept, 4 removed`, 4.6–6.7 ms, 44–81 ms from arrival. 272 builds on each side (client built all of them too). The only piece built with the player over it was grid 1's, with the player held at home (as in every run). Every piece reported `solid=6 flags=3`. One `LIFT: player was 125.8 below the ground` at (−1923, −825) after falling at speed ~493 (sprinting downhill, input in the other window): put back on top, then walking normally.
+**Client error:** the user saw a client-side Lua error before closing. Our client status timer stopped logging at ~1,907 s while the game ran to ~1,932 s and Skyrim was still connected, so it was probably that timer failing (Garry's Mod deletes a timer whose function errors), not Skyrim closing. Cause not found in the code. **Changed:** the client status timer catches errors and logs `ERROR in client status: …` (and keeps running).
+**Changed (cleanup):** the per-call debug lines in `BuildCollision` removed; `built …` is logged only on failure, for test hills and in replay mode (it now includes `solid=`/`flags=`). README: step 3c works; known gaps listed.
+**Tested how:** `gmod_harness.exe`: HARNESS PASSED 63/63.
+**Not handled:** running off the built ground faster than new grids arrive would build a piece under a moving player (the crash case). Not seen in test 16.

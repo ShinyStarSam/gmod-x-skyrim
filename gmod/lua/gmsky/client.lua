@@ -23,9 +23,14 @@ local function NoFocusCap()
 	return cv and cv:GetString() or "(no such setting)"
 end
 
+-- A Lua error inside a timer makes Garry's Mod delete the timer (this one stopped mid-session in
+-- the first test with piece reuse on), so errors are caught and logged here instead.
 timer.Create("gmsky_client_status", 5, 0, function()
-	gmsky.Log(string.format("client frames in last 5 s: %d (%.0f fps) fps_max_nofocus=%s%s",
-		frames, frames / 5, NoFocusCap(), gmsky.terrain and gmsky.terrain.Status(LocalPlayer()) or ""))
+	local ok, err = pcall(function()
+		gmsky.Log(string.format("client frames in last 5 s: %d (%.0f fps) fps_max_nofocus=%s%s",
+			frames, frames / 5, NoFocusCap(), gmsky.terrain and gmsky.terrain.Status(LocalPlayer()) or ""))
+	end)
+	if not ok then gmsky.Log("ERROR in client status: " .. tostring(err)) end
 	frames = 0
 end)
 

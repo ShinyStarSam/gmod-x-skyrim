@@ -1,8 +1,9 @@
 # Starts Garry's Mod for gmsky testing: windowed, and ALWAYS -insecure (VAC off, cannot join secure
 # servers). Steam must be running. By default it stops at the main menu: pick Start New Game ->
-# gm_largeemptyplane (Workshop item 1314012230, flat, no obstructions), single player. A Workshop
-# map can't be started from this command line: `+map gm_largeemptyplane` failed with "No such map"
-# (2026-10-04; Workshop content is mounted only after the menu loads, as far as we can tell).
+# gm_flatmap (Workshop item 3669476334: open space to the engine's limit in every direction,
+# ~32,600 units, measured 2026-10-04), Single Player. A Workshop map can't be started from this
+# command line: `+map gm_largeemptyplane` failed with "No such map" (2026-10-04; Workshop content
+# is mounted only after the menu loads, as far as we can tell).
 # -Map <name> starts a built-in map directly, e.g. -Map gm_flatgrass.
 # gmsky loads by itself once you're in the map (garrysmod/lua/autorun/server/gmsky_autoload.lua,
 # installed once by tools/install_gmod_autoload.ps1). Without that file: press ~ and type
@@ -24,7 +25,7 @@ if ($Map) { $gameArgs += @("+maxplayers", "1", "+map", $Map) }
 Write-Output "Starting: $exe $($gameArgs -join ' ')"
 Start-Process -FilePath $exe -ArgumentList $gameArgs -WorkingDirectory $GmodDir
 if (-not $Map) {
-    Write-Output "At the main menu: Start New Game -> gm_largeemptyplane, Single Player -> Start Game."
+    Write-Output "At the main menu: Start New Game -> gm_flatmap, Single Player -> Start Game."
 }
 if (Test-Path (Join-Path $GmodDir "garrysmod\lua\autorun\server\gmsky_autoload.lua")) {
     Write-Output "gmsky loads by itself once you're in the map (check: logs\gmod_server.log)."

@@ -84,6 +84,7 @@ function timer.Simple(delay, fn) HARNESS_SIMPLE = fn end
 function RunConsoleCommand(name, value) HARNESS_CONVARS = HARNESS_CONVARS or {}; HARNESS_CONVARS[name] = value end
 function GetConVar(name) local v = (HARNESS_CONVARS or {})[name]; return v and { GetString = function() return v end } end
 FCVAR_ARCHIVE = 128
+FCVAR_REPLICATED = 8192
 function CreateConVar(name, default) return { GetFloat = function() return tonumber(default) end, GetBool = function() return tonumber(default) ~= 0 end } end
 function math.NormalizeAngle(a) return (a + 180) % 360 - 180 end
 function math.Clamp(v, lo, hi) return math.max(lo, math.min(hi, v)) end
@@ -104,8 +105,18 @@ function HARNESS_NEW_CMD()
 end
 function IsValid(x) return x ~= nil end
 scripted_ents = { Register = function(t, name) HARNESS_SENT_CLASS = name end }
-concommand = { Add = function(name) HARNESS_CONCOMMAND = name end }
+concommand = { _c = {}, Add = function(name, fn) HARNESS_CONCOMMAND = name; concommand._c[name] = fn end }
+function hook.Remove(ev, name) if hook._h[ev] then hook._h[ev][name] = nil end end
 ents = { FindByClass = function() return {} end }
+function ents.Create(class)
+	local e = { class = class }
+	function e:SetPos(p) self.pos = p end
+	function e:SetGridId(id) self.gridId = id end
+	function e:SetPiece(k) self.piece = k HARNESS_PIECES = (HARNESS_PIECES or 0) + 1 end
+	function e:Spawn() HARNESS_SPAWNED = self end
+	function e:Remove() self.removed = true end
+	return e
+end
 function LocalPlayer() return HARNESS_PLY end
 local V = {}
 V.__index = V
@@ -113,6 +124,7 @@ function Vector(x, y, z) return setmetatable({ x = x or 0, y = y or 0, z = z or 
 V.__add = function(a, b) return Vector(a.x + b.x, a.y + b.y, a.z + b.z) end
 V.__sub = function(a, b) return Vector(a.x - b.x, a.y - b.y, a.z - b.z) end
 V.__mul = function(a, k) return Vector(a.x * k, a.y * k, a.z * k) end
+V.__unm = function(a) return Vector(-a.x, -a.y, -a.z) end
 function V:Length() return math.sqrt(self.x * self.x + self.y * self.y + self.z * self.z) end
 util = { TraceLine = function() return { Hit = false, HitPos = Vector() } end }
 game = { GetMap = function() return "harness" end }
@@ -124,7 +136,7 @@ local ply = {}
 function ply:GetPos() return vec(100 + t, 50, -12700) end
 function ply:EyeAngles() return { p = 10, y = 45, r = 0 } end
 function ply:SetEyeAngles(a) HARNESS_EYE = { p = a.p, y = a.y } end
-function ply:GetVelocity() return vec(66, 0, 0) end
+function ply:GetVelocity() return Vector(66, 0, 0) end
 function ply:IsOnGround() return true end
 function ply:Crouching() return false end
 function ply:Alive() return true end
@@ -132,10 +144,14 @@ function ply:GetMoveType() return MOVETYPE_WALK end
 function ply:EyePos() return vec(100 + t, 50, -12700 + 64) end
 function ply:GetFOV() return 75 end
 function ply:SendLua(s) HARNESS_SENT_LUA = s end
+function ply:SetPos(p) HARNESS_SETPOS = p end
+function ply:SetVelocity() end
+function ply:GetGroundEntity() return nil end
 player = { GetAll = function() return { ply } end }
 HARNESS_PLY = ply
 engine = { TickCount = function() return t end, TickInterval = function() return 0.015 end }
 function CurTime() return HARNESS_TIME or 0 end
+function SysTime() return os.clock() end
 function HARNESS_ADVANCE() t = t + 1 end
 "#;
 
@@ -326,6 +342,42 @@ fn main() {
             lua.run(ls, "hook.Run('Think')").unwrap();
             let r = lua.run(ls, "local g = gmsky.terrain.grid return string.format('%d %d %d %.1f %d', g.id, g.n, #g.h, g.h[2], g.h[1] ~= g.h[1] and 1 or 0)");
             check(r == Ok(Some("7 65 4225 -12000.0 1".into())), &format!("terrain grid reaches Lua: {r:?}"));
+            // Step 3c: height lookup (centre point = index 32*65+32), mesh without the missed corner.
+            let r = lua.run(ls, "local T, g = gmsky.terrain, gmsky.terrain.grid                 local v = T.GridMesh(g) return string.format('%.2f %d %s', T.GridHeight(g, 100, 50), #v / 3, tostring(T.GridHeight(g, 100 + 2000, 50)))");
+            check(r == Ok(Some("-11978.88 8190 nil".into())), &format!("grid height lookup and mesh: {r:?}"));
+            // Piece 2 of 16 (ci 0, cj 1): squares j 16..31 only.
+            let r = lua.run(ls, "local v = gmsky.terrain.GridMesh(gmsky.terrain.grid, 0, 1) return tostring(#v / 3)");
+            check(r == Ok(Some("512".into())), &format!("one piece is 16 x 16 squares: {r:?}"));
+            // The next 16 ticks build the 16 pieces (one per tick); then the held player is released on top.
+            lua.run(ls, "HARNESS_PIECES = 0 for k = 1, 16 do HARNESS_ADVANCE() hook.Run('Tick') end").unwrap();
+            let r = lua.run(ls, "return string.format('%s %d %d %.1f %.1f', HARNESS_SPAWNED.class, HARNESS_SPAWNED.gridId, HARNESS_PIECES, HARNESS_SPAWNED.pos.x, HARNESS_SETPOS.z)");
+            let ok = matches!(&r, Ok(Some(s)) if s.starts_with("gmsky_terrain 7 16 100.0 -119"));
+            check(ok, &format!("16 pieces built for grid 7, player lifted onto it: {r:?}"));
+            // Grid 8, one piece (16 x 25.5 units) further along x: 4 new pieces, 12 kept, 4 removed.
+            t.id = 8;
+            t.center = [100.0 + 16.0 * 25.5, 50.0];
+            sky.shared().terrain.write(&t);
+            lua.run(ls, "HARNESS_PIECES = 0 hook.Run('Think') for k = 1, 6 do HARNESS_ADVANCE() hook.Run('Tick') end").unwrap();
+            let r = lua.run(ls, "return tostring(HARNESS_PIECES)");
+            check(r == Ok(Some("4".into())), &format!("grid 8 builds only the 4 new pieces: {r:?}"));
+            // Grid 9, half a piece off the lattice (like test 13's grids): nothing reused, all 16 built.
+            t.id = 9;
+            t.center = [100.0 + 24.0 * 25.5, 50.0];
+            sky.shared().terrain.write(&t);
+            lua.run(ls, "HARNESS_PIECES = 0 hook.Run('Think') for k = 1, 18 do HARNESS_ADVANCE() hook.Run('Tick') end").unwrap();
+            let r = lua.run(ls, "return tostring(HARNESS_PIECES)");
+            check(r == Ok(Some("16".into())), &format!("grid 9 off the lattice builds all 16 pieces: {r:?}"));
+            // Crash investigation: a recorded grid file reads back as the grid that was sent.
+            let r = lua.run(ls, "local id, e, n, cx, cy, sp, m, h = gmsky.ReadGridFile('build/harness/logs/terrain/grid_7.bin')                 return string.format('%d %d %d %.1f %.1f %.1f %d %d %.1f', id, e, n, cx, cy, sp, m, #h, h[2])");
+            check(r == Ok(Some("7 1 65 100.0 50.0 25.5 1 4225 -12000.0".into())), &format!("ReadGridFile reads a recorded grid: {r:?}"));
+            let r = lua.run(ls, "local ok, err = gmsky.ReadGridFile('../secret.bin') return tostring(ok) .. ' ' .. err");
+            check(r == Ok(Some("false bad path \"../secret.bin\"".into())), &format!("ReadGridFile refuses '..': {r:?}"));
+            // gmsky_replay 7: loads it, tells the client to load it, holds the player above it;
+            // "order far" builds a corner piece first; "clear" leaves replay mode.
+            let r = lua.run(ls, "local T = gmsky.terrain local run = concommand._c.gmsky_replay                 run(nil, nil, { 'order', 'far' }) run(nil, nil, { '7', 'build/harness/logs/terrain' })                 local held = T.holding HARNESS_ADVANCE() hook.Run('Tick')                 local piece = HARNESS_SPAWNED.piece run(nil, nil, { 'clear' }) run(nil, nil, { 'order', 'near' })                 return string.format('%s %s %d %s %s', tostring(held), HARNESS_SENT_LUA, piece, tostring(T.replay), tostring(T.holding))");
+            let ok = matches!(&r, Ok(Some(s)) if (s.starts_with("true gmsky.terrain.ReplayLoad(7, \"build/harness/logs/terrain\") 1 ")
+                || s.starts_with("true gmsky.terrain.ReplayLoad(7, \"build/harness/logs/terrain\") 4 ")) && s.ends_with(" nil false"));
+            check(ok, &format!("gmsky_replay: load, client told, held, farthest piece first, cleared: {r:?}"));
         }
 
         // 9. The auto-loader (garrysmod/lua/autorun/server): waits for the player's first real
@@ -359,6 +411,11 @@ fn main() {
     let server_log = std::fs::read_to_string(log_dir.join("gmod_server.log")).unwrap_or_default();
     check(server_log.contains("server.lua loaded"), "gmod_server.log: server.lua loaded");
     check(server_log.contains("ran gmod/lua/gmsky/terrain.lua"), "gmod_server.log: terrain.lua runs on the server");
+    check(server_log.contains("terrain: grid 7 is the ground now (16 new pieces, 0 kept, 0 removed"), "gmod_server.log: grid 7 built as 16 pieces");
+    check(server_log.contains("terrain: grid 8 is the ground now (4 new pieces, 12 kept, 4 removed"), "gmod_server.log: grid 8 reuses 12 pieces");
+    check(server_log.contains("terrain: grid 9 is the ground now (16 new pieces, 0 kept, 16 removed"), "gmod_server.log: grid 9 off the lattice reuses nothing");
+    check(server_log.contains("terrain: HOLD at") && server_log.contains("terrain: ground ready under the player (grid 7): released at z"),
+          "gmod_server.log: held without ground, released when grid 7 is built");
     check(server_log.contains("terrain: grid 7 from Skyrim (origin epoch 1): 65x65 points 25.5 apart, centre (100.0, 50.0), ground z -12000.0..-11957.8, 1 misses (1 NaN)"),
           "gmod_server.log: terrain grid logged");
     check(server_log.contains("new origin epoch 1"), "gmod_server.log: new origin epoch 1");

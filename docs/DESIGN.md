@@ -98,10 +98,13 @@ differences are scale and where the origin is.
 
 ## 6. The Garry's Mod side
 
-- Runs a normal **single-player** game on an empty map: `gm_largeemptyplane` (Workshop item
-  1314012230, subscribed by the user 2026-10-04: flat, no obstructions), started from the main
-  menu (a Workshop map can't be started from the command line: "No such map"; `-Map gm_flatgrass`
-  in the launch script starts the old one directly), playing in the empty air space above the floor. Its size is
+- Runs a normal **single-player** game on an empty map: **`gm_flatmap`** (Workshop item
+  3669476334, user's find 2026-10-04), started from the main menu (a Workshop map can't be started
+  from the command line: "No such map"). Measured room (Garry's Mod units): x −16,320…16,320,
+  y −16,320…16,320, floor −16,288, ceiling ~16,320: the engine's whole ±16,384 box, ≈61,000
+  Skyrim units each way. Compared: gm_flatgrass ~30,700 wide × 27,600 tall; gm_largeemptyplane
+  ~30,200 wide but only ~3,776 tall (≈7,100 Skyrim units; too low: one walk in test 11 covered
+  19,000 Skyrim units of height). The player lives in the empty air in the middle of the box. Its size is
   logged on every load (`terrain: map … room …`); gm_flatgrass's was measured in test 10.
 - NPC spawning off; time of day and weather come from Skyrim (later phases).
 - **Collision:** the Skyrim plugin sends small blocks of ground shape (triangle meshes, per 16×16
@@ -332,6 +335,14 @@ Goal: play from the Skyrim window with Garry's Mod movement on Skyrim's real gro
      the whole 32×32 footprint (the centre alone left the player stuck in a slope). Safety rule
      for 3c: with no Skyrim ground under the player yet, hold the Garry's Mod player in place
      rather than let it fall ~13,000 units to the map floor.
+     **3c as built (done 2026-10-04, test 16):** the ground is 4×4 pieces of 16×16 squares
+     (512 triangles each), one `PhysicsFromMesh` entity per piece, one piece per tick, nearest
+     the player first. Skyrim snaps grid centres to a lattice one piece wide, so a new grid
+     shares 12 pieces with the old one; only the 4 new ones are built, and pieces outside the new
+     grid are removed. **Rule: never build a piece under a moving player.** Garry's Mod's physics
+     crashes then (a 16-bit list overflows while it works out what the new object touches;
+     STATUS.md "Known engine bug"). Reuse keeps the piece under the player during normal
+     movement; outrunning the grid is not handled yet.
    - **3d. The puppet uses Garry's Mod's height**; the ground ray is removed. Test: jump, crouch,
      walk up and down hills; Skyrim z follows Garry's Mod z.
 4. **Camera.** Skyrim's camera from Garry's Mod's eye (crouch height, view bob) and FOV.

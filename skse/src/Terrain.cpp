@@ -2,8 +2,11 @@
 //
 // SkyCraft's "stage A": a grid of rays straight down through Skyrim's physics world (terrain, rocks,
 // buildings' roofs), 65 x 65 points 48 Skyrim units apart, centred on the player. The rays are
-// spread over frames (a time budget per frame); the grid is published only when complete. A new
-// grid starts when the player is more than 768 units from the last centre, or the origin changes.
+// spread over frames (a time budget per frame); the grid is published only when complete.
+// Grid centres sit on a fixed lattice of 768 units (one Garry's Mod piece of 16 x 16 squares), so
+// the pieces of different grids line up exactly and Garry's Mod reuses them instead of building
+// overlapping copies (test 13: inserting a mesh over an existing one crashed its physics). A new
+// grid starts when the lattice point nearest the player changes, or the origin changes.
 // Only the top surface of each column is seen (no arches or interiors yet), as SkyCraft's stage A.
 #include "Terrain.h"
 
@@ -16,7 +19,7 @@ namespace gmsky::Terrain
 	{
 		constexpr int kN = GMSKY_TERRAIN_N;
 		constexpr float kSpacing = 48.0f;    // Skyrim units between points
-		constexpr float kRecenter = 768.0f;  // new grid when the player is this far from the last centre
+		constexpr float kLattice = 16 * kSpacing;  // grid centres are multiples of this (768)
 		constexpr float kRayAbove = 4000.0f;  // rays run from this far above the player's feet...
 		constexpr float kRayBelow = 4000.0f;  // ...to this far below
 		constexpr double kBudgetMs = 1.5;    // ray casting time per frame
@@ -41,7 +44,7 @@ namespace gmsky::Terrain
 			double cx = 0.0, cy = 0.0;  // Skyrim x, y of the centre point
 			float refZ = 0.0f;          // the player's feet when the grid started
 			int next = 0;               // next point to cast
-			uint32_t misses = 0, actorHits = 0, frames = 0;
+			uint32_t misses = 0, actorHits = 0, actorLeft = 0, frames = 0;
 			double castMs = 0.0, startMs = 0.0;
 			std::array<float, kN * kN> z{};  // Skyrim z, NaN = no hit
 		};
@@ -123,9 +126,9 @@ namespace gmsky::Terrain
 			g_done.z = g_job.z;
 			++g_published;
 			const int rays = kN * kN;
-			g_lastGrid = fmt::format("grid {} at ({:.0f}, {:.0f}) epoch {}: {} rays in {:.1f} ms casting ({:.1f} us each) over {} frames, {:.0f} ms from start; misses={} actor hits={}; ground z {:.1f}..{:.1f}",
+			g_lastGrid = fmt::format("grid {} at ({:.0f}, {:.0f}) epoch {}: {} rays in {:.1f} ms casting ({:.1f} us each) over {} frames, {:.0f} ms from start; misses={} actor hits={} (still on an actor after re-casting: {}); ground z {:.1f}..{:.1f}",
 				g_out.id, g_job.cx, g_job.cy, g_job.epoch, rays, g_job.castMs, 1000.0 * g_job.castMs / rays, g_job.frames,
-				NowMs() - g_job.startMs, g_job.misses, g_job.actorHits, zMin, zMax);
+				NowMs() - g_job.startMs, g_job.misses, g_job.actorHits, g_job.actorLeft, zMin, zMax);
 			logger::info("TERRAIN published {}", g_lastGrid);
 			g_job.running = false;
 		}
@@ -160,17 +163,16 @@ namespace gmsky::Terrain
 			g_job.running = false;  // the origin changed under the grid: start again
 		}
 		if (!g_job.running) {
-			const bool stale = !g_done.valid || g_done.epoch != a_origin.epoch ||
-			                   std::hypot(pos.x - g_done.cx, pos.y - g_done.cy) > kRecenter;
+			const double lx = std::round(pos.x / kLattice) * kLattice, ly = std::round(pos.y / kLattice) * kLattice;
+			const bool stale = !g_done.valid || g_done.epoch != a_origin.epoch || lx != g_done.cx || ly != g_done.cy;
 			if (!stale) {
 				return;
 			}
 			g_job = Job{};
 			g_job.running = true;
 			g_job.epoch = a_origin.epoch;
-			// Centre on a multiple of the spacing, so grids overlap point for point.
-			g_job.cx = std::round(pos.x / kSpacing) * kSpacing;
-			g_job.cy = std::round(pos.y / kSpacing) * kSpacing;
+			g_job.cx = lx;
+			g_job.cy = ly;
 			g_job.refZ = pos.z;
 			g_job.startMs = NowMs();
 		}
@@ -183,9 +185,16 @@ namespace gmsky::Terrain
 			const float x = float(g_job.cx + (i - half) * kSpacing), y = float(g_job.cy + (j - half) * kSpacing);
 			float z = 0.0f;
 			bool actor = false;
-			if (CastDown(a_player, x, y, g_job.refZ + kRayAbove, g_job.refZ - kRayBelow, z, actor)) {
+			bool hit = CastDown(a_player, x, y, g_job.refZ + kRayAbove, g_job.refZ - kRayBelow, z, actor);
+			// An NPC or animal isn't ground (test 11: up to 8 rays per grid hit one). Cast again from
+			// just inside it: a ray starting inside a shape passes out of it, down to what's below.
+			for (int retry = 0; hit && actor && retry < 3; ++retry) {
+				++g_job.actorHits;
+				hit = CastDown(a_player, x, y, z - 1.0f, g_job.refZ - kRayBelow, z, actor);
+			}
+			if (hit) {
 				g_job.z[g_job.next] = z;
-				g_job.actorHits += actor ? 1 : 0;
+				g_job.actorLeft += actor ? 1 : 0;
 			} else {
 				g_job.z[g_job.next] = std::numeric_limits<float>::quiet_NaN();
 				++g_job.misses;

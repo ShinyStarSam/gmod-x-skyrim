@@ -43,7 +43,20 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   `garrysmod/lua/autorun/server/gmsky_autoload.lua`, installed once with
   `tools/install_gmod_autoload.ps1`, loads gmsky in single-player once you're in the map.
 
+- **Garry's Mod walks on Skyrim's ground** (tested in game 2026-10-04, Phase 1 step 3c, test 16):
+  Skyrim measures the ground around the player and Garry's Mod builds it as invisible collision,
+  so Garry's Mod's own movement walks Skyrim's hills (on gm_flatmap). 65 ground updates in one
+  session with no crash; each update builds only the 4 new pieces at the edge (~5 ms) and keeps
+  the 12 it already has. Building a new piece under the moving player crashes Garry's Mod's
+  physics, so pieces under the player are never rebuilt; `gmsky_reuse_pieces 0` turns that off
+  and is only for testing.
+
 ## What doesn't work yet
+
+- Sprinting fast downhill can drop the Garry's Mod player through the ground for a moment; it is
+  put back on top within a second (seen once in test 16).
+- Running off the edge of the built ground faster than Skyrim sends new ground would build a piece
+  under the moving player, which is the case that crashes (not seen yet; not handled).
 
 - The mouse wheel, weapons switching, and Garry's Mod's weapons/HUD in Skyrim's window.
 - Camera position while walking is one frame late, and no crouch height or view bob (Phase 1 step 4).

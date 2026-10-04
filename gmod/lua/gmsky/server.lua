@@ -12,7 +12,9 @@ end
 
 -- Collision (Phase 1 step 3), shared with the client side.
 gmsky.Include("terrain")
-if GetPlayer() and gmsky.terrain then gmsky.terrain.MeasureRoom(GetPlayer():GetPos() + Vector(0, 0, 40)) end
+local T = gmsky.terrain
+if GetPlayer() and T then T.home = T.MeasureRoom(GetPlayer():GetPos() + Vector(0, 0, 40)) end
+local anchored = 0 -- the origin epoch Garry's Mod is anchored to
 
 local sensitivity = CreateConVar("gmsky_sensitivity", "3", FCVAR_ARCHIVE,
 	"Mouse sensitivity for input from Skyrim's window (same scale as Garry's Mod's sensitivity)")
@@ -27,6 +29,8 @@ local driveCamera = CreateConVar("gmsky_camera", "1", FCVAR_ARCHIVE,
 hook.Add("Tick", "gmsky_player_state", function()
 	local ply = GetPlayer()
 	if not ply then return end
+	-- A new origin from Skyrim: move to the middle of the map first, so the anchor is there (3c).
+	if T then T.BeforeAnchor(ply, gmsky.OriginEpoch(), anchored) end
 	local pos = ply:GetPos()
 	local ang = ply:EyeAngles()
 	local vel = ply:GetVelocity()
@@ -39,9 +43,10 @@ hook.Add("Tick", "gmsky_player_state", function()
 	if smooth:GetBool() then flags = flags + 0x40 end
 	-- Degrees per Skyrim mouse count, so Skyrim can draw the mouse movement still on its way here.
 	local degPerCount = predict:GetBool() and 0.022 * sensitivity:GetFloat() or 0
-	gmsky.WritePlayerState(engine.TickCount(), pos.x, pos.y, pos.z, ang.p, ang.y, ang.r,
+	anchored = gmsky.WritePlayerState(engine.TickCount(), pos.x, pos.y, pos.z, ang.p, ang.y, ang.r,
 		ply:EyePos().z - pos.z, vel.x, vel.y, vel.z, flags, ply:GetFOV(), degPerCount,
-		engine.TickInterval() * 1000)
+		engine.TickInterval() * 1000) or 0
+	if T then T.UpdateGround(ply, anchored, (gmsky.Status())) end
 end)
 
 -- Input typed into Skyrim's window (Phase 1 step 1). While Skyrim routes input here, it replaces
@@ -146,7 +151,7 @@ timer.Create("gmsky_status", 1, 0, function()
 	end
 	local input = view and string.format(" input=ON cmds/s=%d buttons=0x%x mouse=(%d, %d)",
 		inputStats.cmds, inputStats.buttons, inputStats.dx, inputStats.dy) or " input=off"
-	local terrain = gmsky.terrain and gmsky.terrain.Status(ply) or ""
+	local terrain = T and (T.Status(ply) .. (ply and T.GroundStatus(ply) or "")) or ""
 	gmsky.Log(string.format("tick=%d %s skyrim=%s epoch=%d skyrim_frame=%d writes/s=%d%s%s%s",
 		engine.TickCount(), where, connected and "CONNECTED" or "not connected", epoch, skyrimFrame,
 		writes - lastWrites, input, err and (" error=" .. err) or "", terrain))

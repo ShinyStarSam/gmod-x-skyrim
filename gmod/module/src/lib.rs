@@ -60,12 +60,17 @@ fn root() -> PathBuf {
     ROOT.get().cloned().unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// logs/ in the project. GMSKY_LOG_DIR lets the test harness log elsewhere, so it never
+/// overwrites in-game logs.
+fn log_dir() -> PathBuf {
+    std::env::var_os("GMSKY_LOG_DIR").map(PathBuf::from).unwrap_or_else(|| root().join("logs"))
+}
+
 fn log(side: u32, msg: &str) {
     let mut logs = LOGS.lock().unwrap_or_else(|e| e.into_inner());
     let slot = &mut logs[(side == SIDE_CLIENT) as usize];
     if slot.is_none() {
-        // GMSKY_LOG_DIR lets the test harness log elsewhere, so it never overwrites in-game logs.
-        let dir = std::env::var_os("GMSKY_LOG_DIR").map(PathBuf::from).unwrap_or_else(|| root().join("logs"));
+        let dir = log_dir();
         let _ = std::fs::create_dir_all(&dir);
         *slot = OpenOptions::new().create(true).write(true).truncate(true)
             .open(dir.join(format!("gmod_{}.log", side_name(side)))).ok();
@@ -159,7 +164,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 9] = [
+    let funcs: [(&str, lua::CFn); 11] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -169,6 +174,8 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("Reload", l_reload),
         ("Include", l_include),
         ("ReadTerrain", l_read_terrain),
+        ("OriginEpoch", l_origin_epoch),
+        ("ReadGridFile", l_read_grid_file),
     ];
     for (name, f) in funcs {
         (a.pushnumber)(l, side as f64); // upvalue 1 = side
@@ -303,7 +310,7 @@ unsafe extern "C" fn l_include(l: *mut State) -> c_int {
 /// yet) when it is still `last_id`; otherwise everything, with `heights` a list of n*n numbers,
 /// index i*n + j + 1 (NaN where Skyrim's ray hit nothing).
 unsafe extern "C" fn l_read_terrain(l: *mut State) -> c_int {
-    guarded(l, |a, _| {
+    guarded(l, |a, side| {
         let last = (a.tonumber)(l, 1) as u32;
         let t = mapping().ok().and_then(|m| m.shared().terrain.read().map(|(t, _)| t));
         let Some(t) = t else { (a.pushnumber)(l, 0.0); return 1 };
@@ -311,19 +318,84 @@ unsafe extern "C" fn l_read_terrain(l: *mut State) -> c_int {
         if t.id == last || t.id == 0 {
             return 1;
         }
-        (a.pushnumber)(l, t.origin_epoch as f64);
-        (a.pushnumber)(l, t.n as f64);
-        (a.pushnumber)(l, t.center[0]);
-        (a.pushnumber)(l, t.center[1]);
-        (a.pushnumber)(l, t.spacing as f64);
-        (a.pushnumber)(l, t.misses as f64);
-        let count = (t.n as usize * t.n as usize).min(t.height.len());
-        (a.createtable)(l, count as c_int, 0);
-        for (k, h) in t.height[..count].iter().enumerate() {
-            (a.pushnumber)(l, *h as f64);
-            (a.rawseti)(l, -2, k as c_int + 1);
+        if side != SIDE_CLIENT {
+            record_grid(&t);
         }
+        push_grid_rest(a, l, &t);
         8
+    })
+}
+
+/// Pushes the 7 values after `id` that ReadTerrain and ReadGridFile return.
+unsafe fn push_grid_rest(a: &Api, l: *mut State, t: &gmsky_protocol::Terrain) {
+    (a.pushnumber)(l, t.origin_epoch as f64);
+    (a.pushnumber)(l, t.n as f64);
+    (a.pushnumber)(l, t.center[0]);
+    (a.pushnumber)(l, t.center[1]);
+    (a.pushnumber)(l, t.spacing as f64);
+    (a.pushnumber)(l, t.misses as f64);
+    let count = (t.n as usize * t.n as usize).min(t.height.len());
+    (a.createtable)(l, count as c_int, 0);
+    for (k, h) in t.height[..count].iter().enumerate() {
+        (a.pushnumber)(l, *h as f64);
+        (a.rawseti)(l, -2, k as c_int + 1);
+    }
+}
+
+/// gmsky.ReadGridFile(path) -> the same values as ReadTerrain, from a grid recorded by
+/// record_grid; or false, error. `path` is relative to the project folder and may not contain "..".
+/// For replaying a recorded Skyrim grid in Garry's Mod alone (the step 3c crash investigation).
+unsafe extern "C" fn l_read_grid_file(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let rel = lua::to_string(a, l, 1).unwrap_or_default();
+        let fail = |msg: String| {
+            (a.pushboolean)(l, 0);
+            lua::push_str(a, l, &msg);
+            2
+        };
+        if rel.is_empty() || rel.contains("..") {
+            return fail(format!("bad path {rel:?}"));
+        }
+        let bytes = match std::fs::read(root().join(&rel)) {
+            Ok(b) => b,
+            Err(e) => return fail(format!("{rel}: {e}")),
+        };
+        let size = std::mem::size_of::<gmsky_protocol::Terrain>();
+        if bytes.len() != size {
+            return fail(format!("{rel}: {} bytes, a grid is {size}", bytes.len()));
+        }
+        let mut t = Box::new(gmsky_protocol::Terrain::default());
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), &mut *t as *mut _ as *mut u8, size);
+        if t.n as usize > gmsky_protocol::TERRAIN_N {
+            return fail(format!("{rel}: n = {} is too big", t.n));
+        }
+        (a.pushnumber)(l, t.id as f64);
+        push_grid_rest(a, l, &t);
+        8
+    })
+}
+
+/// Keeps the last 20 grids as raw bytes in logs/terrain/grid_<id>.bin (the GmskyTerrain layout),
+/// so a grid that crashes Garry's Mod's physics can be looked at and replayed (test 12).
+fn record_grid(t: &gmsky_protocol::Terrain) {
+    let dir = log_dir().join("terrain");
+    let _ = std::fs::create_dir_all(&dir);
+    let bytes = unsafe {
+        std::slice::from_raw_parts(t as *const _ as *const u8, std::mem::size_of::<gmsky_protocol::Terrain>())
+    };
+    let _ = std::fs::write(dir.join(format!("grid_{}.bin", t.id)), bytes);
+    if t.id > 20 {
+        let _ = std::fs::remove_file(dir.join(format!("grid_{}.bin", t.id - 20)));
+    }
+}
+
+/// gmsky.OriginEpoch() -> the origin epoch Skyrim has published (0 = none). Garry's Mod anchors to
+/// it on its next WritePlayerState; Lua uses this to move the player home first (Phase 1 step 3c).
+unsafe extern "C" fn l_origin_epoch(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let e = mapping().ok().and_then(|m| m.shared().origin.read().map(|(o, _)| o.epoch)).unwrap_or(0);
+        (a.pushnumber)(l, e as f64);
+        1
     })
 }
 
