@@ -7,8 +7,8 @@ namespace gmsky::Puppet
 	// Phase 0 step 6: Skyrim's player follows Garry's Mod. Called every frame after Skyrim's own
 	// player update. Moves the player only when it's safe (Garry's Mod alive and anchored to
 	// `a_origin`, player loaded); otherwise Skyrim keeps normal control. Returns true if it moved
-	// the player this frame.
-	bool Update(RE::PlayerCharacter* a_player, const GmskyOrigin& a_origin);
+	// the player this frame. `a_frame` is Skyrim's frame counter (for measuring the view's lag).
+	bool Update(RE::PlayerCharacter* a_player, const GmskyOrigin& a_origin, uint64_t a_frame);
 
 	// True if Skyrim itself moved the player far from where the puppet last put it (load door,
 	// fast travel, console). The caller then publishes a new origin.
@@ -16,6 +16,11 @@ namespace gmsky::Puppet
 
 	// The puppet moved the player on the latest frame.
 	bool IsActive();
+
+	// The view to show right now: Garry's Mod's newest view plus the mouse movement it hasn't
+	// applied yet (Skyrim radians). False while the puppet is off. a_driveCamera: Garry's Mod
+	// allows turning Skyrim's camera directly (gmsky_camera).
+	bool ViewNow(double& a_headingRad, double& a_pitchRad, bool& a_driveCamera);
 
 	// Stop puppeting until conditions are met again (game load, new origin).
 	void Reset(const char* a_reason);

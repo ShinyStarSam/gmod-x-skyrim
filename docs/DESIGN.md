@@ -251,6 +251,35 @@ Goal: play from the Skyrim window with Garry's Mod movement on Skyrim's real gro
    activate** (doors, talking, looting) via the crosshair target, as SkyCraft does with G.
    Garry's Mod must not slow down in the background: `client.lua` sets `engine_no_focus_sleep 0`.
    Protocol version 2 (new slot). Test: from the Skyrim window, walk, sprint, look, open a door.
+
+   **1b. Mouse look without the round trip (planned 2026-10-04).** In-game test 5: looking is
+   smooth but "floaty": it keeps going a little after the mouse stops. Cause: the mouse goes
+   Skyrim → Garry's Mod (waits for the next tick, up to 15 ms) → back to Skyrim (waits for
+   Skyrim's next frame, ~17 ms), so Skyrim shows a view that is 1–3 frames old (estimate).
+   Fix, the usual "client-side prediction": Garry's Mod reports, with each player state, the
+   Skyrim mouse totals it has already turned into its view (and the Skyrim input frame they came
+   from, and its degrees per mouse count). Skyrim draws Garry's Mod's view **plus only the mouse
+   movement Garry's Mod hasn't applied yet**, with the same formula and pitch limit. Garry's Mod
+   still decides the view; Skyrim only shows the part already on its way there, so the two
+   cannot drift apart (once Garry's Mod catches up, the extra is zero). `gmsky_predict 0` in
+   Garry's Mod's console turns it off for comparison. Skyrim logs once a second how many frames
+   old Garry's Mod's view is, and how far ahead the prediction drew it. Protocol version 3.
+   Test: the view stops when the mouse stops; the log shows the lag in frames and the prediction
+   gap back at ~0 when the mouse is still.
+
+   **1c. Turn Skyrim's camera directly (planned 2026-10-04).** Test 6: prediction works (Skyrim's
+   angle ran up to 22° ahead of Garry's Mod's), but with both windows overlaid Garry's Mod still
+   turns first. So the remaining delay is after we set the angle, inside Skyrim. SkyCraft found
+   two causes there: Skyrim's camera update runs *before* the player update in each frame (an
+   angle set in the player update is shown one frame later), and Skyrim's first-person camera
+   *eases* its rotation (~50 ms). Fix, as SkyCraft does: hook Skyrim's camera update (it is
+   called directly, so its call sites are found by scanning the game's code) and, after it, set
+   the camera's rotation from our view ourselves; set it again after the player update with the
+   newest numbers. Skyrim's camera axis order is learned at run time first (240 frames of votes,
+   as SkyCraft) and nothing is overridden until it is certain. First person only, not while a
+   Skyrim menu is open. `gmsky_camera 0` in Garry's Mod's console turns it off. The log shows how
+   far Skyrim's own camera lags our view (degrees), which is the easing measured.
+   Not done here: the camera *position* (still one frame late when walking); Phase 1 step 4.
 2. **Smooth position.** Send the position Garry's Mod *draws* each frame (client side, between
    ticks) instead of the raw 66/s tick position (Phase 0 finding: ticks arrive in bursts at low
    frame rates). Test: per-frame step sizes in the log are even.

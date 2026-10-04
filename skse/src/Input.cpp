@@ -278,6 +278,18 @@ namespace gmsky::Input
 		Write();
 	}
 
+	bool SkyrimMenuOpen()
+	{
+		return BlockingMenuOpen();
+	}
+
+	bool MouseTotals(int64_t& a_x, int64_t& a_y)
+	{
+		a_x = g_mouseX;
+		a_y = g_mouseY;
+		return g_routing;
+	}
+
 	void LogSecond()
 	{
 		logger::info("INPUT {}: held={:#x} mouse this second=({}, {}) totals=({}, {}) wheel={} events={} writes={} activations={}",

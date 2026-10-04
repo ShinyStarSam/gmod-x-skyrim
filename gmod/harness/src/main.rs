@@ -84,7 +84,7 @@ function timer.Simple(delay, fn) HARNESS_SIMPLE = fn end
 function RunConsoleCommand(name, value) HARNESS_CONVARS = HARNESS_CONVARS or {}; HARNESS_CONVARS[name] = value end
 function GetConVar(name) local v = (HARNESS_CONVARS or {})[name]; return v and { GetString = function() return v end } end
 FCVAR_ARCHIVE = 128
-function CreateConVar(name, default) return { GetFloat = function() return tonumber(default) end } end
+function CreateConVar(name, default) return { GetFloat = function() return tonumber(default) end, GetBool = function() return tonumber(default) ~= 0 end } end
 function math.NormalizeAngle(a) return (a + 180) % 360 - 180 end
 function math.Clamp(v, lo, hi) return math.max(lo, math.min(hi, v)) end
 -- Garry's Mod's real IN_* values
@@ -98,6 +98,8 @@ function HARNESS_NEW_CMD()
 	function c:SetForwardMove(f) self.fwd = f end
 	function c:SetSideMove(s) self.side = s end
 	function c:SetViewAngles(a) self.p, self.y = a.p, a.y end
+	-- the view the Garry's Mod window itself put in the command
+	function c:GetViewAngles() return HARNESS_OWN_VIEW or { p = 10, y = 45, r = 0 } end
 	return c
 end
 function IsValid(x) return x ~= nil end
@@ -108,6 +110,7 @@ local function vec(x, y, z) return { x = x, y = y, z = z } end
 local ply = {}
 function ply:GetPos() return vec(100 + t, 50, -12700) end
 function ply:EyeAngles() return { p = 10, y = 45, r = 0 } end
+function ply:SetEyeAngles(a) HARNESS_EYE = { p = a.p, y = a.y } end
 function ply:GetVelocity() return vec(66, 0, 0) end
 function ply:IsOnGround() return true end
 function ply:Crouching() return false end
@@ -119,6 +122,7 @@ function ply:SendLua(s) HARNESS_SENT_LUA = s end
 player = { GetAll = function() return { ply } end }
 HARNESS_PLY = ply
 engine = { TickCount = function() return t end }
+function CurTime() return HARNESS_TIME or 0 end
 function HARNESS_ADVANCE() t = t + 1 end
 "#;
 
@@ -211,7 +215,7 @@ fn main() {
                 check(p.pos == [300.0, 50.0, -12700.0], "pos == (300, 50, -12700)");
                 check(p.yaw_deg == 45.0 && p.pitch_deg == 10.0, "angles");
                 check(p.eye_height == 64.0 && p.fov_deg == 75.0, "eye height and fov");
-                check(p.flags == 0x5, "flags = on ground + alive");
+                check(p.flags == 0x25, "flags = on ground + alive + drive camera (gmsky_camera 1)");
                 check(p.vel == [66.0, 0.0, 0.0], "velocity");
             }
             None => check(false, "Skyrim received a player state"),
@@ -248,16 +252,50 @@ fn main() {
         let r = run_cmd("return string.format('%d %d %d %.2f %.2f', HARNESS_CMD.buttons, HARNESS_CMD.fwd, HARNESS_CMD.side, HARNESS_CMD.y, HARNESS_CMD.p)");
         // buttons IN_FORWARD(8) | IN_SPEED(131072); yaw 45 - 100*0.022*3 = 38.4; pitch 10 - 50*0.066 = 6.7
         check(r == Ok(Some("131080 10000 0 38.40 6.70".into())), &format!("forward+sprint and mouse look: {r:?}"));
+        // The next player state tells Skyrim which input is already in the view (for prediction).
+        lua.run(ls, "HARNESS_ADVANCE() hook.Run('Tick')").unwrap();
+        match sky.shared().player_state.read() {
+            Some((p, _)) => check(p.flags & gmsky_protocol::PF_INPUT_APPLIED != 0 && p.input_frame == 2
+                    && p.mouse_x_applied == 1100 && p.mouse_y_applied == -50 && (p.deg_per_count - 0.066).abs() < 1e-6,
+                &format!("player state reports applied input: flags={:#x} frame={} mouse=({}, {}) k={}",
+                    p.flags, p.input_frame, p.mouse_x_applied, p.mouse_y_applied, p.deg_per_count)),
+            None => check(false, "player state after input"),
+        }
+        let r = lua.run(ls, "return string.format('%.2f %.2f', HARNESS_EYE.y, HARNESS_EYE.p)");
+        check(r == Ok(Some("38.40 6.70".into())), &format!("Garry's Mod window's view kept in step: {r:?}"));
+        // Input stops (Skyrim menu). The window's own view (yaw 45) still lags: hold ours.
         sky.shared().input.write(&Input { frame: 3, active: 0, mouse_x_total: 1100, ..Default::default() });
-        let r = run_cmd("return HARNESS_CMD.calls");
-        check(r == Ok(Some("0".into())), &format!("active=0 leaves the command alone: {r:?}"));
+        let r = run_cmd("return string.format('%d %.2f %.2f', HARNESS_CMD.calls, HARNESS_CMD.y, HARNESS_CMD.p)");
+        check(r == Ok(Some("0 38.40 6.70".into())), &format!("input off: buttons left alone, view held: {r:?}"));
+        // The window's view is still behind on the next tick: keep holding.
+        let r = run_cmd("return tostring(HARNESS_CMD.y)");
+        check(r == Ok(Some("38.4".into())), &format!("still held while the window lags: {r:?}"));
+        // The window caught up: hand over, the command is left completely alone.
+        lua.run(ls, "HARNESS_OWN_VIEW = { p = 6.7, y = 38.4, r = 0 }").unwrap();
+        let r = run_cmd("return tostring(HARNESS_CMD.y)");
+        check(r == Ok(Some("nil".into())), &format!("window caught up: command left alone: {r:?}"));
+        lua.run(ls, "HARNESS_OWN_VIEW = nil").unwrap();
         sky.shared().input.write(&Input { frame: 4, active: 1, buttons: IN_FORWARD, mouse_x_total: 1100, ..Default::default() });
         run_cmd("").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
         let r = run_cmd("return HARNESS_CMD.calls");
         check(r == Ok(Some("0".into())), &format!("input not rewritten for 300 ms counts as stale: {r:?}"));
-        let r = lua.run(lc, "HARNESS_SIMPLE() return HARNESS_CONVARS.engine_no_focus_sleep");
-        check(r == Ok(Some("0".into())), &format!("client turns engine_no_focus_sleep off: {r:?}"));
+        // The window never catches up: give up after 0.5 s and leave the command alone.
+        // (after a pause the mouse baseline restarts, so the turn needs two active ticks)
+        sky.shared().input.write(&Input { frame: 5, active: 1, mouse_x_total: 1200, ..Default::default() });
+        run_cmd("").unwrap();
+        sky.shared().input.write(&Input { frame: 6, active: 1, mouse_x_total: 1300, ..Default::default() });
+        run_cmd("").unwrap();
+        sky.shared().input.write(&Input { frame: 7, active: 0, mouse_x_total: 1300, ..Default::default() });
+        let r = run_cmd("return tostring(HARNESS_CMD.y)");
+        check(r == Ok(Some("38.4".into())), &format!("second menu: view held: {r:?}"));
+        let r = run_cmd("HARNESS_TIME = 1 return tostring(HARNESS_CMD.y)");
+        check(r == Ok(Some("38.4".into())), &format!("held until the time is up: {r:?}"));
+        let r = run_cmd("return tostring(HARNESS_CMD.y)");
+        check(r == Ok(Some("nil".into())), &format!("after 0.5 s: command left alone: {r:?}"));
+        let r = lua.run(lc, "return tostring(HARNESS_CONVARS)");
+        check(r == Ok(Some("nil".into())), &format!("client runs no console commands: {r:?}"));
+        lua.run(lc, "HARNESS_CONVARS = { fps_max_nofocus = '300' } timer.Run('gmsky_client_status')").unwrap();
 
         for (l, close, _) in states {
             close(l);
@@ -271,11 +309,16 @@ fn main() {
     check(server_log.matches("ERROR").count() == 1 && server_log.contains("another process (pid 424242)"),
           "gmod_server.log: exactly one ERROR, the expected takeover message");
     let client_log = std::fs::read_to_string(log_dir.join("gmod_client.log")).unwrap_or_default();
-    check(client_log.contains("client frames in last 5 s: 200"), "gmod_client.log: counted 200 frames");
-    check(client_log.contains("engine_no_focus_sleep is now 0"), "gmod_client.log: engine_no_focus_sleep logged");
+    check(client_log.contains("client frames in last 5 s: 200 (40 fps) fps_max_nofocus=(no such setting)"),
+          "gmod_client.log: counted 200 frames");
+    check(client_log.contains("fps_max_nofocus=300"), "gmod_client.log: fps_max_nofocus logged");
     let server_log = std::fs::read_to_string(log_dir.join("gmod_server.log")).unwrap_or_default();
-    check(server_log.contains("input from Skyrim: ON") && server_log.contains("input from Skyrim: OFF"),
+    check(server_log.contains("input from Skyrim: ON") && server_log.contains("input from Skyrim: OFF, holding yaw=38.4 pitch=6.7"),
           "gmod_server.log: input ON and OFF logged");
+    check(server_log.contains("view handed to the Garry's Mod window after 2 held ticks (its view yaw=38.4 pitch=6.7, 0.0 degrees from ours)"),
+          "gmod_server.log: hand-over logged");
+    check(server_log.contains("after 2 held ticks (its view yaw=45.0 pitch=10.0, 6.6 degrees from ours)"),
+          "gmod_server.log: hold gives up after 0.5 s");
 
     println!("{}", if failures == 0 { "HARNESS PASSED" } else { "HARNESS FAILED" });
     std::process::exit(if failures == 0 { 0 } else { 1 });

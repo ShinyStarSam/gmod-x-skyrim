@@ -7,6 +7,7 @@
 // character controller's own velocity and fall tracking so Skyrim adds no momentum or fall damage.
 #include "Puppet.h"
 
+#include "Input.h"
 #include "Link.h"
 
 namespace gmsky::Puppet
@@ -28,6 +29,52 @@ namespace gmsky::Puppet
 		float g_maxStep = 0.0f, g_maxDrift = 0.0f;
 		RE::NiPoint3 g_lastTargetRaw{};
 		double g_lastHeadingDeg = 0.0, g_lastPitchDeg = 0.0;
+		// View lag and prediction (Phase 1 step 1b), per second.
+		uint32_t g_lagSamples = 0, g_lagMax = 0, g_predicted = 0;
+		uint64_t g_lagSum = 0;
+		double g_aheadMax = 0.0, g_aheadLast = 0.0;
+		float g_degPerCount = 0.0f;
+
+		// Garry's Mod's view plus the mouse movement Skyrim already sent but Garry's Mod hasn't
+		// applied yet, with Garry's Mod's own formula and pitch limit. Garry's Mod still decides
+		// the view: once it has applied everything, the extra is zero.
+		// a_stats = false: same result, without counting it in the per-second statistics.
+		void PredictView(const GmskyPlayerState& a_g, uint64_t a_frame, double& a_yaw, double& a_pitch, bool a_stats = true)
+		{
+			a_yaw = a_g.yaw_deg;
+			a_pitch = a_g.pitch_deg;
+			if (a_stats) {
+				g_aheadLast = 0.0;
+			}
+			if (!(a_g.flags & GMSKY_PF_INPUT_APPLIED)) {
+				return;
+			}
+			if (a_stats) {
+				// How many Skyrim frames old the input in Garry's Mod's view is (1 = the newest possible).
+				const uint32_t lag = a_frame > a_g.input_frame ? uint32_t(a_frame - a_g.input_frame) : 0;
+				++g_lagSamples;
+				g_lagSum += lag;
+				g_lagMax = std::max(g_lagMax, lag);
+				g_degPerCount = a_g.deg_per_count;
+			}
+
+			int64_t mx = 0, my = 0;
+			if (!Input::MouseTotals(mx, my) || a_g.deg_per_count <= 0.0f) {
+				return;
+			}
+			const int64_t dx = mx - a_g.mouse_x_applied, dy = my - a_g.mouse_y_applied;
+			if (std::abs(dx) > 100000 || std::abs(dy) > 100000) {
+				return;  // totals don't belong together (restart): show Garry's Mod's view as is
+			}
+			const double k = a_g.deg_per_count;
+			a_yaw -= double(dx) * k;
+			a_pitch = std::clamp(a_pitch + double(dy) * k, -89.0, 89.0);
+			if (a_stats) {
+				g_aheadLast = std::max(std::abs(double(dx) * k), std::abs(a_pitch - a_g.pitch_deg));
+				g_aheadMax = std::max(g_aheadMax, g_aheadLast);
+				++g_predicted;
+			}
+		}
 
 		bool Off(const std::string& a_reason)
 		{
@@ -93,7 +140,7 @@ namespace gmsky::Puppet
 		g_haveLastSet = false;
 	}
 
-	bool Update(RE::PlayerCharacter* a_player, const GmskyOrigin& a_origin)
+	bool Update(RE::PlayerCharacter* a_player, const GmskyOrigin& a_origin, uint64_t a_frame)
 	{
 		auto& link = Link::Get();
 		if (!link.PeerAlive()) {
@@ -143,8 +190,10 @@ namespace gmsky::Puppet
 		}
 
 		a_player->SetPosition(pos, true);
-		const double heading = GmodYawToSkyrimHeading(g.yaw_deg);
-		const double pitch = GmodPitchToSkyrimPitch(g.pitch_deg);
+		double yaw = 0.0, gpitch = 0.0;
+		PredictView(g, a_frame, yaw, gpitch);
+		const double heading = GmodYawToSkyrimHeading(yaw);
+		const double pitch = GmodPitchToSkyrimPitch(gpitch);
 		a_player->data.angle.z = float(heading);
 		a_player->data.angle.x = float(pitch);
 		if (auto* controller = a_player->GetCharController()) {
@@ -162,6 +211,23 @@ namespace gmsky::Puppet
 		return true;
 	}
 
+	bool ViewNow(double& a_headingRad, double& a_pitchRad, bool& a_driveCamera)
+	{
+		if (!g_active) {
+			return false;
+		}
+		GmskyPlayerState g{};
+		if (!SlotRead(Link::Get().Shared().player_state, g)) {
+			return false;
+		}
+		double yaw = 0.0, pitch = 0.0;
+		PredictView(g, 0, yaw, pitch, false);
+		a_headingRad = GmodYawToSkyrimHeading(yaw);
+		a_pitchRad = GmodPitchToSkyrimPitch(pitch);
+		a_driveCamera = (g.flags & GMSKY_PF_DRIVE_CAMERA) != 0;
+		return true;
+	}
+
 	void LogSecond()
 	{
 		if (!g_active) {
@@ -170,7 +236,15 @@ namespace gmsky::Puppet
 			logger::info("PUPPET on: sets={} ground ray/land/keep={}/{}/{} set=({:.1f}, {:.1f}, {:.1f}) gmod-as-skyrim z={:.1f} heading={:.1f} pitch={:.1f} max-step={:.1f} max-drift={:.1f} big-steps={}",
 				g_sets, g_groundRay, g_groundLand, g_groundKeep, g_lastSet.x, g_lastSet.y, g_lastSet.z, g_lastTargetRaw.z,
 				g_lastHeadingDeg, g_lastPitchDeg, g_maxStep, g_maxDrift, g_bigSteps);
+			if (g_lagSamples) {
+				logger::info("VIEW lag (Skyrim frames, 1 = newest) avg={:.2f} max={} | prediction {}: frames={} ahead max={:.2f} deg, last frame {:.2f} deg",
+					double(g_lagSum) / g_lagSamples, g_lagMax, g_degPerCount > 0.0f ? "on" : "off (gmsky_predict 0)",
+					g_predicted, g_aheadMax, g_aheadLast);
+			}
 		}
+		g_lagSamples = g_lagMax = g_predicted = 0;
+		g_lagSum = 0;
+		g_aheadMax = 0.0;
 		g_sets = g_groundRay = g_groundLand = g_groundKeep = g_bigSteps = 0;
 		g_maxStep = g_maxDrift = 0.0f;
 	}

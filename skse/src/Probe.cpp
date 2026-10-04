@@ -3,6 +3,7 @@
 // (Puppet.cpp). Once a second, log Skyrim's numbers next to Garry's Mod's.
 #include "Probe.h"
 
+#include "Camera.h"
 #include "Input.h"
 #include "Link.h"
 #include "Puppet.h"
@@ -200,14 +201,16 @@ namespace gmsky::Probe
 			g_needOrigin = false;
 		}
 
-		Puppet::Update(a_player, g_origin);
+		Puppet::Update(a_player, g_origin, g_frame);
 		Input::PerFrame(g_frame);
+		Camera::AfterPlayerUpdate();
 
 		g_logTimer += a_delta;
 		if (g_logTimer >= 1.0f) {
 			LogSecond(a_player, pos, g_logTimer);
 			Puppet::LogSecond();
 			Input::LogSecond();
+			Camera::LogSecond();
 			g_logTimer = 0.0f;
 		}
 	}

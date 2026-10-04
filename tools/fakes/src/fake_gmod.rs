@@ -60,6 +60,7 @@ fn main() {
         s.player_state.write(&PlayerState {
             tick, origin_epoch: epoch, flags: PF_ON_GROUND | PF_ALIVE, anchor, pos,
             eye_height: 64.0, pitch_deg: 0.0, yaw_deg: yaw, roll_deg: 0.0, vel, fov_deg: 75.0,
+            ..Default::default()
         });
         if now_ms() - last_print >= 1000 {
             last_print = now_ms();

@@ -7,7 +7,7 @@
 mod lua;
 
 use gmsky_protocol::shm::{now_ms, Mapping, Side};
-use gmsky_protocol::PlayerState;
+use gmsky_protocol::{PlayerState, PF_INPUT_APPLIED};
 use lua::{Api, State};
 use std::ffi::c_int;
 use std::fs::{File, OpenOptions};
@@ -51,8 +51,10 @@ struct InputTrack {
     last_change_ms: u64,
     /// Mouse/wheel totals already applied; None = start fresh on the next active read.
     base: Option<(i64, i64, i32)>,
+    /// GmskyInput.frame of the last active read (reported back to Skyrim with the player state).
+    applied_frame: u64,
 }
-static INPUT: Mutex<InputTrack> = Mutex::new(InputTrack { last_seq: 0, last_change_ms: 0, base: None });
+static INPUT: Mutex<InputTrack> = Mutex::new(InputTrack { last_seq: 0, last_change_ms: 0, base: None, applied_frame: 0 });
 
 fn root() -> PathBuf {
     ROOT.get().cloned().unwrap_or_else(|| PathBuf::from("."))
@@ -244,6 +246,7 @@ unsafe extern "C" fn l_read_input(l: *mut State) -> c_int {
                 }
                 result = Some((inp.buttons, dx, dy, inp.wheel_total.wrapping_sub(bw)));
                 t.base = Some((inp.mouse_x_total, inp.mouse_y_total, inp.wheel_total));
+                t.applied_frame = inp.frame;
             }
         }
         match result {
@@ -280,8 +283,10 @@ unsafe extern "C" fn l_reload(l: *mut State) -> c_int {
     })
 }
 
-/// gmsky.WritePlayerState(tick, x, y, z, pitch, yaw, roll, eye_height, vx, vy, vz, flags, fov)
-/// -> origin epoch in use (0 = Skyrim hasn't sent an origin yet)
+/// gmsky.WritePlayerState(tick, x, y, z, pitch, yaw, roll, eye_height, vx, vy, vz, flags, fov,
+///                        deg_per_count) -> origin epoch in use (0 = Skyrim hasn't sent an origin yet)
+/// Also reports the Skyrim input already applied (from gmsky.ReadInput), so Skyrim can draw the
+/// rest of the mouse movement ahead of Garry's Mod. deg_per_count 0 (or nil) = don't predict.
 unsafe extern "C" fn l_write_player_state(l: *mut State) -> c_int {
     guarded(l, |a, side| {
         let n = |i: c_int| (a.tonumber)(l, i);
@@ -298,10 +303,15 @@ unsafe extern "C" fn l_write_player_state(l: *mut State) -> c_int {
                     o.epoch, o.skyrim_origin[0], o.skyrim_origin[1], o.skyrim_origin[2], pos[0], pos[1], pos[2]));
             }
         }
+        let (applied, input_frame) = {
+            let t = INPUT.lock().unwrap_or_else(|e| e.into_inner());
+            (t.base, t.applied_frame)
+        };
+        let (mx, my, _) = applied.unwrap_or((0, 0, 0));
         s.player_state.write(&PlayerState {
             tick: n(1) as u64,
             origin_epoch: link.epoch,
-            flags: n(12) as u32,
+            flags: n(12) as u32 | if applied.is_some() { PF_INPUT_APPLIED } else { 0 },
             anchor: link.anchor,
             pos,
             eye_height: n(8) as f32,
@@ -310,6 +320,11 @@ unsafe extern "C" fn l_write_player_state(l: *mut State) -> c_int {
             roll_deg: n(7) as f32,
             vel: [n(9) as f32, n(10) as f32, n(11) as f32],
             fov_deg: n(13) as f32,
+            input_frame,
+            mouse_x_applied: mx,
+            mouse_y_applied: my,
+            deg_per_count: n(14) as f32,
+            reserved0: 0,
         });
         link.writes += 1;
         (a.pushnumber)(l, link.epoch as f64);

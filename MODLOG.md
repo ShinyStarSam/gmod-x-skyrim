@@ -151,3 +151,72 @@ Skipped: header stuck at INIT if a process dies mid-initialization (tiny window;
 **Result:** protocol 4/4 and PROTOCOL TEST PASSED (`sizeof(GmskyShared)=296`); HARNESS PASSED 33/33, including: forward+sprint → buttons 131080 (IN_FORWARD|IN_SPEED), forwardmove 10000; mouse +100/-50 counts → yaw 45→38.40, pitch 10→6.70; `active=0` and 300 ms stale input both leave the command untouched; `engine_no_focus_sleep` set to 0. Plugin built (no warnings from our code) and copied.
 **Still broken / not tested:** nothing tested in game. Not sure: whether server-side `StartCommand` changes are fully honoured in single-player (Garry's Mod's wiki says it is the hook for this); whether `engine_no_focus_sleep` can be set from Lua (the log will say); whether Skyrim's raw mouse counts feel right at sensitivity 3. Both games must be restarted (protocol version 2 refuses to talk to version 1).
 **Next:** user's in-game test.
+
+## 2026-10-04 Phase 1 step 1.1: in-game test 4 (no code changes)
+
+**Changed:** nothing in code. Logs saved to `build/logs-ingame-test-4/`. STATUS.md updated.
+**Tested how:** user played from the Skyrim window: walked, sprinted, looked around, E on flowers/barrels/a wolf/Sven, opened and closed containers, alt-tabbed.
+**Result (works):**
+- `INPUT -> Garry's Mod` as soon as the puppet came on; back to Skyrim on every menu (`a Skyrim menu is open`) and on alt-tab (`Skyrim window not in front`), then back to Garry's Mod.
+- **Server `StartCommand` changes are honoured in single-player:** `cmds/s=66–67`; W → `buttons=0x1 speed=200 facing-minus-moving=0.0`; Shift+W → `buttons=0x41 speed=400`. Mouse turns the view (e.g. 1534 counts → yaw -101.2).
+- E: `activated 000A18F9 (Mountain Flower)`, `0001F228 (Barrel)` (opened the container menu), `00013491 (Sven)` (dialogue).
+**Failures found:**
+1. **Choppy mouse look.** `gmod_client.log`: `engine_no_focus_sleep is now (no such setting)` and the client runs at **exactly 20 fps** whenever Skyrim is in front (168–313 fps when Garry's Mod is in front). This 64-bit Garry's Mod has no `engine_no_focus_sleep`: its `engine.dll` contains `fps_max_nofocus` instead (looked for the string, not tried). So Garry's Mod handles 3 ticks at once, 20 times a second, and the view Skyrim copies changes only 20 times a second. The user also saw a console error about "sleep" when the client side loaded (exact text not yet captured).
+2. **View snaps when leaving a container (or any menu).** Every `input from Skyrim: OFF` is followed by `yaw=0.0 pitch=0.0` (later `yaw=88.6`) within a second, in 12 of 12 cases. Cause: our hook sets the view on the server only. The Garry's Mod window's own view never changes, so as soon as we stop overriding (menu open), the player's view goes back to whatever the Garry's Mod window was looking at, and on `ON` we start again from that.
+**Also:** user confirmed Garry's Mod is on the normal 64-bit (x86-64) branch, not a beta.
+**Next:** fix 2 (keep our view while a Skyrim menu is open, and tell the Garry's Mod window about it), and fix 1 (`fps_max_nofocus`), one at a time.
+
+## 2026-10-04 Step 1.1 fix A: no view snap when a Skyrim menu opens or closes (not tested in game)
+
+**Changed:** `gmod/lua/gmsky/server.lua` (`StartCommand` hook); harness fakes `ply:SetEyeAngles`, `cmd:GetViewAngles`, `CurTime` and 8 new checks.
+**What it does:** (1) while input comes from Skyrim, every tick also calls `ply:SetEyeAngles(view)`, so the Garry's Mod window's own view follows ours instead of staying where it was. (2) When input stops (menu, alt-tab), it keeps putting our last view into the command until the Garry's Mod window's own view is within 1 degree of it, or 0.5 s have passed, then lets go. Logs `input from Skyrim: OFF, holding yaw=… pitch=…` and `view handed to the Garry's Mod window after N held ticks (its view yaw=… pitch=…, X degrees from ours)`.
+**Tested how:** `cargo build --release`; `target/release/gmod_harness.exe`.
+**Result:** HARNESS PASSED, 41 checks: the window's view is set to 38.40/6.70 with ours; on OFF the command's view is held at 38.40 and buttons are left alone; hand-over after 2 held ticks once the window catches up (0.0 degrees); gives up after 0.5 s when it never does (6.6 degrees).
+**Still broken / not tested:** not tested in game. Not sure that `SetEyeAngles` every tick reaches the Garry's Mod window in single-player (the hand-over line will tell: "after 0–2 held ticks, 0.x degrees" = works; "after ~33 held ticks, big degrees" = the window never caught up and it still snaps after 0.5 s).
+**Next:** fix B (Garry's Mod held at 20 fps in the background).
+
+## 2026-10-04 Step 1.1 fix B: Garry's Mod's 20 fps background cap (not tested in game)
+
+**Changed:** `tools/launch_gmod.ps1` adds `+fps_max_nofocus 300`; `gmod/lua/gmsky/client.lua` no longer runs `engine_no_focus_sleep 0` (that setting does not exist in this 64-bit build and caused the console error) and logs `fps_max_nofocus=<value>` in its 5-second frame-rate line; harness checks updated.
+**Why:** test 4: Garry's Mod ran at exactly 20 fps whenever Skyrim was in front, so the view Skyrim copies changed only 20 times a second (choppy mouse look). `engine.dll` contains `fps_max_nofocus` (and `fps_max`, `fps_max_menu`), found by searching the file for text; its meaning is assumed from the name.
+**Tested how:** `cargo build --release`; `gmod_harness.exe`; PowerShell parse check of the launch script (0 errors).
+**Result:** HARNESS PASSED, 41 checks: the client side runs no console commands; the log line shows `fps_max_nofocus=300` when set and `(no such setting)` when it doesn't exist.
+**Still broken / not tested:** not tested in game. Not sure that `fps_max_nofocus` is what caps it at 20, or that `+fps_max_nofocus` on the command line takes effect (`+lua_run` didn't, but that runs before the map; settings normally do). If the log still shows 20 fps with `fps_max_nofocus=300`, the cap is something else.
+**Next:** user's in-game test of fixes A and B. Later idea (user's): Garry's Mod's tick rate could be set to 60 (`-tickrate 60`) to match Skyrim's 60 fps; not done, one thing at a time.
+
+## 2026-10-04 Step 1.1 in-game test 5, and step 1b: mouse look without the round trip (1b not tested in game)
+
+**Test 5 result (fixes A and B, logs in `logs/`):** fix B works: Garry's Mod at ~300 fps in the background (was 20); `cmds/s` 66–67. Fix A works: every menu close logged `view handed to the Garry's Mod window after 0 held ticks (… 0.0 degrees from ours)`; user: no more snap. User: looking is smooth now but "floaty", it carries on briefly after the mouse stops.
+**Cause (estimated, not measured):** mouse → Garry's Mod waits up to one tick (15 ms) → Skyrim waits for its next frame (~17 ms): Skyrim shows a view 1–3 frames old.
+**Changed:** DESIGN.md Phase 1 step 1b. Protocol **version 3**: `GmskyPlayerState` gains `input_frame`, `mouse_x_applied`, `mouse_y_applied`, `deg_per_count` and flag `GMSKY_PF_INPUT_APPLIED` (96 → 128 bytes, `GmskyShared` 296 → 328), C++ and Rust. Module: `ReadInput` remembers the frame it applied; `WritePlayerState` reports it with the applied totals and a 14th argument, degrees per count. `server.lua`: `gmsky_predict` setting (default 1), passes `0.022 × gmsky_sensitivity` (0 when off). Skyrim `Puppet.cpp`: draws Garry's Mod's yaw/pitch plus the mouse movement not applied yet (same formula, pitch limited to ±89); `Input::MouseTotals()`. Logs once a second: `VIEW lag (Skyrim frames, 1 = newest) avg=… max=… | prediction on/off: frames=… ahead max=… deg, last frame … deg`.
+**Tested how:** `cargo build --release`; `cargo test -p gmsky-protocol`; C++ `protocol_test`; `gmod_harness.exe`; `cmake --build --preset release` (plugin, copied to Skyrim).
+**Result:** protocol 4/4; PROTOCOL TEST PASSED (`sizeof(GmskyShared)=328`); HARNESS PASSED 42/42, new check: after input, the player state reports `flags=0x15 frame=2 mouse=(1100, -50) k=0.066`. Plugin builds with no warnings from our code.
+**Still broken / not tested:** not tested in game; the Skyrim prediction math has no out-of-game test (only the Garry's Mod side does). Not sure: whether Skyrim's camera uses the angle we set in the same frame, or one frame later (that delay would remain); whether Skyrim's own drawing adds delay we can't remove. Both games must be restarted (version 3 refuses version 2).
+**Next:** user's in-game test, with `gmsky_predict 1` and then `0` to compare.
+
+## 2026-10-04 In-game test 6 (step 1b), and step 1c: turn Skyrim's camera directly (1c not tested in game)
+
+**Test 6 result (logs: `build/logs-ingame-test-5/`, the run after step 1b):** user: still delayed; with both windows overlaid, Garry's Mod turns first. The logs show prediction **did** work: `VIEW lag avg=1.84–1.90 max=2–3` Skyrim frames (Garry's Mod's own view is ~2 frames old, as estimated), and `ahead max` up to 22.51 degrees while flicking (Skyrim's angle ran ahead of Garry's Mod's by the movement not applied yet). So the delay that's left comes after we set the angle, inside Skyrim. 17 seconds were logged with `prediction off (gmsky_predict 0)`; the user felt no difference.
+**User's question, raise Garry's Mod's tick rate:** not the fix. It would shorten only the Garry's Mod round trip (~2 frames), which prediction already hides for the view. It may still help movement (W/A/S/D) later.
+**Cause (from SkyCraft's notes, `reference/SkyCraft/skse/src/Game.cpp`, not yet measured here):** Skyrim's camera update runs *before* the player update in each frame, so the angle we set is shown one frame later; and Skyrim's first-person camera eases its rotation (~50 ms).
+**Changed:** DESIGN.md step 1c. New `skse/src/Camera.h/.cpp` (adapted from SkyCraft, MIT): hooks every `call PlayerCamera::Update` site (found by scanning the game's code; `RELOCATION_ID(49852, 50784)`); learns Skyrim's camera-root axis order from 240 frames; then, after Skyrim's camera update and again after the player update, sets the camera root rotation to our predicted view and pushes it down to the render camera. First person only, not while a Skyrim menu is open. `Puppet::ViewNow()` (newest predicted view; prediction math merged into one function). `Input::SkyrimMenuOpen()`. SKSE trampoline 64 → 256 bytes. Flag `GMSKY_PF_DRIVE_CAMERA` (0x20) from the new `gmsky_camera` setting (default 1) in `server.lua`; no layout change. Harness expects flags 0x25.
+**Logs (once a second):** `CAMERA updates=… turned by us after camera update=… after player update=… | Skyrim's own camera off our view avg=… max=… deg`, plus `learning n/240` until learned, and once: `CAMERA axes learned from 240 frames: col0=… -> we turn the camera from now on` (or `INCONSISTENT`). `PlayerCamera::Update: hooked N call site(s)` at start.
+**Tested how:** `cmake --build --preset release`; `cargo build --release`; `cargo test -p gmsky-protocol`; `protocol_test`; `gmod_harness.exe`.
+**Result:** plugin builds with no warnings from our code, copied to Skyrim; protocol 4/4; PROTOCOL TEST PASSED; HARNESS PASSED 42/42.
+**Still broken / not tested:** nothing tested in game. Not sure: how many call sites the scan finds on 1.7.104 (0 = the hook does nothing; the log says); whether learning completes (needs ~4 s of fairly still looking in first person); that setting the root's `local` rotation is right (SkyCraft does it; correct only if the root's parent has no rotation). The camera *position* is still one frame late while walking (Phase 1 step 4). Skyrim's own drawing delay (vsync, frames queued on the graphics card) is not touched.
+**Failure noted:** my first PowerShell edit of `Probe.cpp` added a byte-order mark and CRLF line endings; reverted to the original ASCII/LF before review (code unchanged).
+**Next:** user's in-game test, `gmsky_camera 1` then `0`.
+
+## 2026-10-04 In-game test 7 (step 1c): Skyrim's camera turned directly — works
+
+**Changed:** README "what works". Logs saved to `build/logs-ingame-test-6/`. No code changes.
+**Tested how:** user looked around in first person, flicked the mouse with both windows overlaid, compared `gmsky_camera 1` and `0`.
+**Result:**
+- `PlayerCamera::Update: hooked 3 call site(s)`; `CAMERA updates=60–61` per second.
+- `CAMERA axes learned from 240 frames: col0=+right (240) col1=+forward (240) col2=+up (240)`: all 240 votes agree for every column.
+- Turned by us 60–61 times a second at both points (after camera update and after player update).
+- **Skyrim's own camera off our view:** 0.00–0.02 degrees when still, avg 1.3–7.4 / **max 5.8–45.7 degrees** during turns. This is the delay we now skip (easing + frame order), measured.
+- `VIEW lag avg=1.85–1.90 max=2` (Garry's Mod's view ~2 frames old, hidden by prediction).
+- User: "a very very very tiny delay" left, maybe placebo; no longer floaty.
+**Still broken / not tested:** what is left is not measured; likely Skyrim's own display pipeline (vsync, queued frames), which our code doesn't control. Camera position while walking still one frame late (step 4).
+**Next:** Phase 1 step 2 (smooth position) or step 3 (collision), user's choice.

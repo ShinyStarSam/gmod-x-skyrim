@@ -1,3 +1,4 @@
+#include "Camera.h"
 #include "Input.h"
 #include "Link.h"
 #include "Probe.h"
@@ -26,6 +27,7 @@ namespace
 			gmsky::Link::Get().Open();
 			gmsky::Probe::Install();
 			gmsky::Input::Install();
+			gmsky::Camera::Install();
 			break;
 		case SKSE::MessagingInterface::kPostLoadGame:
 		case SKSE::MessagingInterface::kNewGame:
@@ -39,7 +41,7 @@ namespace
 
 SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
-	SKSE::Init(a_skse, { .trampoline = true, .trampolineSize = 64 });
+	SKSE::Init(a_skse, { .trampoline = true, .trampolineSize = 256 });
 	SetupLog();
 	logger::info("gmsky 0.1.0 loading (runtime {}), project {}", a_skse->RuntimeVersion().string(), GMSKY_PROJECT_ROOT);
 	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);

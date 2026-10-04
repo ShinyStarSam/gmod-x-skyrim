@@ -10,6 +10,13 @@ local function GetPlayer()
 	if IsValid(ply) then return ply end
 end
 
+local sensitivity = CreateConVar("gmsky_sensitivity", "3", FCVAR_ARCHIVE,
+	"Mouse sensitivity for input from Skyrim's window (same scale as Garry's Mod's sensitivity)")
+local predict = CreateConVar("gmsky_predict", "1", FCVAR_ARCHIVE,
+	"1 = Skyrim draws mouse movement Garry's Mod hasn't applied yet (no round-trip delay), 0 = off")
+local driveCamera = CreateConVar("gmsky_camera", "1", FCVAR_ARCHIVE,
+	"1 = Skyrim turns its camera straight to the view (no camera easing / frame delay), 0 = Skyrim's own camera")
+
 -- Every server tick: send the player's state to Skyrim.
 hook.Add("Tick", "gmsky_player_state", function()
 	local ply = GetPlayer()
@@ -22,32 +29,59 @@ hook.Add("Tick", "gmsky_player_state", function()
 	if ply:Crouching() then flags = flags + 2 end
 	if ply:Alive() then flags = flags + 4 end
 	if ply:GetMoveType() == MOVETYPE_NOCLIP then flags = flags + 8 end
+	if driveCamera:GetBool() then flags = flags + 0x20 end
+	-- Degrees per Skyrim mouse count, so Skyrim can draw the mouse movement still on its way here.
+	local degPerCount = predict:GetBool() and 0.022 * sensitivity:GetFloat() or 0
 	gmsky.WritePlayerState(engine.TickCount(), pos.x, pos.y, pos.z, ang.p, ang.y, ang.r,
-		ply:EyePos().z - pos.z, vel.x, vel.y, vel.z, flags, ply:GetFOV())
+		ply:EyePos().z - pos.z, vel.x, vel.y, vel.z, flags, ply:GetFOV(), degPerCount)
 end)
 
 -- Input typed into Skyrim's window (Phase 1 step 1). While Skyrim routes input here, it replaces
 -- the player's own command: buttons, movement and view angles. The mouse is turned into view
 -- angles here, with Garry's Mod's own formula (degrees = counts * 0.022 * sensitivity).
-local sensitivity = CreateConVar("gmsky_sensitivity", "3", FCVAR_ARCHIVE,
-	"Mouse sensitivity for input from Skyrim's window (same scale as Garry's Mod's sensitivity)")
 local IN_MAP = { -- GMSKY_IN_* bit -> Garry's Mod IN_* button
 	{ 0x1, IN_FORWARD }, { 0x2, IN_BACK }, { 0x4, IN_MOVELEFT }, { 0x8, IN_MOVERIGHT },
 	{ 0x10, IN_JUMP }, { 0x20, IN_DUCK }, { 0x40, IN_SPEED }, { 0x80, IN_WALK },
 	{ 0x100, IN_ATTACK }, { 0x200, IN_ATTACK2 }, { 0x400, IN_RELOAD },
 }
 local FULL = 10000 -- "full stick"; Garry's Mod clamps it to the player's speed
+local HOLD_TIME = 0.5 -- seconds we wait for the Garry's Mod window to take over our view
 local view -- the view angles we drive while input comes from Skyrim
+-- After input stops (a Skyrim menu opened, alt-tab): keep our last view until the Garry's Mod
+-- window's own view has caught up with it, so the player doesn't snap to where that window looked.
+local hold
 local inputStats = { cmds = 0, dx = 0, dy = 0, buttons = 0 }
+
+local function AngleGap(a, b)
+	return math.max(math.abs(math.NormalizeAngle(a.y - b.y)), math.abs(a.p - b.p))
+end
 
 hook.Add("StartCommand", "gmsky_input", function(ply, cmd)
 	if ply ~= GetPlayer() then return end
 	local active, buttons, dx, dy = gmsky.ReadInput()
 	if not active then
-		if view then gmsky.Log("input from Skyrim: OFF") end
-		view = nil
+		if view then
+			-- Tell the Garry's Mod window our view (it only had its own, stale one until now).
+			ply:SetEyeAngles(view)
+			hold = { ang = view, untilTime = CurTime() + HOLD_TIME, ticks = 0 }
+			gmsky.Log(string.format("input from Skyrim: OFF, holding yaw=%.1f pitch=%.1f", view.y, view.p))
+			view = nil
+		end
+		if hold then
+			local own = cmd:GetViewAngles()
+			local gap = AngleGap(own, hold.ang)
+			if gap < 1 or CurTime() > hold.untilTime then
+				gmsky.Log(string.format("view handed to the Garry's Mod window after %d held ticks "
+					.. "(its view yaw=%.1f pitch=%.1f, %.1f degrees from ours)", hold.ticks, own.y, own.p, gap))
+				hold = nil
+			else
+				cmd:SetViewAngles(hold.ang)
+				hold.ticks = hold.ticks + 1
+			end
+		end
 		return
 	end
+	hold = nil
 	if not view then
 		view = ply:EyeAngles()
 		view.r = 0
@@ -73,6 +107,8 @@ hook.Add("StartCommand", "gmsky_input", function(ply, cmd)
 	cmd:SetForwardMove(fwd)
 	cmd:SetSideMove(side)
 	cmd:SetViewAngles(view)
+	-- Keep the Garry's Mod window's own view in step with ours, so letting go never snaps.
+	ply:SetEyeAngles(view)
 
 	inputStats.cmds = inputStats.cmds + 1
 	inputStats.dx = inputStats.dx + dx

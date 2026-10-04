@@ -4,7 +4,7 @@ Play Skyrim as a Garry's Mod player: Garry's Mod movement, weapons, health and H
 Skyrim world. Both games run at the same time and talk through shared memory, the same approach as
 [SkyCraft](https://github.com/chasmlol/SkyCraft). See [docs/DESIGN.md](docs/DESIGN.md).
 
-> **Status: early.** Phase 0 (linking the two games) is in progress: Phase 0 done: Skyrim's player follows Garry's Mod. Phase 1 next.
+> **Status: early.** Phase 0 done: Skyrim's player follows Garry's Mod. Phase 1 in progress: playing from the Skyrim window works.
 > Single-player and offline only. Garry's Mod is always started with `-insecure` (VAC off).
 
 ## What works
@@ -24,9 +24,20 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   controls within 2 seconds. You control it from the Garry's Mod window, and Skyrim needs
   `bAlwaysActive=1` in its Skyrim.ini so it keeps running in the background.
 
+- **Playing from the Skyrim window** (tested in game 2026-10-04, Phase 1 step 1): W/A/S/D, Shift
+  (sprint) and the mouse move and turn the player with Garry's Mod's movement; E opens doors,
+  containers and talks to people in Skyrim; Esc, ~, J, M, F9 open Skyrim's menus, and input goes
+  back to Skyrim while a menu is open or the Skyrim window isn't in front. Garry's Mod runs at
+  full speed in the background (start it with `tools/launch_gmod.ps1`). The view doesn't snap
+  after menus. Mouse look: Skyrim shows the mouse movement before Garry's Mod has applied it,
+  and turns its camera directly (Skyrim's own first-person camera trailed by up to 45 degrees
+  during fast turns); the user reports only a very small delay left. Settings in Garry's Mod's
+  console: `gmsky_sensitivity` (default 3), `gmsky_predict`, `gmsky_camera` (1 = on).
+
 ## What doesn't work yet
 
-- Playing from the Skyrim window (input is not forwarded yet; Phase 1).
+- The mouse wheel, weapons switching, and Garry's Mod's weapons/HUD in Skyrim's window.
+- Camera position while walking is one frame late, and no crouch height or view bob (Phase 1 step 4).
 - Jumping, crouching and Garry's Mod's own height: Skyrim's player stays on Skyrim's ground.
 - Loading gmsky automatically when Garry's Mod starts (`+lua_run` doesn't work; type it in the console).
 - Everything else in [docs/DESIGN.md](docs/DESIGN.md) §12.
