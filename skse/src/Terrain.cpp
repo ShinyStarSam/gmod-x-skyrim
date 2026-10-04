@@ -6,7 +6,10 @@
 // Grid centres sit on a fixed lattice of 768 units (one Garry's Mod piece of 16 x 16 squares), so
 // the pieces of different grids line up exactly and Garry's Mod reuses them instead of building
 // overlapping copies (test 13: inserting a mesh over an existing one crashed its physics). A new
-// grid starts when the lattice point nearest the player changes, or the origin changes.
+// grid starts when the lattice point nearest where the player will be changes, the origin changes,
+// or the player's height moved far from the last grid's (noclip flying, step 3e). "Where the
+// player will be": its position plus its velocity times the recent cast time (test 20: a grid
+// centred where a fast player was when casting started arrived behind it).
 // Only the top surface of each column is seen (no arches or interiors yet), as SkyCraft's stage A.
 #include "Terrain.h"
 
@@ -20,9 +23,14 @@ namespace gmsky::Terrain
 		constexpr int kN = GMSKY_TERRAIN_N;
 		constexpr float kSpacing = 48.0f;    // Skyrim units between points
 		constexpr float kLattice = 16 * kSpacing;  // grid centres are multiples of this (768)
-		constexpr float kRayAbove = 4000.0f;  // rays run from this far above the player's feet...
-		constexpr float kRayBelow = 4000.0f;  // ...to this far below
-		constexpr double kBudgetMs = 1.5;    // ray casting time per frame
+		constexpr float kRayAbove = 4000.0f;   // rays run from this far above the player's feet...
+		constexpr float kRayBelow = 20000.0f;  // ...to this far below (they stop at the first surface;
+		                                       // long so a player flying high in noclip still finds ground)
+		constexpr float kRecastHeight = 2000.0f;  // new grid when the feet moved this far up or down
+		constexpr double kBudgetMs = 1.5;      // ray casting time per frame
+		constexpr double kBudgetFastMs = 4.0;  // ... while the player moves faster than kFastSpeed
+		constexpr float kFastSpeed = 1000.0f;  // Skyrim units per second
+		constexpr double kLeadExtraMs = 100.0;  // lead time beyond the cast time (reaching Garry's Mod)
 
 		const double kQpcPerMs = [] {
 			LARGE_INTEGER f;
@@ -56,12 +64,15 @@ namespace gmsky::Terrain
 			bool valid = false;
 			uint32_t epoch = 0;
 			double cx = 0.0, cy = 0.0;
+			float refZ = 0.0f;
 			std::array<float, kN * kN> z{};
 		};
 		Done g_done;
 
 		GmskyTerrain g_out{};  // what goes to Garry's Mod (17 KB, kept off the stack)
 		uint32_t g_nextId = 1;
+		double g_castMsAvg = 400.0;  // start-to-publish time of recent grids (test 20: 320-517 ms)
+		double g_leadUnits = 0.0;    // how far ahead of the player the running grid is centred
 
 		// Per second.
 		uint32_t g_published = 0, g_secRays = 0;
@@ -123,12 +134,15 @@ namespace gmsky::Terrain
 			g_done.epoch = g_job.epoch;
 			g_done.cx = g_job.cx;
 			g_done.cy = g_job.cy;
+			g_done.refZ = g_job.refZ;
 			g_done.z = g_job.z;
 			++g_published;
 			const int rays = kN * kN;
-			g_lastGrid = fmt::format("grid {} at ({:.0f}, {:.0f}) epoch {}: {} rays in {:.1f} ms casting ({:.1f} us each) over {} frames, {:.0f} ms from start; misses={} actor hits={} (still on an actor after re-casting: {}); ground z {:.1f}..{:.1f}",
-				g_out.id, g_job.cx, g_job.cy, g_job.epoch, rays, g_job.castMs, 1000.0 * g_job.castMs / rays, g_job.frames,
-				NowMs() - g_job.startMs, g_job.misses, g_job.actorHits, g_job.actorLeft, zMin, zMax);
+			const double tookMs = NowMs() - g_job.startMs;
+			g_castMsAvg = 0.7 * g_castMsAvg + 0.3 * tookMs;
+			g_lastGrid = fmt::format("grid {} at ({:.0f}, {:.0f}) epoch {}, centred {:.0f} units ahead of the player: {} rays in {:.1f} ms casting ({:.1f} us each) over {} frames, {:.0f} ms from start; misses={} actor hits={} (still on an actor after re-casting: {}); ground z {:.1f}..{:.1f}",
+				g_out.id, g_job.cx, g_job.cy, g_job.epoch, g_leadUnits, rays, g_job.castMs, 1000.0 * g_job.castMs / rays, g_job.frames,
+				tookMs, g_job.misses, g_job.actorHits, g_job.actorLeft, zMin, zMax);
 			logger::info("TERRAIN published {}", g_lastGrid);
 			g_job.running = false;
 		}
@@ -162,11 +176,21 @@ namespace gmsky::Terrain
 		if (g_job.running && g_job.epoch != a_origin.epoch) {
 			g_job.running = false;  // the origin changed under the grid: start again
 		}
+		// Garry's Mod's velocity, in Skyrim units per second (horizontal).
+		const double vx = g.vel[0] / kGmodPerSkyrim, vy = g.vel[1] / kGmodPerSkyrim;
+		const double speed = std::hypot(vx, vy);
 		if (!g_job.running) {
-			const double lx = std::round(pos.x / kLattice) * kLattice, ly = std::round(pos.y / kLattice) * kLattice;
-			const bool stale = !g_done.valid || g_done.epoch != a_origin.epoch || lx != g_done.cx || ly != g_done.cy;
-			if (!stale) {
+			const double lead = (g_castMsAvg + kLeadExtraMs) / 1000.0;
+			const double ax = pos.x + vx * lead, ay = pos.y + vy * lead;
+			const double lx = std::round(ax / kLattice) * kLattice, ly = std::round(ay / kLattice) * kLattice;
+			const bool moved = !g_done.valid || g_done.epoch != a_origin.epoch || lx != g_done.cx || ly != g_done.cy;
+			const bool height = !moved && std::abs(pos.z - g_done.refZ) > kRecastHeight;
+			if (!moved && !height) {
 				return;
+			}
+			if (height) {
+				logger::info("TERRAIN player height {:.0f} is {:.0f} from the last grid's {:.0f}: casting a new grid", pos.z,
+					pos.z - g_done.refZ, g_done.refZ);
 			}
 			g_job = Job{};
 			g_job.running = true;
@@ -175,12 +199,14 @@ namespace gmsky::Terrain
 			g_job.cy = ly;
 			g_job.refZ = pos.z;
 			g_job.startMs = NowMs();
+			g_leadUnits = speed * lead;
 		}
 
 		const double t0 = NowMs();
 		const double half = (kN - 1) * 0.5;
 		int cast = 0;
-		while (g_job.next < kN * kN && (cast < 16 || NowMs() - t0 < kBudgetMs)) {
+		const double budget = speed > kFastSpeed ? kBudgetFastMs : kBudgetMs;
+		while (g_job.next < kN * kN && (cast < 16 || NowMs() - t0 < budget)) {
 			const int i = g_job.next / kN, j = g_job.next % kN;
 			const float x = float(g_job.cx + (i - half) * kSpacing), y = float(g_job.cy + (j - half) * kSpacing);
 			float z = 0.0f;
