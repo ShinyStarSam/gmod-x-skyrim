@@ -428,3 +428,114 @@ Skipped: header stuck at INIT if a process dies mid-initialization (tiny window;
 **Changed (cleanup):** the per-call debug lines in `BuildCollision` removed; `built …` is logged only on failure, for test hills and in replay mode (it now includes `solid=`/`flags=`). README: step 3c works; known gaps listed.
 **Tested how:** `gmod_harness.exe`: HARNESS PASSED 63/63.
 **Not handled:** running off the built ground faster than new grids arrive would build a piece under a moving player (the crash case). Not seen in test 16.
+
+## 2026-10-04 Phase 1 step 3d: Skyrim's player takes its height from Garry's Mod (not tested in game)
+
+**Changed:** `skse/src/Puppet.cpp`: the player's z is Garry's Mod's (blended with x/y, step 2) instead of Skyrim's own ground ray. The ray stays only for the log: once a second `PUPPET height (step 3d): … Garry's Mod feet minus Skyrim's ground min=… max=…`. The `PUPPET on:` line now gives Skyrim's own drift in xy and z separately, and how many frames Garry's Mod was in noclip. `docs/DESIGN.md`: 3d and the new 3e (noclip) planned.
+**Why:** next planned step; jumping and noclip can't show in Skyrim without it; test 11 (sprinting up a steep slope put Skyrim's player inside the mountain) came from mixing the two games' heights.
+**Tested how:** `cmake --build --preset release` (compiles, copied to Skyrim's Plugins folder).
+**Not tested in game.** Expected: walking, "feet minus ground" within a few units of 0; in a jump, max goes up (~100 Skyrim units).
+**Next:** step 3e, noclip.
+
+## 2026-10-04 Phase 1 step 3e: noclip on V, and the crash guard for building ground under the player (not tested in game)
+
+**Changed:**
+- Protocol version 6: `GmskyInput.reserved0` is now `noclip_presses`, a running count of V presses (`protocol/gmsky_protocol.h`, `protocol/src/lib.rs`; offset 36 asserted on both sides).
+- `skse/src/Input.cpp`: V (scan code 0x2F) in Skyrim's window adds 1 and logs `V: noclip toggle #N sent to Garry's Mod`; it never reaches Skyrim.
+- `gmod/module/src/lib.rs`: `gmsky.ReadInput()` returns a 6th value, the new presses since the last tick (presses made while input went to Skyrim are not counted; a jump of more than 8 counts as a restart and is ignored).
+- `gmod/lua/gmsky/server.lua`: each new press does what Garry's Mod's own `noclip` command does: asks the `PlayerNoClip` hook, then switches the move type. Logs `noclip ON/OFF (V in Skyrim) at (…): done` (or "refused"). The 1-second status line shows `NOCLIP`.
+- `gmod/lua/gmsky/terrain.lua`, **crash guard**: a ground piece whose square (+48 units) contains the player is never built while the player moves. In noclip it is left in the queue (`GUARD: … under the player in noclip: left for later`) and built once the player isn't over it or noclip ends. Walking, the player is held still with its feet 40 above the ground near it for 3 ticks, then the piece is built and the player let go (`GUARD: … held still at z …`, `GUARD: released …`). This also covers the old "outrunning the grid" gap. Noclip ends any hold. All holds go through one `T.Hold` with a reason (origin / no ground / guard / replay), shown in the status line. A piece built from a grid with misses is rebuilt when a newer grid has fewer misses there (`… replaces a piece with more misses`).
+- `skse/src/Terrain.cpp`: rays reach 20,000 units below the player's feet (was 4,000), and a new grid is cast when the player's height moved more than 2,000 units from the last grid's (`TERRAIN player height … casting a new grid`), so a player flying high in noclip still gets ground.
+- `skse/src/Puppet.cpp`: logs `PUPPET Garry's Mod noclip ON/OFF` and Skyrim's own drift (xy and z) every second, to see whether Skyrim's physics pushes the flying player out of rocks.
+**Why:** user request: noclip (V) must work. Noclip flies much faster than walking, so without the guard it would build ground under the moving player, which crashes Garry's Mod (STATUS.md "Known engine bug").
+**Tested how:** `cargo build --release`; `cargo test --release`; `gmod_harness.exe` → HARNESS PASSED, 75/75 checks (new: V on/off/two presses in one tick through the `PlayerNoClip` hook; guard hold 40 above the ground before building under the player for grids 7 and 9; grid 10's piece under a noclip player left for later, then built with a guard hold after noclip ends; grid 11 rebuilds only the piece that had a miss). `cmake --build build/protocol` → PROTOCOL TEST PASSED. Skyrim plugin built and copied.
+**Result:** all automated checks pass. The harness does not run Garry's Mod's physics or movement.
+**Still broken / not tested:** nothing here has run in game. Not known: whether Skyrim's own physics fights a player flying through rocks (watch `max-drift` in noclip); whether a guard hold raising the player 40 units is noticeable; how much the longer rays cost (the per-frame budget caps it; the grid may take more frames). Known limit: ending noclip more than ~2,100 Garry's Mod units under the ground holds the player in place; press V again.
+**Next:** in-game test 17 (procedure in STATUS.md).
+
+## 2026-10-04 Phase 1 step 3f: Skyrim's player body handled as SkyCraft does (not tested in game)
+
+**Why:** user reminder before test 17: always check SkyCraft's implementation first. Reading SkyCraft's puppet (`Game.cpp`) and `DigPhysics.cpp` showed three things our 3d/3e missed:
+1. SkyCraft tells Skyrim's character controller "on the ground" (with support) or "in the air" from the other game's on-ground flag, and keeps Skyrim's gravity on: Skyrim's AI won't melee a target it thinks is in the air (SkyCraft had tried zero gravity and undid it).
+2. Skyrim's character body pushes itself out of whatever it touches; SkyCraft drops the puppet body's contacts above its feet so Skyrim can't shove it away from where the other game put it (and then "pull the other game along").
+3. Skyrim lifts any actor more than 30 units under the land back on top ("land rescue"). For a noclip player under the ground that lift would also be bigger than our 300-unit "Skyrim moved the player" threshold, which resets the origin and teleports the Garry's Mod player home. Our own plan only said "measure it"; this would have failed in test 17.
+**Changed:** new `skse/src/Body.cpp/.h` (adapted from SkyCraft, MIT): contact hook (`bhkCharacterPointCollector::AddCdPoint`) drops our body's contacts above its feet (+0.3 Havok units), all of them in noclip; land-rescue hook at the call SkyCraft found on 1.7.104 (`REL::ID(37507) + 0xCEA`, patched only if a 5-byte call is there; else a warning in the log) skips the rescue for an actor within 64 units of our player while the puppet is on. `Puppet.cpp`: on-ground/in-air controller state from `GMSKY_PF_ON_GROUND` (in air while in noclip), gravity untouched; passes the body to `Body`; `Body::Release` when the puppet goes off. `main.cpp`: installs the hooks; trampoline 256 → 512 bytes. Log: `BODY puppet: contacts dropped above the feet=… in noclip=…, land rescues skipped=…` every second. New `THIRD-PARTY-NOTICES.md` with SkyCraft's MIT license and the list of files adapted from it; README credits section.
+**Tested how:** `cmake --build --preset release` (compiles, links, copied to Skyrim). No Garry's Mod changes; harness unchanged (75/75 earlier).
+**Not tested in game.** Not sure: that the land-rescue spot holds for our exact game build (same 1.7.104 as SkyCraft; the plugin checks the byte before patching and logs either way).
+**Next:** in-game test 17 (procedure in STATUS.md).
+
+## 2026-10-04 In-game test 17 (steps 3d, 3e, 3f): noclip works, then Garry's Mod crashed (same engine bug)
+
+**Result (logs, grids, dump: `build/logs-ingame-test-17/`):** ~2 minutes, grids 1–87, 404 piece builds on the server. User: "great around regular terrain until CTD", four problems:
+1. **Crash** (Garry's Mod, 17:44:27): same signature as tests 12–15 (`vphysics.dll+0xaaff0`, `rbp=0xfffd r12=0xffff r13=0xfffe`, via `server.dll+0x2eb909` = `CollisionRulesChanged`). Last line: `building Skyrim grid 87 piece 15 … player not over it, 328 units from its middle, in the air`, 0.3 s after `noclip OFF` while flying fast (noclip sprint speed ~1,470). So the guard's rule ("only a piece under the player is dangerous", margin 48) was wrong: a fast player just beside a piece crashes too. **Fifth crash from this bug.**
+2. **"Wonky around objects":** at grids 21–23 the lift rule fired 7–23 times a second with the player 126–164 units *above* the ground under its centre. The rule compared the feet with the highest point under the 32×32 footprint; next to an object the 48-unit ray grid is a steep spike, so the player was popped onto it. (Inferred from the status lines; those grids weren't kept on disk.) The ray grid itself also turns objects into steep pyramids, which can't walk smoothly; that part is a limit of stage A.
+3. **Stopping mid-air after a noclip launch:** after `noclip OFF` at speed, the player outran the built ground: `HOLD at … no Skyrim ground` (5 times) and guard holds (2 times). Both freeze the player and zero its speed.
+4. **Map edge:** the player reached x −16,929 Garry's Mod units (−16,416 is gm_flatmap's wall) ≈ 31,000 Skyrim units from the start. Needs step 5 (moving the origin).
+**Worked (verified from logs):** V toggles (`noclip ON/OFF (V in Skyrim)`, 17 toggles), skipped-in-noclip pieces (`left for later`, 14), guard holds built and released, holds released on noclip. Skyrim: `body hooks installed (contacts, land rescue)`; contacts dropped every second while moving (up to 145 above the feet, 56 in noclip); 6 land rescues skipped; Skyrim's own drift ≤ 2.6 units; no origin reset (epoch 1 all session). Step 3d: Skyrim z followed Garry's Mod (two logged "big steps" of 1,015 and 665 units up were Garry's Mod lifting a player that ended noclip 850 units under the ground).
+**Client error found:** `terrain.lua:300: attempt to call method 'GetTestId' (a nil value)` in the client status timer: a ground entity that had only just arrived on the client had no data functions yet. Same timer stopped in test 16.
+
+## 2026-10-04 Fixes from test 17: client status error, lift judged at the player's centre (not tested in game)
+
+**Changed:** `terrain.lua`: `T.Status` skips entities without `GetTestId` yet. The lift rule ("player is inside the ground") now uses the ground under the player's centre (bilinear) minus 12, not the highest point under the footprint; where it lifts, it still lifts to 4 above the footprint's highest point.
+**Why:** test 17 problems 2 (partly) and the client error.
+**Tested how:** `gmod_harness.exe`: HARNESS PASSED (75/75). The harness has no spike next to the player, so the new rule is only covered for the plain "fell through" case.
+**Not tested in game.** Problems 1, 3, 4 not addressed: see STATUS.md.
+
+## 2026-10-04 In-game test 18 (lift fix) and a re-plan (proposal only, no code)
+
+**Result (logs: `build/logs-ingame-test-18/`):** user: "tested, doesn't matter anyway". No crash; `lifts` 0 in every status line (fix works for that session; no numbers on bumpiness).
+**User's direction:** don't fix the ray grid; step 5 next, then Skyrim's real collision shapes ASAP, checked against SkyCraft.
+**Finding from SkyCraft:** SkyCraft never creates physics objects for Skyrim's world in Minecraft; it adds shapes to Minecraft's collision query. Our crash comes from Garry's Mod creating physics objects near the moving player, so it would follow us into step 5 and into real Havok shapes if they were still built with `PhysicsFromMesh`.
+**Changed:** `docs/DESIGN.md`: "Phase 1 re-plan after test 17": A collision-field experiment (`ENT:TestCollision`, no physics objects), B ray grid into the field, C step 5, D SkyCraft's stage C ported. Waiting for the user's go-ahead (AGENTS.md: ask before large refactors).
+
+## 2026-10-04 Re-plan step A: collision field experiment, triangles answered from Lua (not tested in game)
+
+**Why:** user's go-ahead for step A; user worried boxes would feel bad around trees and fences. Checked SkyCraft: its final player collision (`fabric/src/main/java/dev/skycraft/world/TriCollider.java`) uses Skyrim's exact triangles because boxes stair-stepped slopes; boxes only for mobs/items. So step A uses triangles.
+**Changed:** new `gmod/lua/gmsky/field.lua` (both sides; included by `server.lua`, `client.lua`): a triangle store with a 64-unit lookup grid; a swept box-against-triangle test (separating axes: 3 box axes, face normal, 9 edge crosses; stops 1/32 unit short like Source; a box already overlapping a triangle may move out or along it but not further in); entity `gmsky_field` (`SOLID_OBB`, custom collisions, **no physics object**) whose `ENT:TestCollision` answers from the field. `gmsky_test_field` builds a test scene under the player on both sides: the 3a hill (8,192 triangles) to the west, and a 900×900 floor with a post, a fence, a 12-sided trunk, stairs (6 × 12 units) and a 50° ramp; `gmsky_test_field 0` removes it. `gmsky_field_feet` (default 1) says whether `startpos` is the bottom of the moving box (Garry's Mod wiki example) or its centre; the first 6 box calls are logged with their arguments to settle it. Status lines (server each second, client every 5 s): tests, hits, triangles tested, Lua ms, what the player stands on, feet minus hill.
+**Tested how:** `gmod_harness.exe`: HARNESS PASSED, 84 checks (new: box lands on a floor 1/32 above it; ray hits floor; no touch 1 unit above; post stops a box at its face; box inside the floor may leave upward but not go down; 50° ramp normal; scene = 8,352 triangles). Speed in Garry's Mod's Lua: 0.0175 ms per player-sized 300-unit sweep over the hill.
+**Not tested in game. Not known:** whether Garry's Mod's player movement traces call `TestCollision` for this entity at all (the experiment's main question), the `startpos` convention, client prediction.
+
+## 2026-10-04 In-game test 19 (step A, Garry's Mod alone): triangle collision from Lua works
+
+**Result (logs: `build/logs-ingame-test-19/`):** user: "the collision feels great … this is definitely the future"; couldn't find the stairs.
+- Player movement calls `TestCollision`: 300–820 box tests a second on the server while moving, 0.03–0.3 ms of Lua per tick (1.2–20 ms per second), slowest call 0.84 ms.
+- `startpos` is the **bottom** of the moving box (`gmsky_field_feet 1` correct): scene 1, the player stood on `gmsky_field` at z −16,279.9, i.e. 0.03 above the floor (−16,280) = the 1/32 gap we leave. Seen extents: (16, 16, 18) and (8, 8, 36) (not the 16×16×72 standing hull; unexplained, works anyway).
+- Scene 2 (the user probably set `gmsky_field_feet 0`): the box started inside the floor ("hit at 0.000") and the player stood 4 above it; then left.
+- "Standing on the map" lines: the player walked off the floor's west edge (8 units down to the map) and under the hill, which is a sheet 100–265 units above the floor there ("feet minus hill −339"). **Scene layout mistake**, not a collision fault. Stairs were 450–700 units east of the start.
+- Client: 0 box tests (single-player: the client doesn't predict movement), ~950 ray tests a second (view traces), ~1 ms per frame of Lua: long rays scan every cell of their box. To speed up later (walk only the cells along the ray).
+- Not verifiable from these logs: hits on the post/fence/trunk specifically (no per-object log); the user's report is the evidence.
+**Next:** step B (ray grid onto the field).
+
+## 2026-10-04 Re-plan step B: Skyrim's ground grid becomes Lua triangle collision; physics-object ground removed (not tested in game)
+
+**Changed:**
+- `gmod/lua/gmsky/terrain.lua` rewritten. Each new grid from Skyrim becomes the triangles of one persistent `gmsky_field` entity at once (8,190 triangles for a full grid). **Removed:** the `PhysicsFromMesh` ground (`gmsky_terrain` entity, 4×4 pieces, piece reuse and `gmsky_reuse_pieces`, the crash guard and its holds, rebuilding pieces with misses), the 3a test hill (`gmsky_test_terrain`; `gmsky_test_field` replaces it) and the crash-investigation replay tool (`gmsky_replay`). Kept: grid polling, "home" on a new origin, the "no ground" hold (now gives the player its speed back when it lets go: test 17 problem 3), noclip ending holds, the centre-based lift rule.
+- `gmod/lua/gmsky/field.lua`: `F.FromGrid(g)` (squares touching a miss left out) and `F.UseGrid(ent, g)` (server); the entity's networked `GridId` makes the client build the same field from its own copy of the grid (logs `field: grid N built on this side`).
+- Harness: fake entities store `SetX` values and run the scripted entity's own methods; the ground tests now check: grid → ground in one tick, the real `ENT:TestCollision` stopping a falling box on the grid, the next grid replacing it, a no-ground hold, noclip releasing it, and the speed given back.
+- Unchanged: the Skyrim plugin, the protocol, the module (`ReadGridFile` and grid recording stay).
+**Why:** user's go-ahead for the re-plan; test 19 showed Lua triangle collision works and feels good. No physics objects means the "known engine bug" crash can't happen any more.
+**Tested how:** `cargo build --release`; `gmod_harness.exe` → HARNESS PASSED, 77 checks (the old piece/guard/replay checks are gone with the code). Field speed 0.021 ms per sweep.
+**Not tested in game.** Not known: the hitch from building 8,190 triangles in Lua on each new grid (6–10 ms per side in test 19's scene), the client's cost for long view rays over the 1,632-unit field.
+
+## 2026-10-04 In-game test 20 (step B): feels great, hitches when launched horizontally
+
+**Result (logs: `build/logs-ingame-test-20/`):** 73 grids, no crash. User: "feels great, strange hitches when launching myself horizontally".
+- **Cause 1 (the hitch):** after noclip launches (~1,300 Garry's Mod units/s ≈ 2,450 Skyrim units/s) the player outran the ground 14 times (`HOLD at … no Skyrim ground`, 3–25 held ticks = 45–375 ms frozen, then `speed … given back`). Each grid took 320–517 ms (20–32 frames) to cast and was centred where the player was when casting *started*: the player had covered 800–1,300 Skyrim units of the grid's 1,536 half-width by the time it arrived.
+- **Cause 2:** turning a grid into 8,192 triangles took 7.4–20.0 ms of Lua per grid (server; the client too): a small stall at every new grid.
+- Speed given back worked (e.g. `speed (-1385, -383, -137) given back`).
+
+## 2026-10-04 Fixes for test 20's hitches (not tested in game)
+
+**Changed:**
+- `skse/src/Terrain.cpp`: a new grid is centred where the player *will be*: position + Garry's Mod's velocity × (recent cast time + 0.1 s), snapped to the lattice. The "published" line says how far ahead it was centred. Above 1,000 Skyrim units/s the ray budget is 4 ms a frame (was always 1.5).
+- `gmod/lua/gmsky/field.lua`: a grid field keeps only the heights; a square's two triangles are made the first time a trace touches it (grid build now < 1 ms). Long traces are tested in 128-unit sections in order. Traces exactly along a square's edge also test the square on the other side (found by a new harness check: a ray on a grid line slipped between two squares), with a 0.0001-unit tolerance in the edge test.
+- `terrain.lua`: logs squares instead of triangles; the status line shows how many triangles have been made so far.
+- Harness: 78 checks (new: long slanted ray hits the surface and makes < 300 triangles; ray along a square edge hits).
+**Why:** test 20 hitches; user wants them fixed before committing.
+**Tested how:** `cargo build --release`; `gmod_harness.exe` → HARNESS PASSED 78/78; `cmake --build --preset release` (Skyrim plugin built and copied).
+**Not tested in game.** If the player still outruns the ground at noclip launch speed, the next step is SkyCraft's streaming (small regions nearest-first in a wider radius), planned for step D.
+
+## 2026-10-04 In-game test 21 (test 20 fixes): "absolutely perfect"
+
+**Result (logs: `build/logs-ingame-test-21/`):** Skyrim + Garry's Mod, 164 grids, 17 noclip launches, no crash (no new dump), no Lua errors. **0 `HOLD at` lines** (test 20: 14). Grids centred up to 1,205 Skyrim units ahead of the player; slowest grid 36 frames / 584 ms from start. Grid build in Garry's Mod 0.1 ms (test 20: 7.4–20.0 ms). Slowest single `TestCollision` 1.26 ms. User: "absolutely perfect".
+**Next:** commit the steps; then step C (moving the origin, step 5), then step D (Skyrim's real collision shapes, SkyCraft's stage C).

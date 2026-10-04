@@ -343,10 +343,133 @@ Goal: play from the Skyrim window with Garry's Mod movement on Skyrim's real gro
      crashes then (a 16-bit list overflows while it works out what the new object touches;
      STATUS.md "Known engine bug"). Reuse keeps the piece under the player during normal
      movement; outrunning the grid is not handled yet.
-   - **3d. The puppet uses Garry's Mod's height**; the ground ray is removed. Test: jump, crouch,
-     walk up and down hills; Skyrim z follows Garry's Mod z.
+   - **3d. The puppet uses Garry's Mod's height** (planned 2026-10-04). Skyrim's player z comes
+     from Garry's Mod (blended like x/y, step 2) instead of Skyrim's own ground ray. The ray stays
+     only as a measuring tool: once a second the log gives "Garry's Mod feet minus Skyrim's ground"
+     (smallest/largest), which should be about 0 when walking and positive in a jump. Test: jump,
+     walk up and down hills; Skyrim z follows Garry's Mod z. Crouching lowers only the eye, not the
+     feet, so it shows with step 4 (camera), not here.
+   - **3e. Noclip (V)** (planned 2026-10-04, user request). Garry's Mod's own noclip, started
+     from the Skyrim window. Needs 3d (otherwise Skyrim would keep the player on its ground).
+     - **Key:** V in Skyrim's window adds 1 to a running count of presses in `GmskyInput`
+       (the unused `reserved0` becomes `noclip_presses`; protocol version 6). A count, not a
+       held bit, so a quick tap between two Garry's Mod ticks is never lost. Garry's Mod toggles
+       noclip once per new press the way its own `noclip` command does: it asks the
+       `PlayerNoClip` hook (the gamemode's permission check; always yes in single-player
+       Sandbox) and switches the move type between noclip and walking. Logged on both sides.
+     - **Crash guard (also closes the "outrunning the grid" gap):** noclip flies far faster than
+       walking, so the player will often be over a ground piece that isn't built yet. Rule from
+       the crash investigation: never build a piece under a moving player. Before building a
+       piece whose square (plus 48 units) contains the player: in noclip, skip it for now (a
+       flying player needs no ground; it is built once the player is no longer over it, or once
+       noclip ends); walking, hold the player still with its feet at least 40 units above the
+       ground near it for 3 ticks, then build, then let go (grid 1 is built like this on every
+       run and never crashed; test 14 crashed with the player held with its feet *on* the new
+       surface, hence the 40 units). Holds end at once when noclip starts.
+     - **Ground while flying:** Skyrim's rays run from 4,000 units above the player's feet to
+       4,000 below, so a player flying high would get a grid of misses. Rays now reach 20,000
+       below (they stop at the first surface anyway), and a new grid is cast when the player's
+       height moved more than 2,000 units from the last grid's. In Garry's Mod a piece that had
+       misses is rebuilt (under the same guard) when a newer grid has more ground there.
+     - **Skyrim side:** the puppet already puts the player wherever Garry's Mod says each frame.
+       Not known yet: whether Skyrim's own physics pushes the player out of rocks and walls
+       while it flies through them. The log measures it ("drift" in noclip); turning Skyrim's
+       player collision off is the next step only if the numbers show it is needed.
+     - Known limit: ending noclip more than ~2,100 Garry's Mod units under Skyrim's ground leaves
+       the player held in place (no ground found above it within reach); press V again.
+     Test: press V, fly up, through a hill and far away, press V again over open ground: the
+     player lands and walks; Garry's Mod does not crash; logs show the toggles, skipped/guarded
+     pieces and Skyrim z following Garry's Mod z.
+   - **3f. Skyrim's player body, as SkyCraft does it** (planned 2026-10-04, from reading
+     SkyCraft's `Game.cpp` puppet and `DigPhysics.cpp`; adapted from SkyCraft, MIT). With 3d,
+     Skyrim's body must not fight Garry's Mod's height:
+     - **On ground / in air:** each frame Skyrim's character controller is told what Garry's Mod
+       says (`GMSKY_PF_ON_GROUND`): on the ground (with "support") or in the air. Skyrim's
+       gravity stays on, because SkyCraft found Skyrim's AI won't melee a target it thinks is
+       in the air (they tried zero gravity first and undid it).
+     - **Contacts:** Skyrim's body collects contact points with the world and pushes itself out
+       of them. Contacts above the player's feet (a wall at the head, a rock it was put inside)
+       are dropped, so only what's under its feet holds it, as in SkyCraft. In noclip all its
+       contacts are dropped (it flies through everything). Without this Skyrim would shove the
+       body away from where Garry's Mod put it.
+     - **Land rescue:** Skyrim puts any actor that is more than 30 units under the land back on
+       top. For our player (only while the puppet is on) that is switched off: a noclip player
+       under the ground would otherwise be lifted, and a lift of more than 300 units looks like
+       "Skyrim moved the player" (a load door) and resets the origin. Same hook spot as SkyCraft
+       (checked on 1.7.104: the land-height call in the actor movement update).
+     Logs per second: contacts dropped, rescues skipped. Test: as 3e; `max-drift` near 0 in
+     noclip inside a hill; no "Skyrim moved the player" while flying under ground.
 4. **Camera.** Skyrim's camera from Garry's Mod's eye (crouch height, view bob) and FOV.
 5. **Floating origin re-centre** (§5): move the origin when the player is far from it.
+
+### Phase 1 re-plan after test 17 (proposed 2026-10-04, waiting for the user's go-ahead)
+
+User's direction: skip fixing the ray-grid ground, do step 5 next, get to Skyrim's real collision
+shapes as soon as possible, checked against SkyCraft.
+
+**What SkyCraft does that we don't** (read in `reference/SkyCraft`: `docs/DESIGN.md` §5.1,
+`skse/src/Collision.cpp/.h`): Minecraft never gets physics *objects* for Skyrim's world. A Mixin
+adds Skyrim's shapes (boxes) to Minecraft's collision *query*, so Minecraft's own movement code
+runs unchanged against them. Our crash (STATUS.md "Known engine bug", 5 crashes) is in Garry's
+Mod's physics engine creating a new physics object near the moving player. Real Havok shapes
+built with `PhysicsFromMesh` would hit the same crash, and step 5 (moving the origin) means
+rebuilding all ground, which would hit it too. So the crash is not something we'd "replace
+anyway": it comes with how Garry's Mod gets the collision, not with where the data comes from.
+
+**Garry's Mod's version of SkyCraft's trick:** an entity with custom collision
+(`EnableCustomCollisions(true)`, a box solid type, no physics object) has its Lua
+`ENT:TestCollision(start, delta, isbox, extents, mask)` asked whenever a trace (player movement,
+bullets) crosses its bounds; it answers with the hit position, fraction and normal. Garry's Mod's
+player movement is made of box traces, so it walks, jumps, steps up and slides on whatever Lua
+answers. No physics object is created, so the crash's code is never reached. **Not known yet**
+(the first step measures it): whether player movement traces really reach `TestCollision` for
+this setup, the client's prediction (the client must answer the same), and the Lua cost per tick.
+Known limit: physics props and ragdolls in Garry's Mod won't collide with it (traces only).
+
+Steps, each tested on its own:
+- **A. Collision field experiment (Garry's Mod only, like 3a; go-ahead 2026-10-04).** Real
+  triangles, not boxes. User's concern: boxes would feel terrible around trees and fences.
+  SkyCraft agrees: its final player collision (`fabric/.../world/TriCollider.java`) runs against
+  Skyrim's exact triangles because boxes made slopes stair-stepped; boxes stay only for mobs and
+  items. Garry's Mod needs less than SkyCraft did: its movement already copes with slanted
+  surfaces (map brushes), so Lua only answers "where does this moving box first touch these
+  triangles" exactly (a swept separating-axis test: 3 box axes, the face normal, 9 edge
+  crosses) and Garry's Mod's own walking, sliding and step-up do the rest. SkyCraft had to write
+  its own resolver (step-up, wall sliding) because Minecraft's only handles boxes.
+  `gmsky_test_field` builds a test scene under the player on both sides: the 3a hill (8,192
+  triangles), a flat floor with a post, a fence, a 12-sided tree trunk, stairs (12-unit steps)
+  and a 50° ramp (too steep to walk). New file `gmod/lua/gmsky/field.lua`; entity
+  `gmsky_field` (box solid, custom collisions, no physics object). Logged on both sides each
+  second: `TestCollision` calls (box / ray), hits, Lua ms, slowest call, what the player
+  stands on, feet minus the hill. First calls log their arguments, because whether `startpos` is
+  the box's centre or its bottom isn't documented clearly (Garry's Mod wiki example treats it as
+  the bottom; `gmsky_field_feet 0` switches to centre). Test: walk/sprint/jump/crouch over the
+  hill, around the post, fence and trunk, up the stairs, against the ramp.
+- **B. Ray grid into the field** (built 2026-10-04 after test 19 showed A works: player movement
+  calls `TestCollision`, `startpos` is the bottom of the box, 0.03–0.3 ms of Lua per tick). Each
+  new grid becomes the triangles of one persistent `gmsky_field` entity (not boxes: test 19).
+  `PhysicsFromMesh`, the pieces, the crash guard and its holds, the 3a hill and the replay tool
+  are removed. The "no ground" hold stays, and gives the player its speed back when it ends.
+  **B fixes after test 20** ("strange hitches when launching myself horizontally"): at ~1,300
+  units/s the player outran the grid 14 times (each grid takes 0.3–0.5 s to cast and was centred
+  where the player was when casting *started*) and was frozen 3–25 ticks; and building 8,190
+  triangles took 7–20 ms per grid on each side. Fixes: (1) Skyrim centres a new grid where the
+  player will be when it is done (its velocity × the recent cast time + 0.1 s, snapped to the
+  lattice); (2) above 1,000 Skyrim units/s the ray budget is 4 ms a frame instead of 1.5;
+  (3) Garry's Mod keeps the grid's heights and makes a square's two triangles only when a trace
+  first touches it (no build cost); long traces are tested in 128-unit sections in order, so a
+  long view ray doesn't scan the whole grid. The hold stays as the last resort. SkyCraft's way
+  (small regions streamed nearest-first, continuously, in a wider radius; freezing only after a
+  teleport) is how step D will stream.
+- **C. Step 5, moving the origin.** With the field, a re-centre only shifts numbers: no objects
+  are rebuilt. Re-centre while the player is on the ground (§15), log each jump.
+- **D. Skyrim's real shapes (SkyCraft's stage C, ported).** Walk the loaded Havok world around
+  the player under its read lock (SkyCraft's layer list: static, anim static, transparent, trees,
+  props, terrain, ground, invisible walls, stair helpers), decode the shapes (MOPP/BV trees,
+  lists, compressed meshes, convex shapes, boxes, capsules), voxelize on a worker thread into
+  boxes, region by region, nearest first; steep surfaces become walls; stair helpers become
+  ramps. Streamed through a larger shared-memory ring (the 64 KB map is too small). This also
+  covers buildings, arches and interiors that the ray grid can't.
 
 ## 13. Repo layout
 

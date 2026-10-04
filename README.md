@@ -43,25 +43,37 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   `garrysmod/lua/autorun/server/gmsky_autoload.lua`, installed once with
   `tools/install_gmod_autoload.ps1`, loads gmsky in single-player once you're in the map.
 
-- **Garry's Mod walks on Skyrim's ground** (tested in game 2026-10-04, Phase 1 step 3c, test 16):
-  Skyrim measures the ground around the player and Garry's Mod builds it as invisible collision,
-  so Garry's Mod's own movement walks Skyrim's hills (on gm_flatmap). 65 ground updates in one
-  session with no crash; each update builds only the 4 new pieces at the edge (~5 ms) and keeps
-  the 12 it already has. Building a new piece under the moving player crashes Garry's Mod's
-  physics, so pieces under the player are never rebuilt; `gmsky_reuse_pieces 0` turns that off
-  and is only for testing.
+- **Garry's Mod walks on Skyrim's ground** (tested in game 2026-10-04, tests 20–21): Skyrim
+  measures the ground around the player with rays, and Garry's Mod's own movement walks, jumps
+  and slides on it. The ground is triangles answered from Lua (no Garry's Mod physics objects,
+  which crashed Garry's Mod in tests 12–17). Test 21: 164 ground updates, no crash, no stalls;
+  Skyrim measures ahead of a fast player, so noclip launches never outran the ground.
+
+- **Jumping and noclip** (tested in game 2026-10-04, tests 17 and 21): Skyrim's player follows
+  Garry's Mod's height; **V** toggles Garry's Mod's noclip from the Skyrim window; you fly
+  through Skyrim's hills, and Skyrim's own physics doesn't push you back (contacts and Skyrim's
+  "land rescue" are switched off for our player, as SkyCraft does).
 
 ## What doesn't work yet
 
-- Sprinting fast downhill can drop the Garry's Mod player through the ground for a moment; it is
-  put back on top within a second (seen once in test 16).
-- Running off the edge of the built ground faster than Skyrim sends new ground would build a piece
-  under the moving player, which is the case that crashes (not seen yet; not handled).
-
+- Travelling far (about 30,000 Skyrim units from where you loaded) hits the edge of Garry's Mod's
+  map. Needs the planned origin re-centring (step C / step 5).
+- Walking around objects (posts, rocks, carts) is bumpy: the ground is measured with rays 48
+  units apart, which turns objects into steep spikes. No walking under arches, into buildings
+  with roofs, or in interiors. Fix planned: Skyrim's real collision shapes (step D).
+- Ending noclip more than ~2,100 Garry's Mod units under Skyrim's ground holds you in place;
+  press V again.
+- Garry's Mod's physics props and ragdolls fall through Skyrim's ground (it is only answered to
+  traces, not to Garry's Mod's physics engine).
 - The mouse wheel, weapons switching, and Garry's Mod's weapons/HUD in Skyrim's window.
 - Camera position while walking is one frame late, and no crouch height or view bob (Phase 1 step 4).
-- Jumping, crouching and Garry's Mod's own height: Skyrim's player stays on Skyrim's ground.
+- Crouching: lowers only Garry's Mod's eye, so it shows in Skyrim with the camera step (step 4).
 - Everything else in [docs/DESIGN.md](docs/DESIGN.md) §12.
+
+## Credits
+
+Built on the approach and parts of the Skyrim plugin of [SkyCraft](https://github.com/chasmlol/SkyCraft)
+by chasmlol (MIT). Details and license text: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ## Requirements
 
