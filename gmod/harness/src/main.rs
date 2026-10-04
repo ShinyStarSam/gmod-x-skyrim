@@ -103,6 +103,19 @@ function HARNESS_NEW_CMD()
 	return c
 end
 function IsValid(x) return x ~= nil end
+scripted_ents = { Register = function(t, name) HARNESS_SENT_CLASS = name end }
+concommand = { Add = function(name) HARNESS_CONCOMMAND = name end }
+ents = { FindByClass = function() return {} end }
+function LocalPlayer() return HARNESS_PLY end
+local V = {}
+V.__index = V
+function Vector(x, y, z) return setmetatable({ x = x or 0, y = y or 0, z = z or 0 }, V) end
+V.__add = function(a, b) return Vector(a.x + b.x, a.y + b.y, a.z + b.z) end
+V.__sub = function(a, b) return Vector(a.x - b.x, a.y - b.y, a.z - b.z) end
+V.__mul = function(a, k) return Vector(a.x * k, a.y * k, a.z * k) end
+function V:Length() return math.sqrt(self.x * self.x + self.y * self.y + self.z * self.z) end
+util = { TraceLine = function() return { Hit = false, HitPos = Vector() } end }
+game = { GetMap = function() return "harness" end }
 MOVETYPE_WALK = 2
 MOVETYPE_NOCLIP = 8
 local t = 0
@@ -328,6 +341,7 @@ fn main() {
 
     let server_log = std::fs::read_to_string(log_dir.join("gmod_server.log")).unwrap_or_default();
     check(server_log.contains("server.lua loaded"), "gmod_server.log: server.lua loaded");
+    check(server_log.contains("ran gmod/lua/gmsky/terrain.lua"), "gmod_server.log: terrain.lua runs on the server");
     check(server_log.contains("new origin epoch 1"), "gmod_server.log: new origin epoch 1");
     check(server_log.matches("ERROR").count() == 1 && server_log.contains("another process (pid 424242)"),
           "gmod_server.log: exactly one ERROR, the expected takeover message");
@@ -335,6 +349,7 @@ fn main() {
     check(client_log.contains("client frames in last 5 s: 200 (40 fps) fps_max_nofocus=(no such setting)"),
           "gmod_client.log: counted 200 frames");
     check(client_log.contains("fps_max_nofocus=300"), "gmod_client.log: fps_max_nofocus logged");
+    check(client_log.contains("ran gmod/lua/gmsky/terrain.lua"), "gmod_client.log: terrain.lua runs on the client");
     let server_log = std::fs::read_to_string(log_dir.join("gmod_server.log")).unwrap_or_default();
     check(server_log.contains("input from Skyrim: ON") && server_log.contains("input from Skyrim: OFF, holding yaw=38.4 pitch=6.7"),
           "gmod_server.log: input ON and OFF logged");

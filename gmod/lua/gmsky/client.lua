@@ -4,6 +4,9 @@
 
 local gmsky = gmsky
 
+-- Collision (Phase 1 step 3): the client builds the same collision, for movement prediction.
+gmsky.Include("terrain")
+
 local frames = 0
 hook.Add("Think", "gmsky_count_frames", function()
 	frames = frames + 1
@@ -21,8 +24,8 @@ local function NoFocusCap()
 end
 
 timer.Create("gmsky_client_status", 5, 0, function()
-	gmsky.Log(string.format("client frames in last 5 s: %d (%.0f fps) fps_max_nofocus=%s",
-		frames, frames / 5, NoFocusCap()))
+	gmsky.Log(string.format("client frames in last 5 s: %d (%.0f fps) fps_max_nofocus=%s%s",
+		frames, frames / 5, NoFocusCap(), gmsky.terrain and gmsky.terrain.Status(LocalPlayer()) or ""))
 	frames = 0
 end)
 

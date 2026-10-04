@@ -10,6 +10,10 @@ local function GetPlayer()
 	if IsValid(ply) then return ply end
 end
 
+-- Collision (Phase 1 step 3), shared with the client side.
+gmsky.Include("terrain")
+if GetPlayer() and gmsky.terrain then gmsky.terrain.MeasureRoom(GetPlayer():GetPos() + Vector(0, 0, 40)) end
+
 local sensitivity = CreateConVar("gmsky_sensitivity", "3", FCVAR_ARCHIVE,
 	"Mouse sensitivity for input from Skyrim's window (same scale as Garry's Mod's sensitivity)")
 local predict = CreateConVar("gmsky_predict", "1", FCVAR_ARCHIVE,
@@ -142,9 +146,10 @@ timer.Create("gmsky_status", 1, 0, function()
 	end
 	local input = view and string.format(" input=ON cmds/s=%d buttons=0x%x mouse=(%d, %d)",
 		inputStats.cmds, inputStats.buttons, inputStats.dx, inputStats.dy) or " input=off"
-	gmsky.Log(string.format("tick=%d %s skyrim=%s epoch=%d skyrim_frame=%d writes/s=%d%s%s",
+	local terrain = gmsky.terrain and gmsky.terrain.Status(ply) or ""
+	gmsky.Log(string.format("tick=%d %s skyrim=%s epoch=%d skyrim_frame=%d writes/s=%d%s%s%s",
 		engine.TickCount(), where, connected and "CONNECTED" or "not connected", epoch, skyrimFrame,
-		writes - lastWrites, input, err and (" error=" .. err) or ""))
+		writes - lastWrites, input, err and (" error=" .. err) or "", terrain))
 	lastWrites = writes
 	inputStats.cmds, inputStats.dx, inputStats.dy = 0, 0, 0
 end)

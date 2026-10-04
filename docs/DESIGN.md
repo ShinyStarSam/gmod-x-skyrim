@@ -110,13 +110,12 @@ differences are scale and where the origin is.
 - **Frame rate matters even though Garry's Mod is hidden:** in single-player the server ticks run
   inside the game's frame loop. In the first in-game test, when Garry's Mod dropped to 20 fps
   (window not focused), its 66 ticks per second arrived in bursts of about 3, and a 60 fps reader
-  saw only ~20 changes per second. So Garry's Mod must not be throttled in the background
-  (`engine_no_focus_sleep 0`), and Phase 1 should send the smoothed per-frame position from the
-  client side, like SkyCraft sends Minecraft's partial-tick position, instead of the raw tick position.
+  saw only ~20 changes per second. So Garry's Mod must not be throttled in the background: this
+  64-bit build has no `engine_no_focus_sleep`; the launch script sets `+fps_max_nofocus 300`
+  (test 5: ~300 fps). Skyrim blends between ticks itself (Phase 1 step 2).
 - **Input:** Skyrim keeps the keyboard focus. Garry's Mod receives key and mouse data through shared
   memory and writes it into the player's command each tick with the `StartCommand` hook, so the
-  Garry's Mod window does not need focus. We also set `engine_no_focus_sleep 0` so it does not slow
-  down in the background.
+  Garry's Mod window does not need focus.
 
 ## 7. The Skyrim side
 
@@ -299,11 +298,39 @@ Goal: play from the Skyrim window with Garry's Mod movement on Skyrim's real gro
    (no added delay). `gmsky_smooth 0` in Garry's Mod's console = newest tick as before.
    Protocol version 4. Test: walking, the per-frame steps in the log are even (low spread) with
    smoothing on and uneven with it off; "late frames" near 0.
-3. **Collision, stage A.** Skyrim casts a grid of downward rays around the player (SkyCraft's
-   stage A) and streams height patches; Garry's Mod builds invisible static meshes from them, so
-   Garry's Mod's own movement walks on Skyrim's ground, hills and rocks. Then the puppet uses
-   Garry's Mod's height and the step-6 ground ray is removed. Needs event queues in the protocol.
-   Test: jump, crouch, walk up and down hills; Skyrim z follows Garry's Mod z.
+3. **Collision, stage A** (planned in detail 2026-10-04). Skyrim casts a grid of downward rays
+   around the player (SkyCraft's stage A) and sends the heights; Garry's Mod builds an invisible,
+   frozen physics object from them (`PhysicsFromMesh`), so Garry's Mod's own movement walks, jumps
+   and crouches on Skyrim's ground, hills and rocks. Then the puppet uses Garry's Mod's height and
+   the Phase 0 ground ray goes. Stage A limits (as SkyCraft's): only the top surface of each
+   column (no walking under arches or into buildings with roofs), thin things (fences) may be
+   missed. Sub-steps, each tested on its own:
+   - **3a. Garry's Mod-only test (no Skyrim).** Unknowns first: how much room gm_flatgrass has
+     above its floor and to its walls (logged with traces from the player), whether the player
+     stands and walks smoothly on a `PhysicsFromMesh` object, and how long building one takes.
+     Garry's Mod predicts the player's movement on the client too, so the client must build the
+     same object or the Garry's Mod window would stutter; our module is loaded on both sides, so
+     later both read the same heights from shared memory. Console command `gmsky_test_terrain`
+     builds a test hill (a known formula) under the player on both sides; the log compares the
+     player's height with the formula once a second, and says what the player stands on.
+   - **3b. Skyrim height grid.** The plugin casts 65×65 downward rays, 48 Skyrim units apart
+     (about 3,100 units square), centred on the player, spread over several frames, and publishes
+     the grid in a new latest-value slot (~17 KB; the map is 64 KB). A new grid when the player is
+     more than 768 units from the last centre. Logs ray time and misses.
+   - **3c. Garry's Mod builds it.** Both sides turn the newest grid into the physics object
+     (converted to Garry's Mod units with the origin), replacing the old one only once the new one
+     exists. The Garry's Mod player is placed high in the map's air space when it anchors, so
+     Skyrim ground below the start stays reachable.
+     **3a measured (test 10):** gm_flatgrass's open space is x −16,000…14,720, y −15,744…14,976,
+     floor z −12,288, ceiling ~15,360 (Garry's Mod units; ≈58,000 × 58,000 × 52,000 Skyrim units).
+     So the anchor goes near the middle, about (0, 0, 1,500): ±13,800 units of height either way
+     (±26,000 Skyrim units). A 65×65 `PhysicsFromMesh` (8,192 triangles) builds in 18–25 ms on
+     each side; the player stands and walks on it. Placement rule: above the highest point under
+     the whole 32×32 footprint (the centre alone left the player stuck in a slope). Safety rule
+     for 3c: with no Skyrim ground under the player yet, hold the Garry's Mod player in place
+     rather than let it fall ~13,000 units to the map floor.
+   - **3d. The puppet uses Garry's Mod's height**; the ground ray is removed. Test: jump, crouch,
+     walk up and down hills; Skyrim z follows Garry's Mod z.
 4. **Camera.** Skyrim's camera from Garry's Mod's eye (crouch height, view bob) and FOV.
 5. **Floating origin re-centre** (§5): move the origin when the player is far from it.
 

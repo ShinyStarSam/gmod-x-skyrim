@@ -159,7 +159,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 7] = [
+    let funcs: [(&str, lua::CFn); 8] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -167,6 +167,7 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("Status", l_status),
         ("Root", l_root),
         ("Reload", l_reload),
+        ("Include", l_include),
     ];
     for (name, f) in funcs {
         (a.pushnumber)(l, side as f64); // upvalue 1 = side
@@ -179,14 +180,18 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
 }
 
 unsafe fn run_side_script(a: &Api, l: *mut State, side: u32) {
-    let rel = format!("gmod/lua/gmsky/{}.lua", side_name(side));
-    let path = root().join(&rel);
+    run_file(a, l, side, &format!("gmod/lua/gmsky/{}.lua", side_name(side)));
+}
+
+/// Runs a Lua file from the project folder; logs the result.
+unsafe fn run_file(a: &Api, l: *mut State, side: u32, rel: &str) -> bool {
+    let path = root().join(rel);
     match std::fs::read(&path) {
-        Ok(code) => match lua::run_chunk(a, l, &code, &rel) {
-            Ok(()) => log(side, &format!("ran {rel}")),
-            Err(e) => log(side, &format!("ERROR in {rel}: {e}")),
+        Ok(code) => match lua::run_chunk(a, l, &code, rel) {
+            Ok(()) => { log(side, &format!("ran {rel}")); true }
+            Err(e) => { log(side, &format!("ERROR in {rel}: {e}")); false }
         },
-        Err(e) => log(side, &format!("ERROR reading {}: {e}", path.display())),
+        Err(e) => { log(side, &format!("ERROR reading {}: {e}", path.display())); false }
     }
 }
 
@@ -271,6 +276,23 @@ unsafe extern "C" fn l_read_input(l: *mut State) -> c_int {
 unsafe extern "C" fn l_root(l: *mut State) -> c_int {
     guarded(l, |a, _| {
         lua::push_str(a, l, &root().display().to_string());
+        1
+    })
+}
+
+/// gmsky.Include(name) -> ok: runs gmod/lua/gmsky/<name>.lua from the project folder on this side
+/// (name: lowercase letters, digits and _ only). Errors are logged and return false.
+unsafe extern "C" fn l_include(l: *mut State) -> c_int {
+    guarded(l, |a, side| {
+        let name = lua::to_string(a, l, 1).unwrap_or_default();
+        let ok = !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+        let ok = if ok {
+            run_file(a, l, side, &format!("gmod/lua/gmsky/{name}.lua"))
+        } else {
+            log(side, &format!("ERROR gmsky.Include: bad name {name:?}"));
+            false
+        };
+        (a.pushboolean)(l, ok as c_int);
         1
     })
 }

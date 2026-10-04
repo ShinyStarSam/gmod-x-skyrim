@@ -272,3 +272,22 @@ Skipped: header stuck at INIT if a process dies mid-initialization (tiny window;
 - User: "I think I even noticed it with my own eyes."
 **Not an issue, noted:** the delay settles ~15 ms, a little under one tick + lateness, so 0–6 frames a second blend slightly short; it doesn't show in the spread. If it ever does, raise the +1 ms margin in `Smooth.cpp`.
 **Next:** commit; Phase 1 step 3 (collision).
+
+## 2026-10-04 Phase 1 step 3 plan; step 3a: Garry's Mod-only collision test (not tested in game)
+
+**Changed:** DESIGN.md: step 3 split into 3a–3d; §6 no longer mentions `engine_no_focus_sleep`. Module: `gmsky.Include(name)` runs `gmod/lua/gmsky/<name>.lua` from the project on that side (names: lowercase letters, digits, `_`). New `gmod/lua/gmsky/terrain.lua`, included by `server.lua` and `client.lua`: an invisible, frozen collision entity class `gmsky_terrain` (`PhysicsFromMesh`, `SOLID_VPHYSICS`, custom collisions, always sent to the client); the client builds its own copy for movement prediction. Console command `gmsky_test_terrain` (server): measures the map's room around the player (traces against the map only), builds a 65×65-point test hill (8,192 triangles, 25.5 units apart = Skyrim's planned grid, two waves up to ~35°, 0–400 units high) just above the floor under the player, and puts the player on top; `gmsky_test_terrain 0` removes it. On load the server also logs the room around the player. Harness: fakes for `Vector`, `util`, `game`, `scripted_ents`, `concommand`, `ents`, `LocalPlayer`; checks terrain.lua runs on both sides.
+**Logs:** `terrain: map … room from (…): down … up … +x … -x … +y … -y …`; `terrain: built test N: 8192 triangles in X ms, PhysicsFromMesh=… physics object=…` (server and client); once a second on the server line and every 5 s on the client line: `terrain test N: over it/off it, feet minus hill …, standing on the hill/the map/nothing`.
+**Tested how:** `cargo build --release`; `gmod_harness.exe`.
+**Result:** HARNESS PASSED 49/49. The hill-building code only runs in the real game: not tested at all.
+**Not sure:** whether the player collides with a `PhysicsFromMesh` entity in movement (the main question); whether the client builds its copy (needs its network data first); build time for 8,192 triangles.
+**Next:** user's test, Garry's Mod only.
+
+## 2026-10-04 In-game test 10 (step 3a): player walks on PhysicsFromMesh — works
+
+**Result (logs: `build/logs-ingame-test-10/`):** user: "worked flawlessly", except being placed inside the hill (noclipped out) and falling off the invisible edges a few times. Logs:
+- `built test 1–3: 8192 triangles in 18.5–20.4 ms` (server), 17.6 and 25.4 ms (client): `PhysicsFromMesh=true physics object=true` on both sides.
+- On the hill: `standing on the hill` with feet 2–14 units above the formula surface (the square hull rests on its uphill corner on slopes; ~16 × slope, as expected). Off the edge: `standing on nothing`, falling.
+- Room (gm_flatgrass): from (640, 384, −12246): down 42, up 27,606, +x 14,720, −x 16,000, +y 14,976, −y 15,744. User's guess of "about 20× the hill" is right (map ≈ 30,700 wide, hill 1,632).
+**Failure:** player placed 4 units above the hill's centre point, but the hull is 32 wide, so its edges were inside the slope (stuck). **Fixed** (not re-tested): placed 4 above the highest point under the whole footprint.
+**Changed:** `terrain.lua` placement; DESIGN.md 3c gets the measured room, anchor near (0, 0, 1,500), the placement rule, and "hold the player if there's no ground yet".
+**Next:** commit; step 3b (Skyrim height grid).
