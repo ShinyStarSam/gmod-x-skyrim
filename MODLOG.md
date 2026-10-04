@@ -117,3 +117,13 @@ Skipped: header stuck at INIT if a process dies mid-initialization (tiny window;
 **Failure:** my harness run at 01:12 overwrote `logs/gmod_server.log` / `gmod_client.log` from the user's in-game session (the module always logged to `logs/`). The user's Garry's Mod facing-vs-moving data is gone. Fixed with `GMSKY_LOG_DIR`. The frozen stub still appends harness lines to `logs/stub.log` (append only, pid-tagged; can't change the stub).
 **Still broken / not tested:** the review fixes (`6ced355`) and the new scale are not yet run in game.
 **Next:** step 6, Skyrim's player follows Garry's Mod.
+
+## 2026-10-04 Phase 0 step 6: puppet (built, not tested in game)
+
+**Changed:** new `skse/src/Puppet.h` / `Puppet.cpp`; `skse/src/Probe.cpp` (location-change and "Skyrim moved the player" detection → new origin; calls the puppet every frame; logs it every second); DESIGN.md §12 step 6.
+**What it does:** after Skyrim's own player update, every frame: converts Garry's Mod's position to Skyrim units; finds Skyrim's ground under that spot with a downward ray cast (`TES::Pick`, from 100 above to 600 below the current feet, using the player's collision group so it ignores the player), falling back to `TES::GetLandHeight`, then to the current height; `SetPosition`; heading and pitch from Garry's Mod; zeroes the character controller's velocity, fall start height and fall time (no momentum, no fall damage). Only while Garry's Mod's heartbeat is fresh, its anchor matches the current origin epoch, its player is alive, and Skyrim's player is loaded. Every ON/OFF switch is logged with the reason. A location change (worldspace for exteriors, cell for interiors), or Skyrim moving the player more than 300 units from where the puppet put it, publishes a new origin and pauses the puppet until Garry's Mod re-anchors.
+**Logs (once a second, `logs/skyrim.log`):** `PUPPET on: sets=… ground ray/land/keep=… set=(…) heading=… pitch=… max-step=… max-drift=… big-steps=…`, or `PUPPET off: <reason>`.
+**Tested how:** `cmake --build --preset release`; checked the deployed `gmsky.dll` is identical to the build and contains the puppet strings.
+**Result:** builds with no warnings from our code; copied to `Data/SKSE/Plugins`.
+**Still broken / not tested:** nothing tested in game. Not sure: whether the ray cast ignores the player's own capsule as intended (if not, `ground` would read ~player height above the ground and the player would climb each frame: watch `set` z rising while standing still); whether `bAlwaysActive=1` keeps Skyrim fully running in the background; how the first-person camera looks when the position is set every frame.
+**Next:** user's in-game test.

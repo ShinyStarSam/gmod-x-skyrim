@@ -2,7 +2,7 @@
 
 namespace gmsky::Probe
 {
-	// Hooks the player's per-frame update.
+	// Hooks the player's per-frame update (which then also runs the puppet, Puppet.h).
 	void Install();
 	// A save was loaded or a new game started: publish a fresh origin next frame.
 	void OnGameLoaded();

@@ -1,9 +1,10 @@
-// Phase 0 step 5: read-only probe. Every frame, publish Skyrim's player state; once a second, log
-// Skyrim's numbers next to Garry's Mod's so scale, heading and pitch conventions can be pinned from
-// the log. Changes nothing in the game.
+// The per-frame driver. Every frame: publish Skyrim's player state, manage the origin (a new one
+// on game load, location change, or when Skyrim moves the player itself), and run the puppet
+// (Puppet.cpp). Once a second, log Skyrim's numbers next to Garry's Mod's.
 #include "Probe.h"
 
 #include "Link.h"
+#include "Puppet.h"
 
 namespace gmsky::Probe
 {
@@ -16,6 +17,9 @@ namespace gmsky::Probe
 		uint64_t g_lastOpenTry = 0;
 		bool g_lostOwnershipLogged = false;
 		bool g_needOrigin = true;
+		// Where the player is: the worldspace for exteriors, the cell for interiors. A change means
+		// Skyrim moved the player somewhere else (load door, fast travel): new origin.
+		uint32_t g_placeKey = 0;
 		float g_logTimer = 0.0f;
 		RE::NiPoint3 g_lastLogPos{};
 		bool g_haveLastLogPos = false;
@@ -128,6 +132,7 @@ namespace gmsky::Probe
 	{
 		g_needOrigin = true;
 		g_haveLastLogPos = false;
+		Puppet::Reset("game loaded");
 		logger::info("game loaded: will publish a new origin on the next frame");
 	}
 
@@ -162,6 +167,22 @@ namespace gmsky::Probe
 		const auto pos = a_player->GetPosition();
 		auto* cell = a_player->GetParentCell();
 
+		if (cell) {
+			auto* ws = a_player->GetWorldspace();
+			const uint32_t place = cell->IsInteriorCell() ? cell->GetFormID() : (ws ? ws->GetFormID() : 0);
+			if (g_placeKey != 0 && place != g_placeKey) {
+				logger::info("player changed location ({:08X} -> {:08X}): new origin", g_placeKey, place);
+				g_needOrigin = true;
+				Puppet::Reset("location changed, waiting for the new origin");
+			}
+			g_placeKey = place;
+		}
+		if (Puppet::SkyrimMovedPlayer(pos)) {
+			logger::info("Skyrim moved the player itself (to ({:.1f}, {:.1f}, {:.1f})): new origin", pos.x, pos.y, pos.z);
+			g_needOrigin = true;
+			Puppet::Reset("Skyrim moved the player, waiting for the new origin");
+		}
+
 		GmskySkyrimState s{};
 		s.frame = g_frame;
 		s.pos[0] = pos.x;
@@ -178,9 +199,12 @@ namespace gmsky::Probe
 			g_needOrigin = false;
 		}
 
+		Puppet::Update(a_player, g_origin);
+
 		g_logTimer += a_delta;
 		if (g_logTimer >= 1.0f) {
 			LogSecond(a_player, pos, g_logTimer);
+			Puppet::LogSecond();
 			g_logTimer = 0.0f;
 		}
 	}
@@ -195,7 +219,7 @@ namespace gmsky::Probe
 				try {
 					PerFrame(a_this, a_delta);
 				} catch (const std::exception& e) {
-					logger::error("per-frame probe: {}", e.what());
+					logger::error("per-frame update: {}", e.what());
 				}
 			}
 			static inline REL::Relocation<decltype(thunk)> func;

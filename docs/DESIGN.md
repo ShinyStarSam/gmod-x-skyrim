@@ -224,7 +224,16 @@ Each phase ends with something you can test, and each step inside a phase is one
    prints positions that change as you move.
 5. **Skyrim plugin, read-only:** loads, opens shared memory, and logs Skyrim's player position,
    height and yaw next to Garry's Mod's to `logs/skyrim.log`. Pins the scale and yaw conversion.
-6. **Skyrim plugin, puppet:** Skyrim's player follows Garry's Mod's position. Phase 0 done.
+6. **Skyrim plugin, puppet** (`skse/src/Puppet.cpp`): Skyrim's player follows Garry's Mod's
+   left/right/forward position and view direction. **Height comes from Skyrim's own ground** (a
+   downward ray cast at that spot, falling back to terrain height), because Garry's Mod is still
+   on a flat floor (user's choice 2026-10-04); full 3D comes with Phase 1 collision. It moves the
+   player only while Garry's Mod is alive and anchored to the current origin; otherwise Skyrim keeps
+   normal control. When Skyrim moves the player itself (load door, fast travel, more than 300
+   units away from where the puppet put it) or the location changes, a new origin is published and
+   the puppet waits for Garry's Mod to re-anchor. Testing needs Skyrim's own `bAlwaysActive=1`
+   (set by the user in their Skyrim.ini) so Skyrim keeps running while Garry's Mod has focus.
+   Phase 0 done when this works in game.
 
 ## 13. Repo layout
 
