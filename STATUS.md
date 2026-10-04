@@ -1,7 +1,7 @@
 # STATUS
 
-Written 2026-10-04 after in-game test 21, for handing off to a new session. Phase 1 steps 3d–3f
-and re-plan steps A and B are done and committed. "Verified" means checked with logged numbers
+Written 2026-10-04 after in-game test 22. Phase 1 steps 3d–3f and re-plan steps A, B and C are
+done and committed. "Verified" means checked with logged numbers
 from a real run; "not tested" means not checked in game. Full history with numbers: `MODLOG.md`.
 Design and plan: `docs/DESIGN.md` §12 ("Phase 1 re-plan after test 17").
 
@@ -50,7 +50,7 @@ Single-player and offline only.
 ## How to build and test
 
 - Rust (module, stub, harness, protocol): `cargo build --release`, then
-  `target\release\gmod_harness.exe` → `HARNESS PASSED` (78 checks). It runs our Lua in Garry's
+  `target\release\gmod_harness.exe` → `HARNESS PASSED` (85 checks). It runs our Lua in Garry's
   Mod's real `lua_shared.dll` with fake game objects (incl. the collision math and the ground
   entity's `TestCollision`); it does not run Garry's Mod's movement.
 - C++ layout test: `cmake --build build/protocol --config Release`, then
@@ -62,7 +62,7 @@ Single-player and offline only.
 
 ## What works (verified in game, numbers in MODLOG.md)
 
-- **The link** (shared memory, protocol version 6), disconnect detection, coordinate
+- **The link** (shared memory, protocol version 7: ground grids relative to the anchor), disconnect detection, coordinate
   conventions, scale 64 / 120.5 = 0.5311.
 - **Playing from the Skyrim window:** W/A/S/D, Shift, Space, Ctrl, mouse look, **V = Garry's
   Mod noclip** (17 launches in test 21), E activates Skyrim objects, Esc/~/J/M/F9 reach Skyrim.
@@ -83,10 +83,12 @@ Single-player and offline only.
   recent cast time (up to 1,205 units ahead), 4 ms of rays a frame above 1,000 units/s:
   **0 freezes** in 17 noclip launches (test 20 before the fix: 14).
 
+- **Re-centring (step C), test 22:** no map edge any more; Garry's Mod moves the player and the
+  anchor back to the middle of gm_flatmap together, 42 times in test 22, ~109,000 Skyrim units
+  travelled one way.
+
 ## What doesn't work yet
 
-- **Map edge:** ~30,000 Skyrim units from where you loaded you reach the edge of gm_flatmap
-  (test 17: x −16,929). Needs step C (moving the origin).
 - **Objects are bumpy, no buildings/interiors:** the ray grid only sees the top surface every 48
   units; posts and rocks become steep spikes; no arches, roofs or interiors. Needs step D.
 - Ending noclip > ~2,100 Garry's Mod units under Skyrim's ground holds the player; press V again.
@@ -105,14 +107,12 @@ publishes the origin.
 None blocking. Next, in order (user's direction 2026-10-04: get to Skyrim's real collision
 shapes as soon as possible, triple-checked against SkyCraft):
 
-- **Step C: moving the origin (step 5, `docs/DESIGN.md` §5).** When the player is far from the
-  centre of the Garry's Mod map, publish a new origin and move the Garry's Mod player by the same
-  amount. With Lua collision this only shifts numbers; nothing is rebuilt. Today a new origin
-  epoch sends the player "home" and holds it until grid 1 (`terrain.lua` `T.BeforeAnchor`,
-  `Probe.cpp` `PublishOrigin`); a re-centre must instead keep the player's place and speed.
-  Check SkyCraft's teleport/resync handling first (`skse/src/Game.cpp`, "teleportPending",
-  `kSkyrimTeleportThreshold`; `fabric/.../SkyClient.java` "Freeze the player until Skyrim's
-  collision around them has arrived").
+- **Step C: re-centring the origin: done (test 22, 42 re-centres, "works flawlessly").**
+  Garry's Mod moves the player and the anchor back to the middle of the map together
+  (`terrain.lua` `T.Recentre`, `gmsky.ShiftAnchor`); grids are anchor-relative (protocol 7).
+  Open question from test 22: a few single-frame jumps of 100–260 Garry's Mod units, mostly
+  near window switches, not at re-centres (MODLOG test 22); a per-tick jump log is added to
+  find out.
 - **Step D: Skyrim's real collision shapes (SkyCraft's stage C), ported.** SkyCraft
   `skse/src/Collision.cpp/.h`: walk the loaded Havok world under its read lock; layers static,
   anim static, transparent, trees, props, terrain, ground, invisible walls, stair helpers; decode
@@ -123,12 +123,13 @@ shapes as soon as possible, triple-checked against SkyCraft):
   into `field.lua`'s cell store. Needs a larger shared-memory ring (the map is 64 KB) and a
   protocol bump.
 
-## Evidence (latest test, 21)
+## Evidence (latest test, 22)
 
-`build/logs-ingame-test-21/`: `gmod_server.log` 164 × `terrain: grid N is the ground now (4095
-squares, 0.1 ms)`, 0 × `HOLD at`, 17 × `noclip ON (V in Skyrim)`; slowest `TestCollision` 1.264
-ms; `skyrim.log` `TERRAIN published grid … centred 1205 units ahead of the player`, slowest grid
-36 frames / 584 ms from start; no new file in `GarrysMod\crashes\`.
+`build/logs-ingame-test-22/`: `gmod_server.log` 42 × `origin: RE-CENTRE #n` (player minus anchor
+identical before/after in all), 42 × `2 ticks after re-centre` with the speed kept, 0 × `HOLD at`,
+furthest player minus anchor y 58,024 (≈ 109,000 Skyrim units); `skyrim.log` origin epoch 1 all
+session; 6 × `PUPPET big step` (one = a `LIFT`, the rest mostly near window switches; MODLOG test
+22); no new file in `GarrysMod\crashes\`. Test 21 (ground, noclip): `build/logs-ingame-test-21/`.
 
 ## What we've already tried
 

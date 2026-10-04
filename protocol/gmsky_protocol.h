@@ -15,7 +15,7 @@
 #define GMSKY_MAP_SIZE 65536u
 #define GMSKY_MAGIC 0x594B534Du      // "MSKY": layout initialized and ready
 #define GMSKY_MAGIC_INIT 0x54494E49u // "INIT": one side is initializing right now
-#define GMSKY_VERSION 6u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses
+#define GMSKY_VERSION 7u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain
 #define GMSKY_HEARTBEAT_TIMEOUT_MS 2000u
 
 // GmskyPlayerState.flags
@@ -112,20 +112,23 @@ typedef struct GmskyInput {
 } GmskyInput;
 
 // Skyrim -> Garry's Mod. Skyrim's ground around the player (Phase 1 step 3): a square grid of
-// heights from downward ray casts, already in Garry's Mod units for the given origin epoch (all
-// conversion stays on the Skyrim side). Point (i, j) is at x = center[0] + (i - (n-1)/2) * spacing,
-// y = center[1] + (j - (n-1)/2) * spacing; index i * n + j.
+// heights from downward ray casts, in Garry's Mod units *relative to the anchor* for the given
+// origin epoch: (skyrim - origin) * scale (all conversion stays on the Skyrim side). Garry's Mod
+// adds its current anchor, so a grid stays right when Garry's Mod re-centres (moves the player and
+// the anchor together, DESIGN.md re-plan step C) while the grid is on its way.
+// Point (i, j) is at x = center[0] + (i - (n-1)/2) * spacing, y = center[1] + (j - (n-1)/2) * spacing;
+// index i * n + j.
 #define GMSKY_TERRAIN_N 65
 typedef struct GmskyTerrain {
     uint32_t id;            // +1 per finished grid; 0 = none yet
     uint32_t origin_epoch;  // the GmskyOrigin.epoch / anchor these Garry's Mod coordinates belong to
     uint32_t n;             // points per side (GMSKY_TERRAIN_N)
     uint32_t misses;        // rays that hit nothing (their height is NaN)
-    double center[2];       // Garry's Mod x, y of the middle point
+    double center[2];       // Garry's Mod x, y of the middle point, relative to the anchor
     float spacing;          // Garry's Mod units between points
     float reserved0;
     uint64_t skyrim_frame;  // Skyrim frame when the grid was finished
-    float height[GMSKY_TERRAIN_N * GMSKY_TERRAIN_N];  // Garry's Mod z of the ground; NaN = no hit
+    float height[GMSKY_TERRAIN_N * GMSKY_TERRAIN_N];  // Garry's Mod z of the ground relative to the anchor; NaN = no hit
     uint32_t reserved1;
 } GmskyTerrain;
 

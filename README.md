@@ -54,10 +54,15 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   through Skyrim's hills, and Skyrim's own physics doesn't push you back (contacts and Skyrim's
   "land rescue" are switched off for our player, as SkyCraft does).
 
+- **Travel anywhere: no map edge** (tested in game 2026-10-04, test 22): when you get far from
+  the middle of Garry's Mod's map, Garry's Mod moves you and its link to Skyrim's world back
+  together, so Skyrim's position doesn't change. Test 22: 42 re-centres (37 while walking with
+  `gmsky_recentre_at 500`, 5 in long noclip flights), 58,000 Garry's Mod units ≈ 109,000 Skyrim
+  units from the start in one direction; position relative to the link identical before and
+  after every time; speed kept; no holds; the user: "works flawlessly".
+
 ## What doesn't work yet
 
-- Travelling far (about 30,000 Skyrim units from where you loaded) hits the edge of Garry's Mod's
-  map. Needs the planned origin re-centring (step C / step 5).
 - Walking around objects (posts, rocks, carts) is bumpy: the ground is measured with rays 48
   units apart, which turns objects into steep spikes. No walking under arches, into buildings
   with roofs, or in interiors. Fix planned: Skyrim's real collision shapes (step D).

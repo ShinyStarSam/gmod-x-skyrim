@@ -189,8 +189,10 @@ namespace gmsky::Puppet
 		}
 		g_noclipFrames += noclip ? 1 : 0;
 
+		// Relative to the anchor, so a Garry's Mod re-centre (step C) doesn't move the player here.
 		const auto drawn = Smooth::Position(g);
-		const auto t = GmodToSkyrim(drawn.data(), g.anchor, a_origin.skyrim_origin);
+		constexpr double kNoAnchor[3] = { 0.0, 0.0, 0.0 };
+		const auto t = GmodToSkyrim(drawn.data(), kNoAnchor, a_origin.skyrim_origin);
 		const RE::NiPoint3 pos{ float(t.x), float(t.y), float(t.z) };
 		g_lastTargetRaw = pos;
 		// Measuring only (step 3d): Skyrim's own ground under Garry's Mod's feet.

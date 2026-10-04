@@ -296,7 +296,7 @@ end
 
 function ENT:Initialize()
 	if SERVER then
-		if self:GetSceneId() ~= 0 then self.field = F.BuildScene(self:GetSceneId(), self:GetPos()) end
+		if self:GetSceneId() ~= 0 then self.field = F.BuildScene(self:GetSceneId(), Vector(0, 0, 0)) end
 		self:SetupCollision()
 	end
 end
@@ -307,7 +307,7 @@ function ENT:Think()
 	if not CLIENT or not self.GetSceneId then return end
 	if self:GetSceneId() ~= 0 then
 		if not self.field then
-			self.field = F.BuildScene(self:GetSceneId(), self:GetPos())
+			self.field = F.BuildScene(self:GetSceneId(), Vector(0, 0, 0))
 			self:SetupCollision()
 		end
 		return
@@ -336,9 +336,12 @@ function ENT:TestCollision(startpos, delta, isbox, extents, mask)
 	-- startpos is the bottom of the box (gmsky_field_feet 1).
 	local ex, ey, ez = 0, 0, 0
 	if isbox then ex, ey, ez = extents.x, extents.y, extents.z end
-	local cz = startpos.z
+	-- The field's triangles are relative to the entity (step C: the ground entity sits at the
+	-- anchor, so a re-centre moves only the entity).
+	local o = self:GetPos()
+	local cz = startpos.z - o.z
 	if isbox and F.feet:GetBool() then cz = cz + ez end
-	local frac, nx, ny, nz = F.Sweep(f, startpos.x, startpos.y, cz, ex, ey, ez, delta.x, delta.y, delta.z)
+	local frac, nx, ny, nz = F.Sweep(f, startpos.x - o.x, startpos.y - o.y, cz, ex, ey, ez, delta.x, delta.y, delta.z)
 	local ms = (SysTime() - t0) * 1000
 	local s = F.stats
 	if isbox then s.box = s.box + 1 else s.ray = s.ray + 1 end
@@ -370,7 +373,7 @@ scripted_ents.Register(ENT, "gmsky_field")
 -- ---- step B: Skyrim's ground grid ----------------------------------------------------------------
 
 -- A field for grid g (terrain.lua's grid table: n, cx, cy, spacing, heights h with NaN = miss),
--- in world coordinates. Only the heights are kept: a square's two triangles are made the first
+-- in the grid's coordinates: relative to the anchor (protocol 7), where the ground entity sits. Only the heights are kept: a square's two triangles are made the first
 -- time a trace needs them (test 20: making all 8,190 at once took 7-20 ms per grid). Squares
 -- touching a miss have none. f.lo / f.hi: its bounds; f.squares: squares with ground.
 function F.FromGrid(g)
@@ -398,7 +401,7 @@ function F.FromGrid(g)
 	return f
 end
 
--- Server: makes `ent` (at the world origin) answer with grid g (nil = no ground). The client
+-- Server: makes `ent` (at the anchor, terrain.lua) answer with grid g (nil = no ground). The client
 -- follows through the networked grid id. Returns the field.
 function F.UseGrid(ent, g)
 	if not g then
@@ -426,9 +429,9 @@ function F.HillHeight(dx, dy)
 	return 120 * (1 + math.sin(dx / 250)) + 80 * (1 + math.cos(dy / 180))
 end
 
--- Scene 1, around `base` (the entity's position; all coordinates are world coordinates, so the
--- entity's own position never matters to the traces): the hill west of base.x, a flat floor east
--- of it with a post, a fence, a tree trunk, stairs and a 50-degree ramp.
+-- Scene 1, around `base` (the entity uses (0, 0, 0): a field's coordinates are relative to its
+-- entity): the hill west of base.x, a flat floor east of it with a post, a fence, a tree trunk,
+-- stairs and a 50-degree ramp.
 function F.BuildScene(id, base)
 	local f = F.New()
 	local t0 = SysTime()

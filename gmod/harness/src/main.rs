@@ -114,6 +114,7 @@ ents = { FindByClass = function() return {} end }
 function ents.Create(class)
 	local e = { class = class }
 	function e:SetPos(p) self.pos = p end
+	function e:GetPos() return self.pos or Vector() end
 	function e:Spawn() HARNESS_SPAWNED = self end
 	function e:Remove() self.removed = true end
 	return setmetatable(e, { __index = function(t, k)
@@ -140,7 +141,8 @@ MOVETYPE_NOCLIP = 8
 local t = 0
 local function vec(x, y, z) return { x = x, y = y, z = z } end
 local ply = {}
-function ply:GetPos() return vec(100 + t, 50, -12700) end
+-- HARNESS_POS (a Vector), when set, is where the player is, and SetPos moves it (re-centre test).
+function ply:GetPos() return HARNESS_POS or vec(100 + t, 50, -12700) end
 function ply:EyeAngles() return { p = 10, y = 45, r = 0 } end
 function ply:SetEyeAngles(a) HARNESS_EYE = { p = a.p, y = a.y } end
 function ply:GetVelocity() return Vector(66, 0, 0) end
@@ -152,7 +154,7 @@ function ply:SetMoveType(m) HARNESS_MOVETYPE = m end
 function ply:EyePos() return vec(100 + t, 50, -12700 + 64) end
 function ply:GetFOV() return 75 end
 function ply:SendLua(s) HARNESS_SENT_LUA = s end
-function ply:SetPos(p) HARNESS_SETPOS = p end
+function ply:SetPos(p) HARNESS_SETPOS = p if HARNESS_POS then HARNESS_POS = Vector(p.x, p.y, p.z) end end
 function ply:SetVelocity() end
 function ply:GetGroundEntity() return nil end
 player = { GetAll = function() return { ply } end }
@@ -358,17 +360,19 @@ fn main() {
             t.origin_epoch = 1;
             t.n = 65;
             t.misses = 1;
-            t.center = [100.0, 50.0];
+            // Relative to the anchor (protocol 7): the anchor is (101, 50, -12700), so this grid is
+            // centred at (100, 50) with ground at about z -12000 in Garry's Mod.
+            t.center = [-1.0, 0.0];
             t.spacing = 25.5;
-            for (k, h) in t.height.iter_mut().enumerate() { *h = -12000.0 + k as f32 * 0.01; }
+            for (k, h) in t.height.iter_mut().enumerate() { *h = 700.0 + k as f32 * 0.01; }
             t.height[0] = f32::NAN;
             sky.shared().terrain.write(&t);
             lua.run(ls, "hook.Run('Think')").unwrap();
             let r = lua.run(ls, "local g = gmsky.terrain.grid return string.format('%d %d %d %.1f %d', g.id, g.n, #g.h, g.h[2], g.h[1] ~= g.h[1] and 1 or 0)");
-            check(r == Ok(Some("7 65 4225 -12000.0 1".into())), &format!("terrain grid reaches Lua: {r:?}"));
+            check(r == Ok(Some("7 65 4225 700.0 1".into())), &format!("terrain grid reaches Lua: {r:?}"));
             // Height lookup (centre point = index 32*65+32).
-            let r = lua.run(ls, "local T, g = gmsky.terrain, gmsky.terrain.grid return string.format('%.2f %s', T.GridHeight(g, 100, 50), tostring(T.GridHeight(g, 100 + 2000, 50)))");
-            check(r == Ok(Some("-11978.88 nil".into())), &format!("grid height lookup: {r:?}"));
+            let r = lua.run(ls, "local T, g = gmsky.terrain, gmsky.terrain.grid return string.format('%.2f %s', T.GridHeight(g, -1, 0), tostring(T.GridHeight(g, -1 + 2000, 0)))");
+            check(r == Ok(Some("721.12 nil".into())), &format!("grid height lookup (relative to the anchor): {r:?}"));
             // One tick: grid 7 is the ground (the miss leaves out one square: 8,190 triangles), and the
             // held player is let go on top of it.
             lua.run(ls, "HARNESS_ADVANCE() hook.Run('Tick')").unwrap();
@@ -381,14 +385,15 @@ fn main() {
             check(r == Ok(Some("true true true".into())), &format!("ground entity's TestCollision stops a falling box on the grid: {r:?}"));
             // A long ray (tested in 128-unit sections) slanting down onto the grid: same hit point as
             // its short last part, and only the squares along it get triangles.
-            let r = lua.run(ls, "local T = gmsky.terrain local f = gmsky.field.FromGrid(T.grids[7])                 local fr = gmsky.field.Sweep(f, -600, 50, -11000, 0, 0, 0, 1400, 0, -2000)                 local z = -11000 - 2000 * fr local x = -600 + 1400 * fr                 return string.format('%s %s', tostring(math.abs(z - T.GridHeight(T.grids[7], x, 50)) < 0.1), tostring(f.made < 300))");
-            // A vertical ray exactly on a grid line (y = 50) between two squares still hits.
+            let r = lua.run(ls, "local T = gmsky.terrain local f = gmsky.field.FromGrid(T.grids[7])                 local fr = gmsky.field.Sweep(f, -700, 0, 1700, 0, 0, 0, 1400, 0, -2000)                 local z = 1700 - 2000 * fr local x = -700 + 1400 * fr                 return string.format('%s %s', tostring(math.abs(z - T.GridHeight(T.grids[7], x, 0)) < 0.1), tostring(f.made < 300))");
+            check(r == Ok(Some("true true".into())), &format!("long slanted ray hits the surface and makes < 300 triangles: {r:?}"));
+            // A vertical ray exactly on a grid line (relative y = 0) between two squares still hits.
             let r = lua.run(ls, "local T = gmsky.terrain local F = gmsky.field local f = F.FromGrid(T.grids[7]) \
-                local fr = F.Sweep(f, 86, 50, -11900, 0, 0, 0, 0, 0, -200) return tostring(fr ~= nil)");
+                local fr = F.Sweep(f, -15, 0, 800, 0, 0, 0, 0, 0, -200) return tostring(fr ~= nil)");
             check(r == Ok(Some("true".into())), &format!("ray along the edge between two squares hits: {r:?}"));
             // Grid 8, one piece along x: the ground on the next tick.
             t.id = 8;
-            t.center = [100.0 + 16.0 * 25.5, 50.0];
+            t.center = [-1.0 + 16.0 * 25.5, 0.0];
             sky.shared().terrain.write(&t);
             lua.run(ls, "hook.Run('Think') HARNESS_ADVANCE() hook.Run('Tick')").unwrap();
             let r = lua.run(ls, "return tostring(gmsky.terrain.ent.GridId)");
@@ -404,15 +409,36 @@ fn main() {
             check(r == Ok(Some("true no ground false true".into())), &format!("no ground: held; noclip lets go; walking holds again: {r:?}"));
             // Grid 10 back under the player: let go, with its speed given back.
             t.id = 10;
-            t.center = [100.0, 50.0];
+            t.center = [-1.0, 0.0];
             sky.shared().terrain.write(&t);
             lua.run(ls, "hook.Run('Think') HARNESS_ADVANCE() hook.Run('Tick')").unwrap();
             let r = lua.run(ls, "return tostring(gmsky.terrain.holding)");
             check(r == Ok(Some("false".into())), &format!("grid 10 under the player: let go: {r:?}"));
+            // Re-centre (re-plan step C): home (0, 0, 0), limit 500; the player at (900.5, 50, -11950),
+            // ~8 above grid 10, moves by (-900, -50, 11950) to (0.5, 0, 0), the anchor (101, 50, -12700)
+            // by the same to (-799, 0, -750), and the ground entity with it. Player minus anchor stays
+            // (799.5, 0, 750), so Skyrim's position of the player doesn't change; the ground is still
+            // under the player.
+            lua.run(ls, "local T = gmsky.terrain T.home = Vector(0, 0, 0) T.recentreAt = { GetFloat = function() return 500 end } \
+                HARNESS_POS = Vector(900.5, 50, -11950) HARNESS_ADVANCE() hook.Run('Tick')").unwrap();
+            match sky.shared().player_state.read() {
+                Some((p, _)) => check(p.pos == [0.5, 0.0, 0.0] && p.anchor == [-799.0, 0.0, -750.0],
+                    &format!("re-centre: player state pos {:?} anchor {:?} (player minus anchor unchanged)", p.pos, p.anchor)),
+                None => check(false, "player state after re-centre"),
+            }
+            let r = lua.run(ls, "local T = gmsky.terrain local e = T.ent:GetPos() \
+                local tr = HARNESS_ENTS.gmsky_field.TestCollision(T.ent, Vector(0.5, 0, 100), Vector(0, 0, -200), true, Vector(16, 16, 36), 0) \
+                local want = e.z + T.GridHeight(T.grids[10], 0.5 - e.x, 0 - e.y) \
+                return string.format('%.1f %.1f %.1f %d %s %s', e.x, e.y, e.z, T.recentres, tostring(T.holding), tostring(tr ~= nil and math.abs(tr.HitPos.z - want) < 1))");
+            check(r == Ok(Some("-799.0 0.0 -750.0 1 false true".into())), &format!("re-centre: ground entity moved with the anchor, player not held, still stands on grid 10: {r:?}"));
+            lua.run(ls, "HARNESS_ADVANCE() hook.Run('Tick') HARNESS_ADVANCE() hook.Run('Tick')").unwrap();
+            let r = lua.run(ls, "return tostring(gmsky.terrain.recentres)");
+            check(r == Ok(Some("1".into())), &format!("re-centre: only once (the player is home now): {r:?}"));
+            lua.run(ls, "HARNESS_POS = nil gmsky.terrain.home = nil").unwrap();
             // The module still records grids (logs/terrain), and reads them back.
             let r = lua.run(ls, "local id, e, n, cx, cy, sp, m, h = gmsky.ReadGridFile('build/harness/logs/terrain/grid_7.bin') \
                 return string.format('%d %d %d %.1f %.1f %.1f %d %d %.1f', id, e, n, cx, cy, sp, m, #h, h[2])");
-            check(r == Ok(Some("7 1 65 100.0 50.0 25.5 1 4225 -12000.0".into())), &format!("ReadGridFile reads a recorded grid: {r:?}"));
+            check(r == Ok(Some("7 1 65 -1.0 0.0 25.5 1 4225 700.0".into())), &format!("ReadGridFile reads a recorded grid: {r:?}"));
             let r = lua.run(ls, "local ok, err = gmsky.ReadGridFile('../secret.bin') return tostring(ok) .. ' ' .. err");
             check(r == Ok(Some("false bad path \"../secret.bin\"".into())), &format!("ReadGridFile refuses '..': {r:?}"));
         }
@@ -487,9 +513,16 @@ fn main() {
           "gmod_server.log: noclip toggles logged");
     check(server_log.contains("terrain: HOLD at") && server_log.contains("terrain: ground ready under the player (grid 7): released at z"),
           "gmod_server.log: held without ground, released when grid 7 is built");
-    check(server_log.contains("terrain: grid 7 from Skyrim (origin epoch 1): 65x65 points 25.5 apart, centre (100.0, 50.0), ground z -12000.0..-11957.8, 1 misses (1 NaN)"),
+    check(server_log.contains("terrain: grid 7 from Skyrim (origin epoch 1): 65x65 points 25.5 apart, centre (-1.0, 0.0), ground z 700.0..742.2 (relative to the anchor), 1 misses (1 NaN)"),
           "gmod_server.log: terrain grid logged");
     check(server_log.contains("new origin epoch 1"), "gmod_server.log: new origin epoch 1");
+    check(server_log.contains("origin: RE-CENTRE #1 (player more than 500 from home (0, 0, 0)): player (900.50, 50.00, -11950.00) -> (0.50, 0.00, 0.00), shift (-900, -50, 11950)")
+          && server_log.contains("player minus anchor (799.500, 0.000, 750.000) before, (799.500, 0.000, 750.000) after (must match)"),
+          "gmod_server.log: re-centre logged with matching player-minus-anchor");
+    check(server_log.contains("anchor shifted by (-900.0, -50.0, 11950.0): (101.0, 50.0, -12700.0) -> (-799.0, 0.0, -750.0), origin epoch 1 unchanged"),
+          "gmod_server.log: module logs the anchor shift");
+    check(server_log.contains("origin: 2 ticks after re-centre #1: player (0.5, 0.0, 0.0) speed (66, 0, 0)"),
+          "gmod_server.log: speed logged after the re-centre");
     check(server_log.matches("ERROR").count() == 1 && server_log.contains("another process (pid 424242)"),
           "gmod_server.log: exactly one ERROR, the expected takeover message");
     let client_log = std::fs::read_to_string(log_dir.join("gmod_client.log")).unwrap_or_default();

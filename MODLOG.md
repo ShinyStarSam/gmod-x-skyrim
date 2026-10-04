@@ -539,3 +539,28 @@ Skipped: header stuck at INIT if a process dies mid-initialization (tiny window;
 
 **Result (logs: `build/logs-ingame-test-21/`):** Skyrim + Garry's Mod, 164 grids, 17 noclip launches, no crash (no new dump), no Lua errors. **0 `HOLD at` lines** (test 20: 14). Grids centred up to 1,205 Skyrim units ahead of the player; slowest grid 36 frames / 584 ms from start. Grid build in Garry's Mod 0.1 ms (test 20: 7.4–20.0 ms). Slowest single `TestCollision` 1.26 ms. User: "absolutely perfect".
 **Next:** commit the steps; then step C (moving the origin, step 5), then step D (Skyrim's real collision shapes, SkyCraft's stage C).
+
+## 2026-10-04 Re-plan step C: re-centring the origin (not tested in game)
+
+**Changed:**
+- Plan first: `docs/DESIGN.md` re-plan step C (and §15's risk line). Checked SkyCraft first: it has no floating origin; its teleport number + acknowledgement (`Game.cpp` `teleportSeq`/`teleportAck`) is the idea reused: never mix numbers from two frames.
+- **Who decides:** Garry's Mod. When the player is more than `gmsky_recentre_at` (default 8,000 Garry's Mod units ≈ 15,000 Skyrim units) from home along x, y or z, `terrain.lua` `T.Recentre` moves the player and the anchor by the same whole-unit amount in one tick, before the player state is written. Skyrim's origin and epoch don't change, so Skyrim's position of the player doesn't change. Speed, noclip and a hold are kept. Works in the air and in noclip too.
+- Module (`gmod/module/src/lib.rs`): new `gmsky.Anchor()` and `gmsky.ShiftAnchor(dx, dy, dz)` (logs every shift).
+- **Protocol 7** (same layout): Skyrim's ground grids are now relative to the anchor, `(skyrim − origin) × scale` (`Terrain.cpp`). A grid cast before a re-centre and arriving after it is still right. Garry's Mod keeps the ground entity at the anchor; `field.lua` `TestCollision` works relative to its entity, so a re-centre moves one entity (no physics object). The step A test scene is built relative to its entity too.
+- Skyrim `Smooth.cpp`/`Puppet.cpp`: blending uses player-minus-anchor, so a re-centre between two ticks isn't drawn as a jump.
+- Logs: `origin: RE-CENTRE #n` (player before/after, shift, anchor before/after, player minus anchor before/after: must match, speed); `origin: 2 ticks after re-centre #n` (speed kept?); module `anchor shifted by …`; the server status line counts `re-centres`.
+- Harness: 85 checks (was 78). New: re-centre moves the player state and anchor together (player minus anchor unchanged), the ground entity follows the anchor, the player isn't held and the ground is still under it, only one re-centre, log lines. Test grids are anchor-relative now. **Found:** the "long slanted ray" check from the test 20 fixes was computed but never checked (an unused variable); it is checked now and passes.
+**Why:** test 17 reached the map's wall (gm_flatmap is ±16,300 units); next step in the re-plan.
+**Tested how:** `cargo build --release`; `gmod_harness.exe` → HARNESS PASSED (85); `protocol_test.exe` → PROTOCOL TEST PASSED; `cmake --build --preset release` (Skyrim plugin built and copied).
+**Not tested in game.** Not known: whether `SetPos` on the player keeps its speed in the real game (logged 2 ticks later), and whether anything in Garry's Mod's own view smoothing shows a blip in the Garry's Mod window (only the Skyrim window matters). Other Garry's Mod entities (props, NPCs) are not moved with a re-centre; none are used yet.
+**Next:** in-game test 22 (STATUS.md).
+
+## 2026-10-04 In-game test 22 (step C, re-centring): works
+
+**Result (logs: `build/logs-ingame-test-22/`):** user: "works flawlessly". **42 re-centres** (37 with `gmsky_recentre_at 500` while walking, jumping and in short noclip flights; 5 at 8,000 in long noclip flights). Furthest point: player minus anchor y = 58,024 Garry's Mod units ≈ 109,000 Skyrim units from the start (test 17 hit the wall at ~31,000). "Player minus anchor" identical before and after in all 42 (checked by script); speed kept (e.g. #1: (218, 336, 0) before, (221, 334, 0) two ticks later); 0 `HOLD at`; no Lua errors; no new crash dump; one origin epoch all session.
+**Seen and checked, not caused by re-centring (as far as the logs show):** Skyrim logged 6 `PUPPET big step` lines (300–491 units in one frame; tests 20–21: 0), and 9 seconds where one frame's step was > 3× the average (tests 20–21: 0). By lining up both logs' clocks (noclip toggles; the one `LIFT` line matched Skyrim's 491-unit step within 5 ms):
+- 28 of the 31 seconds that contain re-centres are perfectly even (largest step ≤ 1.3× the average, up to 4 re-centres a second at ~1,460 units/s).
+- 6 of the 9 odd seconds contain no re-centre. One is Garry's Mod's existing lift rule (`LIFT: player was 324.8 below the ground`, after noclip ended underground).
+- Most odd seconds are within ~1 s of the Skyrim window losing focus. Test 22 had 11 window switches (tests 20/21: 0/2), probably from typing `gmsky_recentre_at` into Garry's Mod's console.
+**Not proven** what moves the player in those frames; no per-tick Garry's Mod positions were logged. Next change adds that log.
+

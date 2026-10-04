@@ -164,7 +164,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 11] = [
+    let funcs: [(&str, lua::CFn); 13] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -175,6 +175,8 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("Include", l_include),
         ("ReadTerrain", l_read_terrain),
         ("OriginEpoch", l_origin_epoch),
+        ("Anchor", l_anchor),
+        ("ShiftAnchor", l_shift_anchor),
         ("ReadGridFile", l_read_grid_file),
     ];
     for (name, f) in funcs {
@@ -400,6 +402,44 @@ unsafe extern "C" fn l_origin_epoch(l: *mut State) -> c_int {
         let e = mapping().ok().and_then(|m| m.shared().origin.read().map(|(o, _)| o.epoch)).unwrap_or(0);
         (a.pushnumber)(l, e as f64);
         1
+    })
+}
+
+/// gmsky.Anchor() -> x, y, z: the Garry's Mod point that matches Skyrim's origin, or nothing
+/// before the first origin. Skyrim's ground grids are relative to it (protocol 7).
+unsafe extern "C" fn l_anchor(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let link = LINK.lock().unwrap_or_else(|e| e.into_inner());
+        if link.epoch == 0 {
+            return 0;
+        }
+        for v in link.anchor {
+            (a.pushnumber)(l, v);
+        }
+        3
+    })
+}
+
+/// gmsky.ShiftAnchor(dx, dy, dz) -> x, y, z: re-centre (DESIGN.md re-plan step C). Lua moves the
+/// player by the same amount in the same tick, so Skyrim's position of the player doesn't change.
+/// Returns nothing (and shifts nothing) before the first origin.
+unsafe extern "C" fn l_shift_anchor(l: *mut State) -> c_int {
+    guarded(l, |a, side| {
+        let d = [(a.tonumber)(l, 1), (a.tonumber)(l, 2), (a.tonumber)(l, 3)];
+        let mut link = LINK.lock().unwrap_or_else(|e| e.into_inner());
+        if link.epoch == 0 {
+            return 0;
+        }
+        let before = link.anchor;
+        for c in 0..3 {
+            link.anchor[c] += d[c];
+        }
+        log(side, &format!("anchor shifted by ({:.1}, {:.1}, {:.1}): ({:.1}, {:.1}, {:.1}) -> ({:.1}, {:.1}, {:.1}), origin epoch {} unchanged",
+            d[0], d[1], d[2], before[0], before[1], before[2], link.anchor[0], link.anchor[1], link.anchor[2], link.epoch));
+        for v in link.anchor {
+            (a.pushnumber)(l, v);
+        }
+        3
     })
 }
 

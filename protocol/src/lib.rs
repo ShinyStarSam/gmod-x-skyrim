@@ -11,7 +11,7 @@ pub const SHM_NAME: &str = r"Local\GmodSkyrim_v1";
 pub const MAP_SIZE: usize = 65536;
 pub const MAGIC: u32 = 0x594B_534D;
 pub const MAGIC_INIT: u32 = 0x5449_4E49;
-pub const VERSION: u32 = 6; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses
+pub const VERSION: u32 = 7; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
 
 pub const PF_ON_GROUND: u32 = 0x1;
@@ -121,7 +121,7 @@ pub struct Terrain {
     pub spacing: f32,
     pub reserved0: f32,
     pub skyrim_frame: u64,
-    /// Garry's Mod z; NaN = no hit. Index i * n + j.
+    /// Garry's Mod z relative to the anchor (protocol 7; center too); NaN = no hit. Index i * n + j.
     pub height: [f32; TERRAIN_N * TERRAIN_N],
     pub reserved1: u32,
 }

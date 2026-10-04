@@ -94,7 +94,8 @@ differences are scale and where the origin is.
   wide. Skyrim's main worldspace is far bigger than that, even scaled down. So Garry's Mod works in a
   local frame centred near the player: `gmod = (skyrim − origin) × scale`. When the player gets
   more than about 8,000 units from the centre, we move the origin, teleport the Garry's Mod player
-  by the same amount, and rebuild the collision. Both sides log every re-centre.
+  by the same amount (built as re-plan step C, §12: Garry's Mod moves the player and the anchor
+  together; nothing is rebuilt). Every re-centre is logged.
 
 ## 6. The Garry's Mod side
 
@@ -461,8 +462,43 @@ Steps, each tested on its own:
   long view ray doesn't scan the whole grid. The hold stays as the last resort. SkyCraft's way
   (small regions streamed nearest-first, continuously, in a wider radius; freezing only after a
   teleport) is how step D will stream.
-- **C. Step 5, moving the origin.** With the field, a re-centre only shifts numbers: no objects
-  are rebuilt. Re-centre while the player is on the ground (§15), log each jump.
+- **C. Step 5, moving the origin** (planned 2026-10-04; works, test 22). With the field, a re-centre only shifts
+  numbers: no objects are rebuilt, nothing is waited for, the player keeps its speed.
+  **Checked in SkyCraft first:** it has no floating origin (Minecraft worlds are big enough).
+  What carries over is its teleport rule: Skyrim never uses Minecraft's position until Minecraft
+  has acknowledged the newest teleport number (`teleportSeq` / `teleportAck`, `Game.cpp`), so the
+  two sides never mix numbers from two frames. Our player state already carries its own anchor
+  in every tick, which gives the same guarantee for the player; the plan below extends it to the
+  ground.
+  - **Who decides:** Garry's Mod (it knows the map's size; it owns the player). Skyrim's origin
+    and epoch stay the same: a re-centre is not a new origin, only a new **anchor** (the Garry's
+    Mod point that matches Skyrim's origin). Since `skyrim = origin + (gmod − anchor) / scale`,
+    moving the player and the anchor by the same amount leaves the Skyrim position unchanged.
+  - **When:** once the player is more than 8,000 Garry's Mod units (≈15,000 Skyrim units) from
+    "home" (the middle of the map's open space, measured at start: gm_flatmap has ±16,300 every
+    way) along x, y or z. At any time, also in the air and in noclip (test 17 reached the wall in
+    noclip). §15's "only on the ground" was there to hide a visible jump; in the Skyrim window
+    there is none (the Skyrim position doesn't change), and the Garry's Mod window isn't played.
+  - **What moves, in one server tick, before the player state is written:** the player
+    (`SetPos(pos + d)`, d = home − pos in whole units, so the float position stays exact); the
+    anchor (new module function `gmsky.ShiftAnchor`); the ground entity (below); a hold position.
+    Velocity is kept (logged before and after to prove it).
+  - **Ground grids become anchor-relative (protocol 7, same layout):** Skyrim now writes
+    `(skyrim − origin) × scale`, i.e. Garry's Mod units relative to the anchor, instead of
+    Garry's Mod world units. Otherwise a grid cast before a re-centre and arriving after it would
+    sit in the old place (the race SkyCraft's acknowledgement avoids). Garry's Mod puts the one
+    ground entity at the anchor and its triangles are relative to the entity, so a re-centre
+    moves one entity (no physics object: it is a plain position change). The client follows the
+    networked entity position. The step A test scene is built relative to its entity the same way.
+    Step D's streamed shapes will use the same anchor-relative units.
+  - **Skyrim's smoothing** (step 2) blends player positions relative to each tick's own anchor,
+    so a re-centre between two ticks doesn't show as a 8,000-unit blend.
+  - **Not moved:** other Garry's Mod entities (props, NPCs). None are used yet; noted for later.
+  - **Logs:** Garry's Mod: `origin: RE-CENTRE #n` with the player's position before/after, the
+    shift, the anchor before/after, speed before/after, and the Skyrim position before/after
+    (must match). Skyrim: the puppet's `big-steps` stay 0 and its `max-step` stays small through
+    a re-centre. `gmsky_recentre_at` (default 8000) sets the distance; a small value (e.g. 500)
+    makes it easy to trigger while walking for the test.
 - **D. Skyrim's real shapes (SkyCraft's stage C, ported).** Walk the loaded Havok world around
   the player under its read lock (SkyCraft's layer list: static, anim static, transparent, trees,
   props, terrain, ground, invisible walls, stair helpers), decode the shapes (MOPP/BV trees,
@@ -506,6 +542,6 @@ reference/           (ignored) SkyCraft clone, read-only
 |---|---|
 | Player movement on many mesh chunks is jittery or slow | Measure in Phase 1 with logged frame times; fall back to fewer, larger chunks or box shapes |
 | DirectX 9 → 11 picture sharing doesn't work | Copy through normal memory first, measure the cost |
-| Floating origin re-centres cause visible jumps | Re-centre only while the player is on the ground; log each jump |
+| Floating origin re-centres cause visible jumps | Skyrim's position doesn't change in a re-centre (only Garry's Mod's numbers do); Skyrim logs its per-frame step through each one |
 | `+lua_run` on the command line doesn't work | Type it in the console once per session |
 | Garry's Mod updates break the module | It only uses the stable Lua C functions; stubs never change |

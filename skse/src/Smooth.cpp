@@ -4,6 +4,8 @@
 // the exact tick rhythm, and draw the player slightly in the past, blending between the two ticks
 // around that moment. The delay follows how late ticks really arrive, so the next tick has
 // normally arrived when it's needed. Only the position: the view has no added delay.
+// Positions are kept relative to each tick's own anchor: when Garry's Mod re-centres (moves the
+// player and the anchor together, DESIGN.md re-plan step C) the relative position doesn't jump.
 #include "Smooth.h"
 
 namespace gmsky::Smooth
@@ -12,7 +14,7 @@ namespace gmsky::Smooth
 	{
 		struct Tick
 		{
-			std::array<double, 3> pos;
+			std::array<double, 3> pos;  // relative to the tick's anchor
 			uint64_t tick;  // Garry's Mod tick number
 			int64_t at;     // when it happened (QPC), on the locked rhythm
 		};
@@ -46,6 +48,11 @@ namespace gmsky::Smooth
 			return std::sqrt(dx * dx + dy * dy + dz * dz);
 		}
 
+		std::array<double, 3> Relative(const GmskyPlayerState& a_g)
+		{
+			return { a_g.pos[0] - a_g.anchor[0], a_g.pos[1] - a_g.anchor[1], a_g.pos[2] - a_g.anchor[2] };
+		}
+
 		// Locks a new tick's time to the rhythm: Garry's Mod ticks exactly every tick_ms, but stamps
 		// a tick when its frame gets to it (a few ms of noise at 300 fps).
 		void AddTick(const GmskyPlayerState& a_g, int64_t a_period, double a_tickMs)
@@ -53,7 +60,7 @@ namespace gmsky::Smooth
 			if (!g_ticks.empty() && a_g.tick < g_ticks.back().tick) {
 				g_ticks.clear();  // Garry's Mod restarted or changed map
 			}
-			Tick t{ { a_g.pos[0], a_g.pos[1], a_g.pos[2] }, a_g.tick, a_g.tick_qpc };
+			Tick t{ Relative(a_g), a_g.tick, a_g.tick_qpc };
 			if (!g_ticks.empty()) {
 				const auto& last = g_ticks.back();
 				const int64_t n = int64_t(a_g.tick - last.tick);
@@ -111,7 +118,7 @@ namespace gmsky::Smooth
 
 	std::array<double, 3> Position(const GmskyPlayerState& a_g)
 	{
-		const std::array<double, 3> newest{ a_g.pos[0], a_g.pos[1], a_g.pos[2] };
+		const std::array<double, 3> newest = Relative(a_g);
 		if (!(a_g.flags & GMSKY_PF_SMOOTH) || a_g.tick_qpc == 0 || a_g.tick_ms <= 0.0f) {
 			++g_offFrames;
 			g_lastFrameQpc = 0;

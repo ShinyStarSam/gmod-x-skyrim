@@ -104,14 +104,17 @@ namespace gmsky::Terrain
 			return true;
 		}
 
-		void Publish(const GmskyPlayerState& a_g, const GmskyOrigin& a_origin, uint64_t a_frame)
+		void Publish(const GmskyOrigin& a_origin, uint64_t a_frame)
 		{
 			g_out.id = g_nextId++;
 			g_out.origin_epoch = g_job.epoch;
 			g_out.n = kN;
 			g_out.misses = g_job.misses;
+			// Relative to the anchor (protocol 7): Garry's Mod adds its own current anchor, so a
+			// re-centre while this grid is on its way can't put it in the wrong place.
+			constexpr double kNoAnchor[3] = { 0.0, 0.0, 0.0 };
 			const double c[3] = { g_job.cx, g_job.cy, 0.0 };
-			const auto gc = SkyrimToGmod(c, a_g.anchor, a_origin.skyrim_origin);
+			const auto gc = SkyrimToGmod(c, kNoAnchor, a_origin.skyrim_origin);
 			g_out.center[0] = gc.x;
 			g_out.center[1] = gc.y;
 			g_out.spacing = float(kSpacing * kGmodPerSkyrim);
@@ -124,7 +127,7 @@ namespace gmsky::Terrain
 					continue;
 				}
 				const double p[3] = { 0.0, 0.0, z };
-				g_out.height[k] = float(SkyrimToGmod(p, a_g.anchor, a_origin.skyrim_origin).z);
+				g_out.height[k] = float(SkyrimToGmod(p, kNoAnchor, a_origin.skyrim_origin).z);
 				zMin = std::min(zMin, z);
 				zMax = std::max(zMax, z);
 			}
@@ -234,7 +237,7 @@ namespace gmsky::Terrain
 		g_secRays += cast;
 		g_secCastMs += ms;
 		if (g_job.next >= kN * kN) {
-			Publish(g, a_origin, a_frame);
+			Publish(a_origin, a_frame);
 		}
 	}
 

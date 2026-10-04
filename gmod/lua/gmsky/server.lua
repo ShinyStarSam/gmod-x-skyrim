@@ -33,6 +33,8 @@ hook.Add("Tick", "gmsky_player_state", function()
 	if not ply then return end
 	-- A new origin from Skyrim: move to the middle of the map first, so the anchor is there (3c).
 	if T then T.BeforeAnchor(ply, gmsky.OriginEpoch(), anchored) end
+	-- Far from the middle of the map: move the player and the anchor back together (step C).
+	if T then T.Recentre(ply, anchored) end
 	local pos = ply:GetPos()
 	local ang = ply:EyeAngles()
 	local vel = ply:GetVelocity()
