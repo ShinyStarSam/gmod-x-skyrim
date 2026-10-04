@@ -7,6 +7,7 @@
 // character controller's own velocity and fall tracking so Skyrim adds no momentum or fall damage.
 #include "Puppet.h"
 
+#include "Body.h"
 #include "Input.h"
 #include "Link.h"
 #include "Smooth.h"
@@ -87,6 +88,7 @@ namespace gmsky::Puppet
 			if (g_active || a_reason != g_offReason) {
 				logger::info("PUPPET OFF: {}", a_reason);
 			}
+			Body::Release();
 			g_active = false;
 			g_offReason = a_reason;
 			return false;
@@ -178,16 +180,16 @@ namespace gmsky::Puppet
 			// How far Skyrim itself moved the player since our last set (gravity, collision push).
 			const float dx = cur.x - g_lastSet.x, dy = cur.y - g_lastSet.y;
 			g_maxDrift = std::max(g_maxDrift, std::sqrt(dx * dx + dy * dy));
-		}
-
 			g_maxDriftZ = std::max(g_maxDriftZ, std::abs(cur.z - g_lastSet.z));
-		const auto drawn = Smooth::Position(g);
+		}
 		const bool noclip = (g.flags & GMSKY_PF_NOCLIP) != 0;
 		if (noclip != g_noclip) {
 			logger::info("PUPPET Garry's Mod noclip {}", noclip ? "ON" : "OFF");
 			g_noclip = noclip;
 		}
 		g_noclipFrames += noclip ? 1 : 0;
+
+		const auto drawn = Smooth::Position(g);
 		const auto t = GmodToSkyrim(drawn.data(), g.anchor, a_origin.skyrim_origin);
 		const RE::NiPoint3 pos{ float(t.x), float(t.y), float(t.z) };
 		g_lastTargetRaw = pos;
@@ -219,12 +221,25 @@ namespace gmsky::Puppet
 		const double pitch = GmodPitchToSkyrimPitch(gpitch);
 		a_player->data.angle.z = float(heading);
 		a_player->data.angle.x = float(pitch);
+		const RE::hkpCollidable* body = nullptr;
 		if (auto* controller = a_player->GetCharController()) {
 			// Garry's Mod moves the player; Skyrim keeps no momentum or fall damage of its own.
+			// Its gravity stays on so the body keeps ground contact between our updates: Skyrim's
+			// AI won't melee a target it thinks is in the air. (As SkyCraft, MIT, Game.cpp.)
 			controller->SetLinearVelocityImpl(RE::hkVector4(0.0f, 0.0f, 0.0f, 0.0f));
 			controller->fallStartHeight = pos.z;
 			controller->fallTime = 0.0f;
+			if ((g.flags & GMSKY_PF_ON_GROUND) && !noclip) {
+				controller->context.currentState = RE::hkpCharacterStateType::kOnGround;
+				controller->flags.set(RE::CHARACTER_FLAGS::kSupport);
+			} else {
+				controller->context.currentState = RE::hkpCharacterStateType::kInAir;
+			}
+			auto* proxyController = skyrim_cast<RE::bhkCharProxyController*>(controller);
+			auto* proxy = proxyController ? proxyController->GetCharacterProxy() : nullptr;
+			body = proxy && proxy->shapePhantom ? &proxy->shapePhantom->collidable : nullptr;
 		}
+		Body::Set(body, pos, noclip);
 
 		g_lastSet = pos;
 		g_haveLastSet = true;
