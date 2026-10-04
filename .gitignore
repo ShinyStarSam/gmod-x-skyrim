@@ -36,6 +36,9 @@
 !*.py
 !*.ini
 
+# Git submodules (third-party source, tracked as a link to their repo, not copied in)
+!/skse/extern/CommonLibSSE-NG
+
 # Folders that are never tracked, whatever is inside (must stay last)
 /reference/
 /build/

@@ -34,8 +34,17 @@ timer.Create("gmsky_status", 1, 0, function()
 	local where = "no player"
 	if ply then
 		local p, a = ply:GetPos(), ply:EyeAngles()
-		where = string.format("pos=(%.1f, %.1f, %.1f) yaw=%.1f pitch=%.1f ground=%s",
-			p.x, p.y, p.z, a.y, a.p, tostring(ply:IsOnGround()))
+		where = string.format("pos=(%.1f, %.1f, %.1f) yaw=%.1f pitch=%.1f eye=%.1f ground=%s",
+			p.x, p.y, p.z, a.y, a.p, ply:EyePos().z - p.z, tostring(ply:IsOnGround()))
+		-- Convention check: if yaw 0 = +X and yaw grows counter-clockwise, then walking forward
+		-- moves along atan2(vy, vx) and facing-minus-moving is about 0.
+		local v = ply:GetVelocity()
+		local speed = math.sqrt(v.x * v.x + v.y * v.y)
+		if speed > 30 then
+			local moveYaw = math.deg(math.atan2(v.y, v.x))
+			local diff = (a.y - moveYaw + 180) % 360 - 180
+			where = where .. string.format(" moving yaw=%.1f speed=%.0f facing-minus-moving=%.1f", moveYaw, speed, diff)
+		end
 	end
 	gmsky.Log(string.format("tick=%d %s skyrim=%s epoch=%d skyrim_frame=%d writes/s=%d%s",
 		engine.TickCount(), where, connected and "CONNECTED" or "not connected", epoch, skyrimFrame,

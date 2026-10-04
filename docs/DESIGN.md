@@ -248,7 +248,11 @@ reference/           (ignored) SkyCraft clone, read-only
 3. **CommonLibSSE-NG with Visual Studio 2022:** SkyCraft used Visual Studio 2026. Whether 2022 builds
    it is **not tested**. vcpkg (a C++ package manager CommonLib uses) is also needed, and would live
    inside this project in an ignored `.tools/` folder like SkyCraft does.
-4. **Damage scaling:** a Garry's Mod crowbar does 10 damage, but Skyrim bandits have 50–300 HP.
+4. **License (only matters if this is ever published):** CommonLibSSE-NG (a git submodule in
+   `skse/extern/`) is GPL-3.0-or-later with a "modding exception". The exception covers linking to
+   the *game's* code, not ours, so a published `gmsky.dll` probably has to be GPL-compatible.
+   Not a lawyer's opinion; check before any release. Personal use is unaffected.
+5. **Damage scaling:** a Garry's Mod crowbar does 10 damage, but Skyrim bandits have 50–300 HP.
    This gets decided in Phase 3.
 
 ## 15. Risks
