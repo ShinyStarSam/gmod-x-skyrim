@@ -1,0 +1,13 @@
+[package]
+name = "gmsky-module"
+version = "0.1.0"
+edition = "2021"
+description = "The real Garry's Mod module. Loaded by the stubs in garrysmod/lua/bin, never installed there itself."
+
+[lib]
+name = "gmsky_module"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+gmsky-protocol = { path = "../../protocol" }

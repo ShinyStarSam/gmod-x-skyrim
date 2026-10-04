@@ -1,0 +1,6 @@
+[workspace]
+resolver = "2"
+members = ["protocol", "tools/fakes", "gmod/module", "gmod/stub", "gmod/harness"]
+
+[profile.release]
+debug = true  # keep symbols so crash logs have function names

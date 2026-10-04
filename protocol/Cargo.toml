@@ -1,0 +1,8 @@
+[package]
+name = "gmsky-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Rust copy of protocol/gmsky_protocol.h plus the shared-memory mapping"
+
+[lib]
+path = "src/lib.rs"

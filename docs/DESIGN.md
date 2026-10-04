@@ -153,8 +153,12 @@ write installs two tiny, stable **loader stubs**:
 
 - `gmsv_gmsky_win64.dll` (server side) and `gmcl_gmsky_win64.dll` (client side)
 
-When Garry's Mod loads a stub, it loads the real module from this project's `build/` folder and
-passes all calls through. The real module then runs this project's Lua files from `gmod/lua/`.
+When Garry's Mod loads a stub, it copies the real module (`target/release/gmsky_module.dll`) to
+`build/gmod/loaded/gmsky_module_<process id>.dll`, loads that copy and passes all calls through.
+The copy means the real module can be rebuilt while Garry's Mod runs (the new build is picked up on
+the next game start). The stub learns which side it is from its own file name (`gmcl_` = client).
+The project folder is fixed into the stub when it's built; the `GMSKY_ROOT` environment variable
+overrides it if the project ever moves. Installed 2026-10-04 by `tools/install_gmod_stubs.ps1`. The real module then runs this project's Lua files from `gmod/lua/`.
 After the one write, every rebuild happens inside the project and the game folder is never touched again.
 
 **Starting it without an addon file:** single-player Garry's Mod has a console command `lua_run`.
@@ -204,8 +208,11 @@ Each phase ends with something you can test, and each step inside a phase is one
 1. **Repo setup:** whitelist `.gitignore`, `README.md`, `MODLOG.md`, folder layout (§13).
 2. **Protocol:** the C++ header, the Rust copy, layout tests on both sides, and the coordinate
    conversion with unit tests. Test: `cargo test` and the C++ test print sizes and pass.
-3. **Fake Skyrim:** a small Python script that opens the shared memory and prints what Garry's Mod
-   writes (like SkyCraft's `tools/fake_skyrim.py`), so we can test the Garry's Mod side alone.
+   Coordinate conversion lives **only** in the C++ header, because only the Skyrim side converts.
+   Garry's Mod always works in its own units.
+3. **Fake Skyrim:** a small Rust program (`tools/fake_skyrim`) that opens the shared memory and
+   prints what Garry's Mod writes, so we can test the Garry's Mod side alone. Rust instead of
+   SkyCraft's Python so it reuses the protocol crate instead of a third copy of the layout.
 4. **Garry's Mod module + stubs:** the module opens shared memory and writes `PlayerState` every
    tick, and logs to `logs/gmod.log`. Then the **one** write of the two stubs to `lua/bin`.
    Test: start Garry's Mod, run `lua_run require("gmsky")`, walk around, and the fake Skyrim

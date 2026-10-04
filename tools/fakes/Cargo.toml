@@ -1,0 +1,16 @@
+[package]
+name = "gmsky-fakes"
+version = "0.1.0"
+edition = "2021"
+description = "Stand-ins for each game, for testing one side without the other"
+
+[[bin]]
+name = "fake_skyrim"
+path = "src/fake_skyrim.rs"
+
+[[bin]]
+name = "fake_gmod"
+path = "src/fake_gmod.rs"
+
+[dependencies]
+gmsky-protocol = { path = "../../protocol" }

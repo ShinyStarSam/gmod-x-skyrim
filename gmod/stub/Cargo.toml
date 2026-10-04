@@ -1,0 +1,10 @@
+[package]
+name = "gmsky-stub"
+version = "0.1.0"
+edition = "2021"
+description = "Tiny loader installed ONCE into garrysmod/lua/bin as gmsv_gmsky_win64.dll and gmcl_gmsky_win64.dll"
+
+[lib]
+name = "gmsky_stub"
+path = "src/lib.rs"
+crate-type = ["cdylib"]

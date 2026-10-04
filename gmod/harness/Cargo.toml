@@ -1,0 +1,12 @@
+[package]
+name = "gmsky-harness"
+version = "0.1.0"
+edition = "2021"
+description = "Tests stub + module + Lua scripts outside the game, using Garry's Mod's own lua_shared.dll (read-only)"
+
+[[bin]]
+name = "gmod_harness"
+path = "src/main.rs"
+
+[dependencies]
+gmsky-protocol = { path = "../../protocol" }

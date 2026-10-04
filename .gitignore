@@ -1,0 +1,44 @@
+# WHITELIST. Everything is ignored, then source files are allowed back in.
+# Do not turn this into a normal ignore list (AGENTS.md rule 2).
+# Never allow game assets, decompiled code or extracted game files.
+
+*
+!*/
+
+# Repo files
+!.gitignore
+!.gitattributes
+!.gitmodules
+!*.md
+
+# Rust
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!.cargo/config.toml
+!*.rs
+
+# C++ / CMake
+!*.h
+!*.hpp
+!*.cpp
+!CMakeLists.txt
+!CMakePresets.json
+!*.cmake
+!vcpkg.json
+
+# Garry's Mod Lua
+!*.lua
+
+# Scripts and config
+!*.ps1
+!*.bat
+!*.py
+!*.ini
+
+# Folders that are never tracked, whatever is inside (must stay last)
+/reference/
+/build/
+/logs/
+/target/
+/.tools/
