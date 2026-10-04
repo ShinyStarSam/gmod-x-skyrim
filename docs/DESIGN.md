@@ -107,6 +107,12 @@ differences are scale and where the origin is.
   unchanged. This replaces SkyCraft's "inject boxes into Minecraft's collision query" step.
   - Whether player movement collides smoothly with many mesh chunks is **not tested**. That is the
     first thing Phase 1 measures.
+- **Frame rate matters even though Garry's Mod is hidden:** in single-player the server ticks run
+  inside the game's frame loop. In the first in-game test, when Garry's Mod dropped to 20 fps
+  (window not focused), its 66 ticks per second arrived in bursts of about 3, and a 60 fps reader
+  saw only ~20 changes per second. So Garry's Mod must not be throttled in the background
+  (`engine_no_focus_sleep 0`), and Phase 1 should send the smoothed per-frame position from the
+  client side, like SkyCraft sends Minecraft's partial-tick position, instead of the raw tick position.
 - **Input:** Skyrim keeps the keyboard focus. Garry's Mod receives key and mouse data through shared
   memory and writes it into the player's command each tick with the `StartCommand` hook, so the
   Garry's Mod window does not need focus. We also set `engine_no_focus_sleep 0` so it does not slow
@@ -161,11 +167,10 @@ The project folder is fixed into the stub when it's built; the `GMSKY_ROOT` envi
 overrides it if the project ever moves. Installed 2026-10-04 by `tools/install_gmod_stubs.ps1`. The real module then runs this project's Lua files from `gmod/lua/`.
 After the one write, every rebuild happens inside the project and the game folder is never touched again.
 
-**Starting it without an addon file:** single-player Garry's Mod has a console command `lua_run`.
-Starting the game with `+lua_run require("gmsky")` on the command line (or typing it in the console)
-loads the server stub. The server side then tells the client side to load its stub. **Not tested:**
-whether `+lua_run` on the command line runs after the map has loaded. If it doesn't, the fallback is
-typing it in the console once per session.
+**Starting it without an addon file:** after the map loads, type `lua_run require("gmsky")` in the
+console. That loads the server stub; the server side then tells the client side to load its stub
+(`SendLua`), which works (in-game test 2026-10-04). `+lua_run` on the command line was tried and
+does nothing, so for now it is one console command per session. Automating it is a Phase 5 job.
 
 (The stubs can't be swapped while Garry's Mod is running, so rebuilds need a Garry's Mod restart.)
 

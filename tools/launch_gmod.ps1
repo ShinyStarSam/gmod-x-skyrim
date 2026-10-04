@@ -1,16 +1,16 @@
 # Starts Garry's Mod for gmsky testing: single-player, gm_flatgrass, windowed, and ALWAYS -insecure
 # (VAC off, cannot join secure servers). Steam must be running.
-# Tries to load gmsky automatically with +lua_run; if that doesn't work, type in the console (~):
+# Once the map has loaded, open the console (~) and type:
 #   lua_run require("gmsky")
+# (+lua_run on the command line was tried and does nothing: in-game test 2026-10-04.)
 #
-# Usage: powershell -ExecutionPolicy Bypass -File tools\launch_gmod.ps1 [-NoAutoLoad] [-GmodDir <path>]
+# Usage: powershell -ExecutionPolicy Bypass -File tools\launch_gmod.ps1 [-GmodDir <path>]
 param(
-    [string]$GmodDir = "B:\SteamLibrary\steamapps\common\GarrysMod",
-    [switch]$NoAutoLoad
+    [string]$GmodDir = "B:\SteamLibrary\steamapps\common\GarrysMod"
 )
 $ErrorActionPreference = "Stop"
 $exe = Join-Path $GmodDir "gmod_win64.exe"
 $gameArgs = @("-insecure", "-windowed", "-w", "1280", "-h", "720", "-console", "+maxplayers", "1", "+map", "gm_flatgrass")
-if (-not $NoAutoLoad) { $gameArgs += @("+lua_run", "require('gmsky')") }
 Write-Output "Starting: $exe $($gameArgs -join ' ')"
 Start-Process -FilePath $exe -ArgumentList $gameArgs -WorkingDirectory $GmodDir
+Write-Output 'When the map has loaded: press ~ and type  lua_run require("gmsky")'

@@ -93,7 +93,7 @@ function ply:IsOnGround() return true end
 function ply:Crouching() return false end
 function ply:Alive() return true end
 function ply:GetMoveType() return MOVETYPE_WALK end
-function ply:GetViewOffset() return vec(0, 0, 64) end
+function ply:EyePos() return vec(100 + t, 50, -12700 + 64) end
 function ply:GetFOV() return 75 end
 function ply:SendLua(s) HARNESS_SENT_LUA = s end
 player = { GetAll = function() return { ply } end }

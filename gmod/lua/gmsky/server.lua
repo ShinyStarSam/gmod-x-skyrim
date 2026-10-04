@@ -23,7 +23,7 @@ hook.Add("Tick", "gmsky_player_state", function()
 	if ply:Alive() then flags = flags + 4 end
 	if ply:GetMoveType() == MOVETYPE_NOCLIP then flags = flags + 8 end
 	gmsky.WritePlayerState(engine.TickCount(), pos.x, pos.y, pos.z, ang.p, ang.y, ang.r,
-		ply:GetViewOffset().z, vel.x, vel.y, vel.z, flags, ply:GetFOV())
+		ply:EyePos().z - pos.z, vel.x, vel.y, vel.z, flags, ply:GetFOV())
 end)
 
 -- Once a second: write what we're sending to the log, so it can be checked from numbers.
