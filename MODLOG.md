@@ -220,3 +220,55 @@ Skipped: header stuck at INIT if a process dies mid-initialization (tiny window;
 - User: "a very very very tiny delay" left, maybe placebo; no longer floaty.
 **Still broken / not tested:** what is left is not measured; likely Skyrim's own display pipeline (vsync, queued frames), which our code doesn't control. Camera position while walking still one frame late (step 4).
 **Next:** Phase 1 step 2 (smooth position) or step 3 (collision), user's choice.
+
+## 2026-10-04 Phase 1 step 2: smooth position (not tested in game)
+
+**Changed:** DESIGN.md step 2 revised (SkyCraft's tick blending instead of sending the client's drawn position). Protocol **version 4**: `GmskyPlayerState` gains `tick_qpc` (QueryPerformanceCounter when the tick was written) and `tick_ms` (144 bytes; `GmskyShared` 344), flag `GMSKY_PF_SMOOTH` (0x40). `protocol/src/shm.rs`: `now_qpc()`. Module stamps every player state. `server.lua`: `gmsky_smooth` setting (default 1), passes `engine.TickInterval()`. New `skse/src/Smooth.h/.cpp` (adapted from SkyCraft, MIT): keeps the last 8 ticks, locks their times to the tick rhythm (tick numbers give how many ticks passed, stamp noise filtered 1/16), draws the position at "now minus a delay" blended between the two ticks around it; the delay follows the latest of the last 2 s of tick arrivals (+1 ms, 4–30 ms). `Puppet.cpp` uses it for the position only (the view keeps no added delay). Harness: flags 0x65, tick stamp and 15 ms tick length checked.
+**Logs (once a second, `skyrim.log`):** `SMOOTH on: delay=… ms late frames=… new ticks=… stamp noise=… ms | steps while moving: N frames avg=… spread=…% max=… stalls=…` (or `OFF (gmsky_smooth 0)`). Spread = how uneven the per-frame steps are (standard deviation / average); stalls = frames the player didn't move while walking.
+**Tested how:** `cargo build --release`; `cargo test -p gmsky-protocol`; `protocol_test`; `gmod_harness.exe`; `cmake --build --preset release`; checked the deployed DLL is the build and contains the new log text.
+**Result:** protocol 4/4; PROTOCOL TEST PASSED (`sizeof(GmskyShared)=344`); HARNESS PASSED 43/43; plugin builds with no warnings from our code.
+**Still broken / not tested:** not tested in game, and the blending code itself has no out-of-game test (it only runs inside Skyrim). Adds about 10 ms delay to the position (not the view), by design. Both games must be restarted (version 4).
+**Next:** user's in-game test, walking with `gmsky_smooth 1` and `0`.
+
+## 2026-10-04 In-game test 8 (step 2): smoothing delay too short — fixed (fix not tested in game)
+
+**Test 8 result (logs: `build/logs-ingame-test-8/`):** user: felt about the same as without. Logs: the one second that ran with `delay=15.3 ms late frames=1` had `spread=1%` (perfectly even steps). Then the delay shrank to its 4 ms floor and stayed there with `late frames=39–49` of 60: most frames the next tick hadn't arrived and the player waited. Smoothing on: spread 13–45%; off: spread 27–58%, max step exactly 6.00/12.00 (one/two ticks). `new ticks` 54–61 per second, stamp noise 0.82–0.94 ms.
+**Cause (my bug):** each of our ticks carries one position, so blending toward a tick starts one tick before its time. I copied SkyCraft's "how late did the tick arrive" measure, but SkyCraft's ticks carry a start and an end position, so its measure is one tick shorter than ours needs. The delay therefore aimed at ~1 ms (clamped to 4).
+**Changed:** `Smooth.cpp`: a tick counts as needed from `t.at - period`; delay range 4 to 30 + tick ms; start value 20 ms. DESIGN.md wording (delay ≈ one tick plus lateness, ~17–25 ms expected).
+**Tested how:** `cmake --build --preset release`.
+**Result:** builds; **not copied to Skyrim: Skyrim was still running** (file locked). The `.pdb` was copied, the `.dll` wasn't; rebuild after Skyrim closes.
+**Still broken / not tested:** not tested in game. Expected in the log: `delay` settling around 17–25 ms, `late frames` near 0, `spread` clearly below the "OFF" numbers.
+**Next:** user's in-game test. (Update: rebuilt and copied after the user closed both games; deployed DLL identical to the build.)
+
+## 2026-10-04 Load gmsky automatically from the launch script (not tested in game)
+
+**Changed:** `tools/launch_gmod.ps1` only. After starting Garry's Mod it waits for the game window, then every 5 s starts `gmod_win64.exe -insecure -hijack +lua_run if not gmsky then require('gmsky') end` until `logs/gmod_server.log` (rewritten each session) contains `server.lua loaded`, up to 3 minutes. `-hijack` is a Source engine option that hands console commands to the copy already running (`launcher.dll` of this build contains the text `-hijack`; found by searching the file). Nothing is written to the game folder. `-NoAutoLoad` = old behaviour. Refuses to start if Garry's Mod is already running.
+**Safety:** if a `-hijack` call hasn't exited after 10 s, or a new Garry's Mod process appears, it is treated as a second game starting: exactly the new processes are stopped and the script prints the manual command.
+**Tested how:** PowerShell parse check (0 errors).
+**Result:** parses. **Not run at all yet.**
+**Not sure:** that `-hijack` still works in this 64-bit build (the text being in the file doesn't prove it); that `lua_run` receives the Lua unquoted as one line; whether starting the exe a second time goes through Steam. Alternative if it doesn't work: one small autorun file in `garrysmod/lua/autorun/server/` (needs the user's permission: game folder).
+**Next:** user runs the script.
+
+**Update (user's first run):** `-hijack` **works** in this 64-bit build: the running Garry's Mod received the command and printed `> if...` / `[ERROR] lua_run:1: unexpected symbol near '<eof>'`. Failure: `lua_run` gets only the first word after `+lua_run` from a command line, so the Lua arrived as just `if`. Fixed: the Lua is now one word, `return(gmsky)or(require('gmsky'))` (plain Lua; loads only once). Not yet re-run.
+
+**Update 2 (user's second run):** the one-word Lua via `-hijack` gave a server error in Garry's Mod (exact text not captured). User decided: drop `-hijack`, use an autorun file. `-hijack` code removed from `launch_gmod.ps1`.
+
+## 2026-10-04 Auto-load gmsky with an autorun file (user's decision; not tested in game)
+
+**Changed:** new `gmod/autorun/gmsky_autoload.lua` (master copy) and `tools/install_gmod_autoload.ps1` (one-time copy, refuses if the file exists). **Installed** to `B:\SteamLibrary\steamapps\common\GarrysMod\garrysmod\lua\autorun\server\gmsky_autoload.lua` (sha256 `F1835A88…FB81C`), with the user's permission. `launch_gmod.ps1` back to just starting the game; says whether the auto-loader is installed. Harness: 4 checks on the auto-loader.
+**What it does:** single-player only. Waits for the player's first real movement command (`SetupMove` with `not cmd:IsForced()`, the documented way to tell the player's game is fully loaded; `PlayerInitialSpawn` is earlier, and gmsky sends its client side with `SendLua`), removes its hook, then `require("gmsky")` once (next frame, outside the hook call). It never needs changing: gmsky's code stays in the project. Delete that file to stop auto-loading.
+**Tested how:** `gmod_harness.exe` (real Garry's Mod Lua, fake game API); PowerShell parse check of the launch script.
+**Result:** HARNESS PASSED 47/47: a forced command loads nothing; the first real command requires gmsky exactly once and removes the hook; outside single-player it adds no hook.
+**Still broken / not tested:** not tested in game.
+**Next:** user starts Garry's Mod with the launch script, without typing anything.
+
+## 2026-10-04 In-game test 9: auto-load works; smooth position works
+
+**Changed:** README, STATUS. Logs in `build/logs-ingame-test-9/`. No code changes.
+**Result:**
+- **Auto-load:** user typed nothing. `gmod_server.log`: `server.lua loaded`; `gmod_client.log`: `client.lua loaded` 16 ms later; no errors.
+- **Smoothing on:** `delay` settled at 14.2–16.7 ms; `late frames` 0–6 per second; walking or sprinting at a steady speed, `spread` **1–6%** (e.g. avg 6.67 / max 6.86). Seconds with speed changes (starting, stopping, walk↔sprint) read 14–63%, as expected: the steps really change size then.
+- **Smoothing off:** steady walking `spread` 27–44%, max step 12–18 (two or three ticks in one frame), `stalls` 0–2 per second.
+- User: "I think I even noticed it with my own eyes."
+**Not an issue, noted:** the delay settles ~15 ms, a little under one tick + lateness, so 0–6 frames a second blend slightly short; it doesn't show in the spread. If it ever does, raise the +1 ms margin in `Smooth.cpp`.
+**Next:** commit; Phase 1 step 3 (collision).

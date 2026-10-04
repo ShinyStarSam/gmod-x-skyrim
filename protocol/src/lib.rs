@@ -11,7 +11,7 @@ pub const SHM_NAME: &str = r"Local\GmodSkyrim_v1";
 pub const MAP_SIZE: usize = 65536;
 pub const MAGIC: u32 = 0x594B_534D;
 pub const MAGIC_INIT: u32 = 0x5449_4E49;
-pub const VERSION: u32 = 3; // 2: added Input; 3: PlayerState reports the input it applied
+pub const VERSION: u32 = 4; // 2: added Input; 3: PlayerState reports the input it applied; 4: tick stamps
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
 
 pub const PF_ON_GROUND: u32 = 0x1;
@@ -20,6 +20,7 @@ pub const PF_ALIVE: u32 = 0x4;
 pub const PF_NOCLIP: u32 = 0x8;
 pub const PF_INPUT_APPLIED: u32 = 0x10; // input_frame / mouse_*_applied are valid
 pub const PF_DRIVE_CAMERA: u32 = 0x20; // Skyrim may turn its camera directly (gmsky_camera 1)
+pub const PF_SMOOTH: u32 = 0x40; // Skyrim may blend between ticks (gmsky_smooth 1)
 
 pub const IN_FORWARD: u32 = 0x1;
 pub const IN_BACK: u32 = 0x2;
@@ -87,6 +88,11 @@ pub struct PlayerState {
     /// Degrees per mouse count; 0 = Skyrim must not predict.
     pub deg_per_count: f32,
     pub reserved0: u32,
+    /// When this tick was written (QueryPerformanceCounter, same clock in both processes); 0 = unknown.
+    pub tick_qpc: i64,
+    /// Tick length in ms.
+    pub tick_ms: f32,
+    pub reserved1: u32,
 }
 
 #[repr(C)]
@@ -169,7 +175,7 @@ const _: () = {
     assert!(size_of::<SkyrimState>() == 56);
     assert!(offset_of!(SkyrimState, heading_rad) == 32);
     assert!(offset_of!(SkyrimState, cell_form_id) == 44);
-    assert!(size_of::<PlayerState>() == 128);
+    assert!(size_of::<PlayerState>() == 144);
     assert!(offset_of!(PlayerState, anchor) == 16);
     assert!(offset_of!(PlayerState, pos) == 40);
     assert!(offset_of!(PlayerState, eye_height) == 64);
@@ -177,6 +183,8 @@ const _: () = {
     assert!(offset_of!(PlayerState, fov_deg) == 92);
     assert!(offset_of!(PlayerState, input_frame) == 96);
     assert!(offset_of!(PlayerState, deg_per_count) == 120);
+    assert!(offset_of!(PlayerState, tick_qpc) == 128);
+    assert!(offset_of!(PlayerState, tick_ms) == 136);
     assert!(size_of::<Input>() == 40);
     assert!(offset_of!(Input, mouse_x_total) == 16);
     assert!(offset_of!(Input, wheel_total) == 32);
@@ -184,8 +192,8 @@ const _: () = {
     assert!(offset_of!(Shared, origin) == 40);
     assert!(offset_of!(Shared, skyrim_state) == 80);
     assert!(offset_of!(Shared, player_state) == 144);
-    assert!(offset_of!(Shared, input) == 280);
-    assert!(size_of::<Shared>() == 328);
+    assert!(offset_of!(Shared, input) == 296);
+    assert!(size_of::<Shared>() == 344);
     assert!(size_of::<Shared>() <= MAP_SIZE);
 };
 

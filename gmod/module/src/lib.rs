@@ -6,7 +6,7 @@
 
 mod lua;
 
-use gmsky_protocol::shm::{now_ms, Mapping, Side};
+use gmsky_protocol::shm::{now_ms, now_qpc, Mapping, Side};
 use gmsky_protocol::{PlayerState, PF_INPUT_APPLIED};
 use lua::{Api, State};
 use std::ffi::c_int;
@@ -284,7 +284,8 @@ unsafe extern "C" fn l_reload(l: *mut State) -> c_int {
 }
 
 /// gmsky.WritePlayerState(tick, x, y, z, pitch, yaw, roll, eye_height, vx, vy, vz, flags, fov,
-///                        deg_per_count) -> origin epoch in use (0 = Skyrim hasn't sent an origin yet)
+///                        deg_per_count, tick_ms) -> origin epoch in use (0 = no origin yet)
+/// Stamps the tick with the PC's precise clock, so Skyrim can blend between ticks.
 /// Also reports the Skyrim input already applied (from gmsky.ReadInput), so Skyrim can draw the
 /// rest of the mouse movement ahead of Garry's Mod. deg_per_count 0 (or nil) = don't predict.
 unsafe extern "C" fn l_write_player_state(l: *mut State) -> c_int {
@@ -325,6 +326,9 @@ unsafe extern "C" fn l_write_player_state(l: *mut State) -> c_int {
             mouse_y_applied: my,
             deg_per_count: n(14) as f32,
             reserved0: 0,
+            tick_qpc: now_qpc(),
+            tick_ms: n(15) as f32,
+            reserved1: 0,
         });
         link.writes += 1;
         (a.pushnumber)(l, link.epoch as f64);

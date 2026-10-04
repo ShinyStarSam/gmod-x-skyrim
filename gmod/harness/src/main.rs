@@ -121,7 +121,7 @@ function ply:GetFOV() return 75 end
 function ply:SendLua(s) HARNESS_SENT_LUA = s end
 player = { GetAll = function() return { ply } end }
 HARNESS_PLY = ply
-engine = { TickCount = function() return t end }
+engine = { TickCount = function() return t end, TickInterval = function() return 0.015 end }
 function CurTime() return HARNESS_TIME or 0 end
 function HARNESS_ADVANCE() t = t + 1 end
 "#;
@@ -215,7 +215,8 @@ fn main() {
                 check(p.pos == [300.0, 50.0, -12700.0], "pos == (300, 50, -12700)");
                 check(p.yaw_deg == 45.0 && p.pitch_deg == 10.0, "angles");
                 check(p.eye_height == 64.0 && p.fov_deg == 75.0, "eye height and fov");
-                check(p.flags == 0x25, "flags = on ground + alive + drive camera (gmsky_camera 1)");
+                check(p.flags == 0x65, "flags = on ground + alive + drive camera + smooth");
+                check(p.tick_qpc > 0 && (p.tick_ms - 15.0).abs() < 1e-4, &format!("tick stamp {} and length {} ms", p.tick_qpc, p.tick_ms));
                 check(p.vel == [66.0, 0.0, 0.0], "velocity");
             }
             None => check(false, "Skyrim received a player state"),
@@ -296,6 +297,28 @@ fn main() {
         let r = lua.run(lc, "return tostring(HARNESS_CONVARS)");
         check(r == Ok(Some("nil".into())), &format!("client runs no console commands: {r:?}"));
         lua.run(lc, "HARNESS_CONVARS = { fps_max_nofocus = '300' } timer.Run('gmsky_client_status')").unwrap();
+
+        // 9. The auto-loader (garrysmod/lua/autorun/server): waits for the player's first real
+        //    command, then requires gmsky once. Fresh Lua state, gmsky not loaded.
+        let la = (lua.newstate)();
+        (lua.openlibs)(la);
+        lua.run(la, FAKE_GMOD).expect("fake gmod env");
+        lua.run(la, "game = { SinglePlayer = function() return true end } HARNESS_REQUIRED = 0             function require(m) HARNESS_REQUIRED = HARNESS_REQUIRED + 1 gmsky = {} end             function hook.Remove(ev, name) hook._h[ev][name] = nil end").unwrap();
+        let autoload = std::fs::read_to_string(root.join("gmod").join("autorun").join("gmsky_autoload.lua")).unwrap();
+        check(lua.run(la, &autoload).is_ok(), "gmsky_autoload.lua runs");
+        let r = lua.run(la, "HARNESS_SIMPLE = nil hook.Run('SetupMove', HARNESS_PLY, nil, { IsForced = function() return true end })             return tostring(HARNESS_SIMPLE)");
+        check(r == Ok(Some("nil".into())), &format!("autoload: forced (not real) command loads nothing: {r:?}"));
+        let r = lua.run(la, "hook.Run('SetupMove', HARNESS_PLY, nil, { IsForced = function() return false end }) HARNESS_SIMPLE()             hook.Run('SetupMove', HARNESS_PLY, nil, { IsForced = function() return false end })             return HARNESS_REQUIRED .. ' ' .. tostring(hook._h.SetupMove.gmsky_autoload)");
+        check(r == Ok(Some("1 nil".into())), &format!("autoload: first real command requires gmsky once, hook removed: {r:?}"));
+        (lua.close)(la);
+        let la = (lua.newstate)();
+        (lua.openlibs)(la);
+        lua.run(la, FAKE_GMOD).expect("fake gmod env");
+        lua.run(la, "game = { SinglePlayer = function() return false end }").unwrap();
+        lua.run(la, &autoload).unwrap();
+        let r = lua.run(la, "return tostring(hook._h.SetupMove)");
+        check(r == Ok(Some("nil".into())), &format!("autoload: does nothing outside single-player: {r:?}"));
+        (lua.close)(la);
 
         for (l, close, _) in states {
             close(l);

@@ -15,7 +15,7 @@
 #define GMSKY_MAP_SIZE 65536u
 #define GMSKY_MAGIC 0x594B534Du      // "MSKY": layout initialized and ready
 #define GMSKY_MAGIC_INIT 0x54494E49u // "INIT": one side is initializing right now
-#define GMSKY_VERSION 3u  // 2: added GmskyInput; 3: PlayerState reports the input it applied
+#define GMSKY_VERSION 4u  // 2: added GmskyInput; 3: PlayerState reports the input it applied; 4: tick stamps
 #define GMSKY_HEARTBEAT_TIMEOUT_MS 2000u
 
 // GmskyPlayerState.flags
@@ -25,6 +25,7 @@
 #define GMSKY_PF_NOCLIP 0x8u
 #define GMSKY_PF_INPUT_APPLIED 0x10u  // input_frame / mouse_*_applied are valid (input from Skyrim is on)
 #define GMSKY_PF_DRIVE_CAMERA 0x20u   // Skyrim may turn its camera directly (gmsky_camera 1)
+#define GMSKY_PF_SMOOTH 0x40u         // Skyrim may blend between ticks (gmsky_smooth 1)
 
 // GmskyInput.buttons: actions held in Skyrim's window (not raw keys; the key choice is Skyrim-side)
 #define GMSKY_IN_FORWARD 0x1u
@@ -90,6 +91,11 @@ typedef struct GmskyPlayerState {
     int64_t mouse_y_applied;   // GmskyInput.mouse_y_total already in pitch_deg
     float deg_per_count;       // degrees per mouse count; 0 = Skyrim must not predict
     uint32_t reserved0;
+    // When this tick was written (QueryPerformanceCounter: the same clock in both processes) and
+    // the tick length, so Skyrim can blend between ticks (DESIGN.md, Phase 1 step 2).
+    int64_t tick_qpc;          // 0 = unknown
+    float tick_ms;             // engine.TickInterval() in ms
+    uint32_t reserved1;
 } GmskyPlayerState;
 
 // Skyrim -> Garry's Mod. Input typed into Skyrim's window while Garry's Mod drives the player.
@@ -143,7 +149,7 @@ GMSKY_ASSERT(offsetof(GmskyOrigin, skyrim_origin) == 8);
 GMSKY_ASSERT(sizeof(GmskySkyrimState) == 56);
 GMSKY_ASSERT(offsetof(GmskySkyrimState, heading_rad) == 32);
 GMSKY_ASSERT(offsetof(GmskySkyrimState, cell_form_id) == 44);
-GMSKY_ASSERT(sizeof(GmskyPlayerState) == 128);
+GMSKY_ASSERT(sizeof(GmskyPlayerState) == 144);
 GMSKY_ASSERT(offsetof(GmskyPlayerState, anchor) == 16);
 GMSKY_ASSERT(offsetof(GmskyPlayerState, pos) == 40);
 GMSKY_ASSERT(offsetof(GmskyPlayerState, eye_height) == 64);
@@ -151,6 +157,8 @@ GMSKY_ASSERT(offsetof(GmskyPlayerState, vel) == 80);
 GMSKY_ASSERT(offsetof(GmskyPlayerState, fov_deg) == 92);
 GMSKY_ASSERT(offsetof(GmskyPlayerState, input_frame) == 96);
 GMSKY_ASSERT(offsetof(GmskyPlayerState, deg_per_count) == 120);
+GMSKY_ASSERT(offsetof(GmskyPlayerState, tick_qpc) == 128);
+GMSKY_ASSERT(offsetof(GmskyPlayerState, tick_ms) == 136);
 GMSKY_ASSERT(sizeof(GmskyInput) == 40);
 GMSKY_ASSERT(offsetof(GmskyInput, mouse_x_total) == 16);
 GMSKY_ASSERT(offsetof(GmskyInput, wheel_total) == 32);
@@ -158,8 +166,8 @@ GMSKY_ASSERT(offsetof(GmskyOriginSlot, data) == 8);
 GMSKY_ASSERT(offsetof(GmskyShared, origin) == 40);
 GMSKY_ASSERT(offsetof(GmskyShared, skyrim_state) == 80);
 GMSKY_ASSERT(offsetof(GmskyShared, player_state) == 144);
-GMSKY_ASSERT(offsetof(GmskyShared, input) == 280);
-GMSKY_ASSERT(sizeof(GmskyShared) == 328);
+GMSKY_ASSERT(offsetof(GmskyShared, input) == 296);
+GMSKY_ASSERT(sizeof(GmskyShared) == 344);
 GMSKY_ASSERT(sizeof(GmskyShared) <= GMSKY_MAP_SIZE);
 
 #ifdef __cplusplus

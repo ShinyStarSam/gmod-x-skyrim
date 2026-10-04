@@ -9,6 +9,7 @@
 
 #include "Input.h"
 #include "Link.h"
+#include "Smooth.h"
 
 namespace gmsky::Puppet
 {
@@ -138,6 +139,7 @@ namespace gmsky::Puppet
 	{
 		Off(a_reason);
 		g_haveLastSet = false;
+		Smooth::Reset();
 	}
 
 	bool Update(RE::PlayerCharacter* a_player, const GmskyOrigin& a_origin, uint64_t a_frame)
@@ -161,6 +163,7 @@ namespace gmsky::Puppet
 		}
 		if (!g_active) {
 			logger::info("PUPPET ON: Skyrim's player follows Garry's Mod (origin epoch {})", a_origin.epoch);
+			Smooth::Reset();
 			g_active = true;
 			g_offReason.clear();
 		}
@@ -172,7 +175,8 @@ namespace gmsky::Puppet
 			g_maxDrift = std::max(g_maxDrift, std::sqrt(dx * dx + dy * dy));
 		}
 
-		const auto t = GmodToSkyrim(g.pos, g.anchor, a_origin.skyrim_origin);
+		const auto drawn = Smooth::Position(g);
+		const auto t = GmodToSkyrim(drawn.data(), g.anchor, a_origin.skyrim_origin);
 		g_lastTargetRaw = RE::NiPoint3{ float(t.x), float(t.y), float(t.z) };
 		Ground how;
 		const float z = GroundZ(a_player, float(t.x), float(t.y), cur.z, how);
@@ -236,6 +240,7 @@ namespace gmsky::Puppet
 			logger::info("PUPPET on: sets={} ground ray/land/keep={}/{}/{} set=({:.1f}, {:.1f}, {:.1f}) gmod-as-skyrim z={:.1f} heading={:.1f} pitch={:.1f} max-step={:.1f} max-drift={:.1f} big-steps={}",
 				g_sets, g_groundRay, g_groundLand, g_groundKeep, g_lastSet.x, g_lastSet.y, g_lastSet.z, g_lastTargetRaw.z,
 				g_lastHeadingDeg, g_lastPitchDeg, g_maxStep, g_maxDrift, g_bigSteps);
+			Smooth::LogSecond();
 			if (g_lagSamples) {
 				logger::info("VIEW lag (Skyrim frames, 1 = newest) avg={:.2f} max={} | prediction {}: frames={} ahead max={:.2f} deg, last frame {:.2f} deg",
 					double(g_lagSum) / g_lagSamples, g_lagMax, g_degPerCount > 0.0f ? "on" : "off (gmsky_predict 0)",

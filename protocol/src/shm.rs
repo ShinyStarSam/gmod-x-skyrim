@@ -21,6 +21,14 @@ extern "system" {
     fn GetLastError() -> u32;
     fn GetCurrentProcessId() -> u32;
     fn GetTickCount64() -> u64;
+    fn QueryPerformanceCounter(count: *mut i64) -> i32;
+}
+
+/// The PC's precise clock (QueryPerformanceCounter ticks). The same clock in every process.
+pub fn now_qpc() -> i64 {
+    let mut c = 0i64;
+    unsafe { QueryPerformanceCounter(&mut c) };
+    c
 }
 
 /// Milliseconds since Windows started. Both games run on one PC, so heartbeats compare directly.

@@ -34,12 +34,20 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   during fast turns); the user reports only a very small delay left. Settings in Garry's Mod's
   console: `gmsky_sensitivity` (default 3), `gmsky_predict`, `gmsky_camera` (1 = on).
 
+- **Smooth walking** (tested in game 2026-10-04, Phase 1 step 2): Skyrim blends between Garry's
+  Mod's 66 updates a second instead of taking the newest one each frame; at steady speed the
+  per-frame steps vary by 1–6% instead of 27–44%. Adds ~15 ms to the position only (not the view).
+  `gmsky_smooth 0` turns it off.
+
+- **gmsky loads by itself** (tested in game 2026-10-04): one small file,
+  `garrysmod/lua/autorun/server/gmsky_autoload.lua`, installed once with
+  `tools/install_gmod_autoload.ps1`, loads gmsky in single-player once you're in the map.
+
 ## What doesn't work yet
 
 - The mouse wheel, weapons switching, and Garry's Mod's weapons/HUD in Skyrim's window.
 - Camera position while walking is one frame late, and no crouch height or view bob (Phase 1 step 4).
 - Jumping, crouching and Garry's Mod's own height: Skyrim's player stays on Skyrim's ground.
-- Loading gmsky automatically when Garry's Mod starts (`+lua_run` doesn't work; type it in the console).
 - Everything else in [docs/DESIGN.md](docs/DESIGN.md) §12.
 
 ## Requirements

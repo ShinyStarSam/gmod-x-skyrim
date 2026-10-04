@@ -14,6 +14,8 @@ local sensitivity = CreateConVar("gmsky_sensitivity", "3", FCVAR_ARCHIVE,
 	"Mouse sensitivity for input from Skyrim's window (same scale as Garry's Mod's sensitivity)")
 local predict = CreateConVar("gmsky_predict", "1", FCVAR_ARCHIVE,
 	"1 = Skyrim draws mouse movement Garry's Mod hasn't applied yet (no round-trip delay), 0 = off")
+local smooth = CreateConVar("gmsky_smooth", "1", FCVAR_ARCHIVE,
+	"1 = Skyrim blends between Garry's Mod's ticks (even steps), 0 = newest tick each frame")
 local driveCamera = CreateConVar("gmsky_camera", "1", FCVAR_ARCHIVE,
 	"1 = Skyrim turns its camera straight to the view (no camera easing / frame delay), 0 = Skyrim's own camera")
 
@@ -30,10 +32,12 @@ hook.Add("Tick", "gmsky_player_state", function()
 	if ply:Alive() then flags = flags + 4 end
 	if ply:GetMoveType() == MOVETYPE_NOCLIP then flags = flags + 8 end
 	if driveCamera:GetBool() then flags = flags + 0x20 end
+	if smooth:GetBool() then flags = flags + 0x40 end
 	-- Degrees per Skyrim mouse count, so Skyrim can draw the mouse movement still on its way here.
 	local degPerCount = predict:GetBool() and 0.022 * sensitivity:GetFloat() or 0
 	gmsky.WritePlayerState(engine.TickCount(), pos.x, pos.y, pos.z, ang.p, ang.y, ang.r,
-		ply:EyePos().z - pos.z, vel.x, vel.y, vel.z, flags, ply:GetFOV(), degPerCount)
+		ply:EyePos().z - pos.z, vel.x, vel.y, vel.z, flags, ply:GetFOV(), degPerCount,
+		engine.TickInterval() * 1000)
 end)
 
 -- Input typed into Skyrim's window (Phase 1 step 1). While Skyrim routes input here, it replaces

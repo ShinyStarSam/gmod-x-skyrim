@@ -169,8 +169,13 @@ After the one write, every rebuild happens inside the project and the game folde
 
 **Starting it without an addon file:** after the map loads, type `lua_run require("gmsky")` in the
 console. That loads the server stub; the server side then tells the client side to load its stub
-(`SendLua`), which works (in-game test 2026-10-04). `+lua_run` on the command line was tried and
-does nothing, so for now it is one console command per session. Automating it is a Phase 5 job.
+(`SendLua`), which works (in-game test 2026-10-04). `+lua_run` on the command line does nothing,
+and `-hijack` (sending it to the running game) passes only one word; both dropped.
+
+**Auto-loading (user's decision 2026-10-04):** a second one-time write, `gmsky_autoload.lua` in
+`garrysmod/lua/autorun/server/` (master copy `gmod/autorun/`, installed by
+`tools/install_gmod_autoload.ps1`). Single-player only, it requires gmsky once the player's game is
+fully loaded (first real `SetupMove` command). Like the stubs it never needs changing.
 
 (The stubs can't be swapped while Garry's Mod is running, so rebuilds need a Garry's Mod restart.)
 
@@ -280,9 +285,20 @@ Goal: play from the Skyrim window with Garry's Mod movement on Skyrim's real gro
    Skyrim menu is open. `gmsky_camera 0` in Garry's Mod's console turns it off. The log shows how
    far Skyrim's own camera lags our view (degrees), which is the easing measured.
    Not done here: the camera *position* (still one frame late when walking); Phase 1 step 4.
-2. **Smooth position.** Send the position Garry's Mod *draws* each frame (client side, between
-   ticks) instead of the raw 66/s tick position (Phase 0 finding: ticks arrive in bursts at low
-   frame rates). Test: per-frame step sizes in the log are even.
+2. **Smooth position (revised 2026-10-04).** Garry's Mod moves the player 66 times a second,
+   Skyrim draws 60 times a second, and the two aren't in step, so taking the newest tick each frame
+   gives uneven steps (most frames one tick, some none, some two). The first plan, sending the
+   position Garry's Mod's client draws each frame, judders the same way (SkyCraft tried it: the
+   two games' frames aren't phase-locked). Instead, as SkyCraft does with Minecraft's ticks:
+   Garry's Mod stamps each tick with the PC's precise clock (`QueryPerformanceCounter`, the same
+   clock in both processes) and its tick length; Skyrim keeps the last few ticks, locks their
+   times to the exact tick rhythm (tick numbers say how many ticks passed; the stamps' noise is
+   filtered out), and draws the player at "now minus a small delay", blending between the two
+   ticks around that moment. The delay is one tick plus how late ticks really arrive (last 2 s; ~17–25 ms),
+   so the next tick has normally arrived when needed. Only the position; the view keeps step 1b/1c
+   (no added delay). `gmsky_smooth 0` in Garry's Mod's console = newest tick as before.
+   Protocol version 4. Test: walking, the per-frame steps in the log are even (low spread) with
+   smoothing on and uneven with it off; "late frames" near 0.
 3. **Collision, stage A.** Skyrim casts a grid of downward rays around the player (SkyCraft's
    stage A) and streams height patches; Garry's Mod builds invisible static meshes from them, so
    Garry's Mod's own movement walks on Skyrim's ground, hills and rocks. Then the puppet uses
