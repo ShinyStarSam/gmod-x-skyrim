@@ -7,6 +7,7 @@
 #include "Input.h"
 #include "Link.h"
 #include "Puppet.h"
+#include "Terrain.h"
 
 namespace gmsky::Probe
 {
@@ -135,6 +136,7 @@ namespace gmsky::Probe
 		g_needOrigin = true;
 		g_haveLastLogPos = false;
 		Puppet::Reset("game loaded");
+		Terrain::Reset();
 		logger::info("game loaded: will publish a new origin on the next frame");
 	}
 
@@ -204,6 +206,7 @@ namespace gmsky::Probe
 		Puppet::Update(a_player, g_origin, g_frame);
 		Input::PerFrame(g_frame);
 		Camera::AfterPlayerUpdate();
+		Terrain::PerFrame(a_player, g_origin, g_frame);
 
 		g_logTimer += a_delta;
 		if (g_logTimer >= 1.0f) {
@@ -211,6 +214,7 @@ namespace gmsky::Probe
 			Puppet::LogSecond();
 			Input::LogSecond();
 			Camera::LogSecond();
+			Terrain::LogSecond(a_player);
 			g_logTimer = 0.0f;
 		}
 	}

@@ -101,13 +101,36 @@ function T.MeasureRoom(pos)
 		hit(Vector(1, 0, 0)), hit(Vector(-1, 0, 0)), hit(Vector(0, 1, 0)), hit(Vector(0, -1, 0))))
 end
 
+-- Step 3b: Skyrim's ground grid (GmskyTerrain), already in Garry's Mod units. For now it is
+-- received and logged; 3c builds collision from it.
+function T.PollGrid()
+	local id, epoch, n, cx, cy, spacing, misses, h = gmsky.ReadTerrain(T.grid and T.grid.id or 0)
+	if not epoch then return end
+	local lo, hi, nan = math.huge, -math.huge, 0
+	for k = 1, #h do
+		local z = h[k]
+		if z ~= z then nan = nan + 1 else lo = math.min(lo, z); hi = math.max(hi, z) end
+	end
+	T.grid = { id = id, epoch = epoch, n = n, cx = cx, cy = cy, spacing = spacing, h = h }
+	gmsky.Log(string.format("terrain: grid %d from Skyrim (origin epoch %d): %dx%d points %.1f apart, centre (%.1f, %.1f), ground z %.1f..%.1f, %d misses (%d NaN)",
+		id, epoch, n, n, spacing, cx, cy, lo, hi, misses, nan))
+end
+hook.Add("Think", "gmsky_terrain_poll", T.PollGrid)
+
+local function GridStatus(ply)
+	local g = T.grid
+	if not g or not IsValid(ply) then return "" end
+	local p = ply:GetPos()
+	return string.format(" | grid %d: player %.0f units from its centre", g.id, math.sqrt((p.x - g.cx) ^ 2 + (p.y - g.cy) ^ 2))
+end
+
 -- Once a second (server) / every 5 s (client): where the player is against the test hill.
 function T.Status(ply)
 	local ent = T.testEnt
 	if CLIENT then
 		for _, e in ipairs(ents.FindByClass("gmsky_terrain")) do ent = e end
 	end
-	if not IsValid(ent) or not IsValid(ply) then return "" end
+	if not IsValid(ent) or not IsValid(ply) then return GridStatus(ply) end
 	local p = ply:GetPos()
 	local c = ent:GetPos()
 	local dx, dy = p.x - c.x, p.y - c.y
@@ -116,6 +139,7 @@ function T.Status(ply)
 	return string.format(" | terrain test %d: %s, feet minus hill %s, standing on %s", ent:GetTestId(),
 		inside and "over it" or "off it", inside and string.format("%.1f", p.z - (c.z + T.TestHeight(dx, dy))) or "-",
 		ground == ent and "the hill" or (IsValid(ground) and ground:GetClass()) or (ground == game.GetWorld() and "the map" or "nothing"))
+		.. GridStatus(ply)
 end
 
 if SERVER then

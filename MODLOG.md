@@ -291,3 +291,28 @@ Skipped: header stuck at INIT if a process dies mid-initialization (tiny window;
 **Failure:** player placed 4 units above the hill's centre point, but the hull is 32 wide, so its edges were inside the slope (stuck). **Fixed** (not re-tested): placed 4 above the highest point under the whole footprint.
 **Changed:** `terrain.lua` placement; DESIGN.md 3c gets the measured room, anchor near (0, 0, 1,500), the placement rule, and "hold the player if there's no ground yet".
 **Next:** commit; step 3b (Skyrim height grid).
+
+## 2026-10-04 Phase 1 step 3b: Skyrim height grid (not tested in game)
+
+**Changed:** Protocol **version 5**: new `GmskyTerrain` slot (65×65 heights, centre, spacing, origin epoch, misses; 16,952 bytes; `GmskyShared` 17,304 of the 65,536-byte map), C++ and Rust. New `skse/src/Terrain.h/.cpp`: while the puppet is on, casts downward rays (`TES::Pick`, player's collision group, LOS layer, from 4,000 above to 4,000 below the player's feet) on a 65×65 grid 48 Skyrim units apart centred on the player (snapped to the spacing), 1.5 ms of casting per frame (at least 16 rays); when complete, converts to Garry's Mod units (`SkyrimToGmod`, so conversion stays on the Skyrim side) and publishes. New grid when the player is > 768 units from the last centre or the origin epoch changes; reset on game load. Counts misses and rays that hit an actor (`FindCollidableRef` → `Actor`). Module: `gmsky.ReadTerrain(last_id)` (+ `lua_rawseti` binding). `terrain.lua`: server and client poll it every frame and log each new grid; the status line adds the player's distance from the grid centre. Harness: a grid written by the fake Skyrim reaches Lua (id, size, NaN kept).
+**Logs:** `skyrim.log`: `TERRAIN published grid N at (x, y) epoch E: 4225 rays in X ms casting (Y us each) over F frames, Z ms from start; misses=… actor hits=…; ground z a..b`, and each second `TERRAIN this second: … | grid height under the player: G (feet F, grid minus feet D)`. `gmod_server.log`: `terrain: grid N from Skyrim …`.
+**Tested how:** `cargo build --release`; `cargo test -p gmsky-protocol`; `protocol_test`; `gmod_harness.exe`; `cmake --build --preset release`.
+**Result:** protocol 4/4; PROTOCOL TEST PASSED (`sizeof(GmskyShared)=17304`); HARNESS PASSED 51/51 (the harness caught `GridStatus` used before it was defined; moved). Plugin builds with no warnings from our code, copied.
+**Not sure:** cost per ray (decides how long a grid takes; if slow, a sprinting player could outrun it); whether LOS-layer rays hit NPCs (the "actor hits" count will say); misses over water or outside loaded cells.
+**Next:** user's test, both games.
+
+## 2026-10-04 Garry's Mod map: gm_largeemptyplane (user's choice; not yet run)
+
+**Changed:** `tools/launch_gmod.ps1` starts `gm_largeemptyplane` by default (`-Map <name>` to choose; `-Map gm_flatgrass` for the old one). DESIGN.md §6.
+**Checked:** the user subscribed to it on the Workshop: item 1314012230 (`919169528587740911_legacy.bin`, read in memory: contains `maps/gm_largeemptyplane.bsp`). Nothing written.
+**Not sure:** how much bigger it really is. Source maps are limited to about ±16,384 units, and gm_flatgrass already measured ~30,700 wide and ~27,600 tall; the room is logged on every load (`terrain: map gm_largeemptyplane room from …`), so the next run tells. The bigger gain may be no obstructions.
+**Update:** `+map gm_largeemptyplane` failed at start-up: `CModelLoader::Map_IsValid: No such map 'maps/gm_largeemptyplane.bsp'` / `map load failed`. Likely cause (not confirmed): Workshop content is mounted only after the main menu loads, after command-line commands run. The launch script now stops at the main menu by default (the user picks the map there); `-Map <name>` still starts a built-in map directly.
+
+## 2026-10-04 In-game test 11 (step 3b): Skyrim height grid works; gm_largeemptyplane is too low
+
+**Result (logs: `build/logs-ingame-test-11/`):** user walked, sprinted up a mountain, passed NPCs; frame rate "felt similar".
+- 57 grids published (`skyrim.log`) and all received (`gmod_server.log`). Each: 4,225 rays in 13.8–33.7 ms of casting (**3.3–8.0 µs per ray**) over 10–23 frames, **150–384 ms** from start to publish. **0 misses.** Skyrim frames per second: 60 in 76 of 103 seconds, 61 in 21, 54–58 in 6.
+- Grid height under the player vs the puppet's feet: within 1 unit in 65 of 105 seconds, 1–5 in 19, 5–20 in 10.
+- The large differences (+981 to +2,676 at 02:56:57–59) are the puppet's fault, not the grid's: sprinting up a ~55° mountainside (feet z 1,290 → 5,712 in 4 s), the Phase 0 ground ray (starts only 100 units above the feet) fell behind and the Skyrim player went *inside* the mountain. Step 3d (height from Garry's Mod's collision) replaces that ray.
+- **Actor hits: up to 8 rays per grid** near NPCs/animals (0 away from them). These would become bumps in the ground. To fix.
+- **gm_largeemptyplane room:** from (−13150, 7438, 106): down 42, **up 3,734**, +x 28,190, −x 2,018, +y 7,218, −y 22,478. As wide as gm_flatgrass (~30,000) but only **~3,776 units tall** (≈7,100 Skyrim units), against 27,600 (≈52,000) for gm_flatgrass. This walk alone covered Skyrim z −351 … 18,928.

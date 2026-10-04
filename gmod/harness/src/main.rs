@@ -311,6 +311,23 @@ fn main() {
         check(r == Ok(Some("nil".into())), &format!("client runs no console commands: {r:?}"));
         lua.run(lc, "HARNESS_CONVARS = { fps_max_nofocus = '300' } timer.Run('gmsky_client_status')").unwrap();
 
+        // 8b. A ground grid from Skyrim reaches Lua (Phase 1 step 3b).
+        {
+            let mut t = Box::new(gmsky_protocol::Terrain::default());
+            t.id = 7;
+            t.origin_epoch = 1;
+            t.n = 65;
+            t.misses = 1;
+            t.center = [100.0, 50.0];
+            t.spacing = 25.5;
+            for (k, h) in t.height.iter_mut().enumerate() { *h = -12000.0 + k as f32 * 0.01; }
+            t.height[0] = f32::NAN;
+            sky.shared().terrain.write(&t);
+            lua.run(ls, "hook.Run('Think')").unwrap();
+            let r = lua.run(ls, "local g = gmsky.terrain.grid return string.format('%d %d %d %.1f %d', g.id, g.n, #g.h, g.h[2], g.h[1] ~= g.h[1] and 1 or 0)");
+            check(r == Ok(Some("7 65 4225 -12000.0 1".into())), &format!("terrain grid reaches Lua: {r:?}"));
+        }
+
         // 9. The auto-loader (garrysmod/lua/autorun/server): waits for the player's first real
         //    command, then requires gmsky once. Fresh Lua state, gmsky not loaded.
         let la = (lua.newstate)();
@@ -342,6 +359,8 @@ fn main() {
     let server_log = std::fs::read_to_string(log_dir.join("gmod_server.log")).unwrap_or_default();
     check(server_log.contains("server.lua loaded"), "gmod_server.log: server.lua loaded");
     check(server_log.contains("ran gmod/lua/gmsky/terrain.lua"), "gmod_server.log: terrain.lua runs on the server");
+    check(server_log.contains("terrain: grid 7 from Skyrim (origin epoch 1): 65x65 points 25.5 apart, centre (100.0, 50.0), ground z -12000.0..-11957.8, 1 misses (1 NaN)"),
+          "gmod_server.log: terrain grid logged");
     check(server_log.contains("new origin epoch 1"), "gmod_server.log: new origin epoch 1");
     check(server_log.matches("ERROR").count() == 1 && server_log.contains("another process (pid 424242)"),
           "gmod_server.log: exactly one ERROR, the expected takeover message");

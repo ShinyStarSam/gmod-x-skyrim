@@ -159,7 +159,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 8] = [
+    let funcs: [(&str, lua::CFn); 9] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -168,6 +168,7 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("Root", l_root),
         ("Reload", l_reload),
         ("Include", l_include),
+        ("ReadTerrain", l_read_terrain),
     ];
     for (name, f) in funcs {
         (a.pushnumber)(l, side as f64); // upvalue 1 = side
@@ -294,6 +295,35 @@ unsafe extern "C" fn l_include(l: *mut State) -> c_int {
         };
         (a.pushboolean)(l, ok as c_int);
         1
+    })
+}
+
+/// gmsky.ReadTerrain(last_id) -> id [, origin_epoch, n, center_x, center_y, spacing, misses, heights]
+/// Skyrim's newest ground grid (Phase 1 step 3), in Garry's Mod units. Returns only the id (0 = none
+/// yet) when it is still `last_id`; otherwise everything, with `heights` a list of n*n numbers,
+/// index i*n + j + 1 (NaN where Skyrim's ray hit nothing).
+unsafe extern "C" fn l_read_terrain(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let last = (a.tonumber)(l, 1) as u32;
+        let t = mapping().ok().and_then(|m| m.shared().terrain.read().map(|(t, _)| t));
+        let Some(t) = t else { (a.pushnumber)(l, 0.0); return 1 };
+        (a.pushnumber)(l, t.id as f64);
+        if t.id == last || t.id == 0 {
+            return 1;
+        }
+        (a.pushnumber)(l, t.origin_epoch as f64);
+        (a.pushnumber)(l, t.n as f64);
+        (a.pushnumber)(l, t.center[0]);
+        (a.pushnumber)(l, t.center[1]);
+        (a.pushnumber)(l, t.spacing as f64);
+        (a.pushnumber)(l, t.misses as f64);
+        let count = (t.n as usize * t.n as usize).min(t.height.len());
+        (a.createtable)(l, count as c_int, 0);
+        for (k, h) in t.height[..count].iter().enumerate() {
+            (a.pushnumber)(l, *h as f64);
+            (a.rawseti)(l, -2, k as c_int + 1);
+        }
+        8
     })
 }
 

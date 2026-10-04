@@ -11,7 +11,7 @@ pub const SHM_NAME: &str = r"Local\GmodSkyrim_v1";
 pub const MAP_SIZE: usize = 65536;
 pub const MAGIC: u32 = 0x594B_534D;
 pub const MAGIC_INIT: u32 = 0x5449_4E49;
-pub const VERSION: u32 = 4; // 2: added Input; 3: PlayerState reports the input it applied; 4: tick stamps
+pub const VERSION: u32 = 5; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
 
 pub const PF_ON_GROUND: u32 = 0x1;
@@ -107,6 +107,31 @@ pub struct Input {
     pub reserved0: u32,
 }
 
+/// Skyrim's ground around the player, in Garry's Mod units (see the C header).
+pub const TERRAIN_N: usize = 65;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Terrain {
+    pub id: u32,
+    pub origin_epoch: u32,
+    pub n: u32,
+    pub misses: u32,
+    pub center: [f64; 2],
+    pub spacing: f32,
+    pub reserved0: f32,
+    pub skyrim_frame: u64,
+    /// Garry's Mod z; NaN = no hit. Index i * n + j.
+    pub height: [f32; TERRAIN_N * TERRAIN_N],
+    pub reserved1: u32,
+}
+
+impl Default for Terrain {
+    fn default() -> Self {
+        Terrain { id: 0, origin_epoch: 0, n: 0, misses: 0, center: [0.0; 2], spacing: 0.0, reserved0: 0.0,
+                  skyrim_frame: 0, height: [0.0; TERRAIN_N * TERRAIN_N], reserved1: 0 }
+    }
+}
+
 /// A latest-value slot guarded by a seqlock. `seq == 0` means never written.
 #[repr(C)]
 pub struct Slot<T> {
@@ -161,6 +186,7 @@ pub struct Shared {
     pub skyrim_state: Slot<SkyrimState>,
     pub player_state: Slot<PlayerState>,
     pub input: Slot<Input>,
+    pub terrain: Slot<Terrain>,
 }
 
 // ---- Layout checks: the same numbers as gmsky_protocol.h ----
@@ -193,7 +219,12 @@ const _: () = {
     assert!(offset_of!(Shared, skyrim_state) == 80);
     assert!(offset_of!(Shared, player_state) == 144);
     assert!(offset_of!(Shared, input) == 296);
-    assert!(size_of::<Shared>() == 344);
+    assert!(size_of::<Terrain>() == 16952);
+    assert!(offset_of!(Terrain, center) == 16);
+    assert!(offset_of!(Terrain, skyrim_frame) == 40);
+    assert!(offset_of!(Terrain, height) == 48);
+    assert!(offset_of!(Shared, terrain) == 344);
+    assert!(size_of::<Shared>() == 17304);
     assert!(size_of::<Shared>() <= MAP_SIZE);
 };
 

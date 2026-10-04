@@ -15,7 +15,7 @@
 #define GMSKY_MAP_SIZE 65536u
 #define GMSKY_MAGIC 0x594B534Du      // "MSKY": layout initialized and ready
 #define GMSKY_MAGIC_INIT 0x54494E49u // "INIT": one side is initializing right now
-#define GMSKY_VERSION 4u  // 2: added GmskyInput; 3: PlayerState reports the input it applied; 4: tick stamps
+#define GMSKY_VERSION 5u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain
 #define GMSKY_HEARTBEAT_TIMEOUT_MS 2000u
 
 // GmskyPlayerState.flags
@@ -111,6 +111,24 @@ typedef struct GmskyInput {
     uint32_t reserved0;
 } GmskyInput;
 
+// Skyrim -> Garry's Mod. Skyrim's ground around the player (Phase 1 step 3): a square grid of
+// heights from downward ray casts, already in Garry's Mod units for the given origin epoch (all
+// conversion stays on the Skyrim side). Point (i, j) is at x = center[0] + (i - (n-1)/2) * spacing,
+// y = center[1] + (j - (n-1)/2) * spacing; index i * n + j.
+#define GMSKY_TERRAIN_N 65
+typedef struct GmskyTerrain {
+    uint32_t id;            // +1 per finished grid; 0 = none yet
+    uint32_t origin_epoch;  // the GmskyOrigin.epoch / anchor these Garry's Mod coordinates belong to
+    uint32_t n;             // points per side (GMSKY_TERRAIN_N)
+    uint32_t misses;        // rays that hit nothing (their height is NaN)
+    double center[2];       // Garry's Mod x, y of the middle point
+    float spacing;          // Garry's Mod units between points
+    float reserved0;
+    uint64_t skyrim_frame;  // Skyrim frame when the grid was finished
+    float height[GMSKY_TERRAIN_N * GMSKY_TERRAIN_N];  // Garry's Mod z of the ground; NaN = no hit
+    uint32_t reserved1;
+} GmskyTerrain;
+
 // A "latest value" slot guarded by a sequence lock (seqlock):
 // the writer makes seq odd, writes, makes seq even. A reader retries if seq was odd or changed.
 // seq == 0 means "never written".
@@ -125,6 +143,7 @@ GMSKY_DEFINE_SLOT(GmskyOriginSlot, GmskyOrigin);
 GMSKY_DEFINE_SLOT(GmskySkyrimStateSlot, GmskySkyrimState);
 GMSKY_DEFINE_SLOT(GmskyPlayerStateSlot, GmskyPlayerState);
 GMSKY_DEFINE_SLOT(GmskyInputSlot, GmskyInput);
+GMSKY_DEFINE_SLOT(GmskyTerrainSlot, GmskyTerrain);
 
 typedef struct GmskyShared {
     GmskyHeader header;
@@ -132,6 +151,7 @@ typedef struct GmskyShared {
     GmskySkyrimStateSlot skyrim_state; // written by Skyrim
     GmskyPlayerStateSlot player_state; // written by Garry's Mod
     GmskyInputSlot input;              // written by Skyrim
+    GmskyTerrainSlot terrain;          // written by Skyrim
 } GmskyShared;
 
 // ---- Layout checks. The same numbers are asserted in protocol/src/lib.rs. ----
@@ -167,7 +187,12 @@ GMSKY_ASSERT(offsetof(GmskyShared, origin) == 40);
 GMSKY_ASSERT(offsetof(GmskyShared, skyrim_state) == 80);
 GMSKY_ASSERT(offsetof(GmskyShared, player_state) == 144);
 GMSKY_ASSERT(offsetof(GmskyShared, input) == 296);
-GMSKY_ASSERT(sizeof(GmskyShared) == 344);
+GMSKY_ASSERT(sizeof(GmskyTerrain) == 16952);
+GMSKY_ASSERT(offsetof(GmskyTerrain, center) == 16);
+GMSKY_ASSERT(offsetof(GmskyTerrain, skyrim_frame) == 40);
+GMSKY_ASSERT(offsetof(GmskyTerrain, height) == 48);
+GMSKY_ASSERT(offsetof(GmskyShared, terrain) == 344);
+GMSKY_ASSERT(sizeof(GmskyShared) == 17304);
 GMSKY_ASSERT(sizeof(GmskyShared) <= GMSKY_MAP_SIZE);
 
 #ifdef __cplusplus

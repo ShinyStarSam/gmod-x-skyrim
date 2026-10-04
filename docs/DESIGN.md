@@ -98,8 +98,11 @@ differences are scale and where the origin is.
 
 ## 6. The Garry's Mod side
 
-- Runs a normal **single-player** game on an empty map (start with `gm_flatgrass`, playing in its
-  large empty air space above the floor; a purpose-built empty box map is a later option).
+- Runs a normal **single-player** game on an empty map: `gm_largeemptyplane` (Workshop item
+  1314012230, subscribed by the user 2026-10-04: flat, no obstructions), started from the main
+  menu (a Workshop map can't be started from the command line: "No such map"; `-Map gm_flatgrass`
+  in the launch script starts the old one directly), playing in the empty air space above the floor. Its size is
+  logged on every load (`terrain: map … room …`); gm_flatgrass's was measured in test 10.
 - NPC spawning off; time of day and weather come from Skyrim (later phases).
 - **Collision:** the Skyrim plugin sends small blocks of ground shape (triangle meshes, per 16×16
   chunk around the player). Lua turns each into an invisible, frozen physics object
