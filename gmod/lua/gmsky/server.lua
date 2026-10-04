@@ -17,6 +17,38 @@ local T = gmsky.terrain
 gmsky.Include("field")
 if GetPlayer() and T then T.home = T.MeasureRoom(GetPlayer():GetPos() + Vector(0, 0, 40)) end
 local anchored = 0 -- the origin epoch Garry's Mod is anchored to
+local inputOn = false -- input comes from Skyrim's window right now
+
+-- Jump log (after test 22: a few single-frame jumps of 100-260 units, cause not known). A tick
+-- where the player moved more than 40 units further than its speed explains is logged with what
+-- was going on. Positions are relative to the anchor, so a re-centre is not a jump.
+local jump = { logged = 0, total = 0 }
+local function CheckJump(ply, pos, vel, tick)
+	local ax, ay, az = gmsky.Anchor()
+	if not ax then jump.last = nil return end
+	local rx, ry, rz = pos.x - ax, pos.y - ay, pos.z - az
+	local l = jump.last
+	if l and tick == l.tick + 1 then
+		local dt = engine.TickInterval()
+		local mx, my, mz = rx - l.x, ry - l.y, rz - l.z
+		local ex, ey, ez = (l.vx + vel.x) / 2 * dt, (l.vy + vel.y) / 2 * dt, (l.vz + vel.z) / 2 * dt
+		local off = math.sqrt((mx - ex) ^ 2 + (my - ey) ^ 2 + (mz - ez) ^ 2)
+		if off > 40 then
+			jump.total = jump.total + 1
+			if jump.logged < 5 then
+				jump.logged = jump.logged + 1
+				local ground = ply:GetGroundEntity()
+				gmsky.Log(string.format("JUMP tick %d: moved (%.1f, %.1f, %.1f), speed explains (%.1f, %.1f, %.1f), %.1f off; speed (%.0f, %.0f, %.0f) -> (%.0f, %.0f, %.0f); %s, %s, on %s, input from Skyrim %s, terrain %s",
+					tick, mx, my, mz, ex, ey, ez, off, l.vx, l.vy, l.vz, vel.x, vel.y, vel.z,
+					ply:GetMoveType() == MOVETYPE_NOCLIP and "noclip" or "walking", ply:IsOnGround() and "on ground" or "in air",
+					IsValid(ground) and ground:GetClass() or (ground == game.GetWorld() and "the map" or "nothing"),
+					l.input == inputOn and (inputOn and "on" or "off") or ("switched " .. (inputOn and "on" or "off")),
+					T and string.format("holding %s, lifts this second %d, re-centres %d", tostring(T.holding), T.stats and T.stats.lifts or 0, T.recentres or 0) or "-"))
+			end
+		end
+	end
+	jump.last = { tick = tick, x = rx, y = ry, z = rz, vx = vel.x, vy = vel.y, vz = vel.z, input = inputOn }
+end
 
 local sensitivity = CreateConVar("gmsky_sensitivity", "3", FCVAR_ARCHIVE,
 	"Mouse sensitivity for input from Skyrim's window (same scale as Garry's Mod's sensitivity)")
@@ -47,6 +79,7 @@ hook.Add("Tick", "gmsky_player_state", function()
 	if smooth:GetBool() then flags = flags + 0x40 end
 	-- Degrees per Skyrim mouse count, so Skyrim can draw the mouse movement still on its way here.
 	local degPerCount = predict:GetBool() and 0.022 * sensitivity:GetFloat() or 0
+	CheckJump(ply, pos, vel, engine.TickCount())
 	anchored = gmsky.WritePlayerState(engine.TickCount(), pos.x, pos.y, pos.z, ang.p, ang.y, ang.r,
 		ply:EyePos().z - pos.z, vel.x, vel.y, vel.z, flags, ply:GetFOV(), degPerCount,
 		engine.TickInterval() * 1000) or 0
@@ -94,6 +127,7 @@ hook.Add("StartCommand", "gmsky_input", function(ply, cmd)
 			hold = { ang = view, untilTime = CurTime() + HOLD_TIME, ticks = 0 }
 			gmsky.Log(string.format("input from Skyrim: OFF, holding yaw=%.1f pitch=%.1f", view.y, view.p))
 			view = nil
+			inputOn = false
 		end
 		if hold then
 			local own = cmd:GetViewAngles()
@@ -112,6 +146,7 @@ hook.Add("StartCommand", "gmsky_input", function(ply, cmd)
 	hold = nil
 	if not view then
 		view = ply:EyeAngles()
+		inputOn = true
 		view.r = 0
 		gmsky.Log("input from Skyrim: ON")
 	end
@@ -172,8 +207,9 @@ timer.Create("gmsky_status", 1, 0, function()
 	if gmsky.field then terrain = terrain .. gmsky.field.Status(ply) end
 	gmsky.Log(string.format("tick=%d %s skyrim=%s epoch=%d skyrim_frame=%d writes/s=%d%s%s%s",
 		engine.TickCount(), where, connected and "CONNECTED" or "not connected", epoch, skyrimFrame,
-		writes - lastWrites, input, err and (" error=" .. err) or "", terrain))
+		writes - lastWrites, input, err and (" error=" .. err) or "", terrain) .. (jump.total > 0 and string.format(" | jumps %d", jump.total) or ""))
 	lastWrites = writes
+	jump.logged, jump.total = 0, 0
 	inputStats.cmds, inputStats.dx, inputStats.dy = 0, 0, 0
 end)
 

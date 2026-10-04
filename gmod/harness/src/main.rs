@@ -135,7 +135,7 @@ V.__mul = function(a, k) return Vector(a.x * k, a.y * k, a.z * k) end
 V.__unm = function(a) return Vector(-a.x, -a.y, -a.z) end
 function V:Length() return math.sqrt(self.x * self.x + self.y * self.y + self.z * self.z) end
 util = { TraceLine = function() return { Hit = false, HitPos = Vector() } end }
-game = { GetMap = function() return "harness" end }
+game = { GetMap = function() return "harness" end, GetWorld = function() return "world" end }
 MOVETYPE_WALK = 2
 MOVETYPE_NOCLIP = 8
 local t = 0
@@ -523,6 +523,11 @@ fn main() {
           "gmod_server.log: module logs the anchor shift");
     check(server_log.contains("origin: 2 ticks after re-centre #1: player (0.5, 0.0, 0.0) speed (66, 0, 0)"),
           "gmod_server.log: speed logged after the re-centre");
+    // Jump log: the harness puts the player 800 units away in one tick (before the re-centre),
+    // which no speed explains; the re-centre itself is not a jump (positions relative to the anchor).
+    check(server_log.contains("JUMP tick ") && server_log.contains("speed explains (1.0, 0.0, 0.0)"),
+          "gmod_server.log: a teleport no speed explains is logged as a JUMP");
+    check(server_log.matches("JUMP tick ").count() == 1, &format!("gmod_server.log: exactly one JUMP ({})", server_log.matches("JUMP tick ").count()));
     check(server_log.matches("ERROR").count() == 1 && server_log.contains("another process (pid 424242)"),
           "gmod_server.log: exactly one ERROR, the expected takeover message");
     let client_log = std::fs::read_to_string(log_dir.join("gmod_client.log")).unwrap_or_default();

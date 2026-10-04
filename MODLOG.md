@@ -564,3 +564,10 @@ Skipped: header stuck at INIT if a process dies mid-initialization (tiny window;
 - Most odd seconds are within ~1 s of the Skyrim window losing focus. Test 22 had 11 window switches (tests 20/21: 0/2), probably from typing `gmsky_recentre_at` into Garry's Mod's console.
 **Not proven** what moves the player in those frames; no per-tick Garry's Mod positions were logged. Next change adds that log.
 
+## 2026-10-04 Jump log in Garry's Mod (not tested in game)
+
+**Changed:** `gmod/lua/gmsky/server.lua`: every tick, the player's move (relative to the anchor, so a re-centre doesn't count) is compared with what its speed explains; more than 40 units off is logged as `JUMP tick N: moved …, speed explains …, … off; speed before -> after; noclip/walking, on ground/in air, on <entity>, input from Skyrim on/off/switched, terrain holding / lifts / re-centres` (at most 5 lines a second; the status line adds `jumps N`). Harness: fake `game.GetWorld`; 87 checks (new: the harness's own 800-unit teleport is logged as exactly one JUMP).
+**Why:** test 22's unexplained single-frame jumps (previous entry). The next test shows what Garry's Mod was doing when they happen (or that Garry's Mod didn't jump and the cause is on Skyrim's side).
+**Tested how:** `cargo build --release`; `gmod_harness.exe` → HARNESS PASSED (87).
+**Not tested in game.**
+

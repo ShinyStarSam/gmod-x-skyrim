@@ -50,7 +50,7 @@ Single-player and offline only.
 ## How to build and test
 
 - Rust (module, stub, harness, protocol): `cargo build --release`, then
-  `target\release\gmod_harness.exe` → `HARNESS PASSED` (85 checks). It runs our Lua in Garry's
+  `target\release\gmod_harness.exe` → `HARNESS PASSED` (87 checks). It runs our Lua in Garry's
   Mod's real `lua_shared.dll` with fake game objects (incl. the collision math and the ground
   entity's `TestCollision`); it does not run Garry's Mod's movement.
 - C++ layout test: `cmake --build build/protocol --config Release`, then
@@ -111,8 +111,8 @@ shapes as soon as possible, triple-checked against SkyCraft):
   Garry's Mod moves the player and the anchor back to the middle of the map together
   (`terrain.lua` `T.Recentre`, `gmsky.ShiftAnchor`); grids are anchor-relative (protocol 7).
   Open question from test 22: a few single-frame jumps of 100–260 Garry's Mod units, mostly
-  near window switches, not at re-centres (MODLOG test 22); a per-tick jump log is added to
-  find out.
+  near window switches, not at re-centres (MODLOG test 22). `gmod_server.log` now logs
+  `JUMP tick …` lines (and `jumps N` in the status line) to find out; read them after the next test.
 - **Step D: Skyrim's real collision shapes (SkyCraft's stage C), ported.** SkyCraft
   `skse/src/Collision.cpp/.h`: walk the loaded Havok world under its read lock; layers static,
   anim static, transparent, trees, props, terrain, ground, invisible walls, stair helpers; decode
