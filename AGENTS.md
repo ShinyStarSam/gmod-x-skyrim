@@ -61,7 +61,7 @@ This project merges Garry's Mod with Skyrim Anniversary Edition
 
 - OS: Windows 11
 - Game A: Garry's Mod (64 bit) September 2026 Update, installed at B:\SteamLibrary\steamapps\common\GarrysMod
-- Game B: Skyrim Anniversary Edition 1.7.99, installed at B:\SteamLibrary\steamapps\common\Skyrim Special Edition
+- Game B: Skyrim Anniversary Edition 1.7.104, installed at B:\SteamLibrary\steamapps\common\Skyrim Special Edition
 - Loader: SKSE
 - Which game is authoritative for the player: A
 - Language and version: Rust stable with MSVC
