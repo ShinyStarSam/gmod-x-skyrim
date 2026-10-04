@@ -67,11 +67,22 @@ local inputStats = { cmds = 0, dx = 0, dy = 0, buttons = 0 }
 
 local function AngleGap(a, b)
 	return math.max(math.abs(math.NormalizeAngle(a.y - b.y)), math.abs(a.p - b.p))
+-- V in Skyrim's window (step 3e): what Garry's Mod's own `noclip` command does. The gamemode's
+-- PlayerNoClip hook decides whether it's allowed (Sandbox: always in single-player).
+local function ToggleNoclip(ply)
+	local want = ply:GetMoveType() ~= MOVETYPE_NOCLIP
+	local allowed = hook.Run("PlayerNoClip", ply, want)
+	if allowed then ply:SetMoveType(want and MOVETYPE_NOCLIP or MOVETYPE_WALK) end
+	local p = ply:GetPos()
+	gmsky.Log(string.format("noclip %s (V in Skyrim) at (%.0f, %.0f, %.0f): %s", want and "ON" or "OFF", p.x, p.y, p.z,
+		allowed and "done" or "refused by the PlayerNoClip hook"))
+end
+
 end
 
 hook.Add("StartCommand", "gmsky_input", function(ply, cmd)
 	if ply ~= GetPlayer() then return end
-	local active, buttons, dx, dy = gmsky.ReadInput()
+	local active, buttons, dx, dy, _, noclipPresses = gmsky.ReadInput()
 	if not active then
 		if view then
 			-- Tell the Garry's Mod window our view (it only had its own, stale one until now).
@@ -102,6 +113,7 @@ hook.Add("StartCommand", "gmsky_input", function(ply, cmd)
 	end
 	local k = 0.022 * sensitivity:GetFloat()
 	view.y = math.NormalizeAngle(view.y - dx * k)
+	for _ = 1, noclipPresses do ToggleNoclip(ply) end
 	view.p = math.Clamp(view.p + dy * k, -89, 89)
 
 	local b = 0
@@ -137,8 +149,9 @@ timer.Create("gmsky_status", 1, 0, function()
 	local where = "no player"
 	if ply then
 		local p, a = ply:GetPos(), ply:EyeAngles()
-		where = string.format("pos=(%.1f, %.1f, %.1f) yaw=%.1f pitch=%.1f eye=%.1f ground=%s",
-			p.x, p.y, p.z, a.y, a.p, ply:EyePos().z - p.z, tostring(ply:IsOnGround()))
+		where = string.format("pos=(%.1f, %.1f, %.1f) yaw=%.1f pitch=%.1f eye=%.1f ground=%s%s",
+			p.x, p.y, p.z, a.y, a.p, ply:EyePos().z - p.z, tostring(ply:IsOnGround()),
+			ply:GetMoveType() == MOVETYPE_NOCLIP and " NOCLIP" or "")
 		-- Convention check: if yaw 0 = +X and yaw grows counter-clockwise, then walking forward
 		-- moves along atan2(vy, vx) and facing-minus-moving is about 0.
 		local v = ply:GetVelocity()

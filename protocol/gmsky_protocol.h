@@ -15,7 +15,7 @@
 #define GMSKY_MAP_SIZE 65536u
 #define GMSKY_MAGIC 0x594B534Du      // "MSKY": layout initialized and ready
 #define GMSKY_MAGIC_INIT 0x54494E49u // "INIT": one side is initializing right now
-#define GMSKY_VERSION 5u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain
+#define GMSKY_VERSION 6u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses
 #define GMSKY_HEARTBEAT_TIMEOUT_MS 2000u
 
 // GmskyPlayerState.flags
@@ -108,7 +108,7 @@ typedef struct GmskyInput {
     int64_t mouse_x_total;   // mouse counts since Skyrim started, + = right
     int64_t mouse_y_total;   // + = down
     int32_t wheel_total;     // wheel notches, + = up
-    uint32_t reserved0;
+    uint32_t noclip_presses; // noclip key (V) presses since Skyrim started; each new one toggles noclip
 } GmskyInput;
 
 // Skyrim -> Garry's Mod. Skyrim's ground around the player (Phase 1 step 3): a square grid of
@@ -182,6 +182,7 @@ GMSKY_ASSERT(offsetof(GmskyPlayerState, tick_ms) == 136);
 GMSKY_ASSERT(sizeof(GmskyInput) == 40);
 GMSKY_ASSERT(offsetof(GmskyInput, mouse_x_total) == 16);
 GMSKY_ASSERT(offsetof(GmskyInput, wheel_total) == 32);
+GMSKY_ASSERT(offsetof(GmskyInput, noclip_presses) == 36);
 GMSKY_ASSERT(offsetof(GmskyOriginSlot, data) == 8);
 GMSKY_ASSERT(offsetof(GmskyShared, origin) == 40);
 GMSKY_ASSERT(offsetof(GmskyShared, skyrim_state) == 80);

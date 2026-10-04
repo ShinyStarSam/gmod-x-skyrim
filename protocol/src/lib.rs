@@ -11,7 +11,7 @@ pub const SHM_NAME: &str = r"Local\GmodSkyrim_v1";
 pub const MAP_SIZE: usize = 65536;
 pub const MAGIC: u32 = 0x594B_534D;
 pub const MAGIC_INIT: u32 = 0x5449_4E49;
-pub const VERSION: u32 = 5; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain
+pub const VERSION: u32 = 6; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
 
 pub const PF_ON_GROUND: u32 = 0x1;
@@ -104,7 +104,8 @@ pub struct Input {
     pub mouse_x_total: i64,
     pub mouse_y_total: i64,
     pub wheel_total: i32,
-    pub reserved0: u32,
+    /// Noclip key (V) presses since Skyrim started; each new one toggles noclip.
+    pub noclip_presses: u32,
 }
 
 /// Skyrim's ground around the player, in Garry's Mod units (see the C header).
@@ -214,6 +215,7 @@ const _: () = {
     assert!(size_of::<Input>() == 40);
     assert!(offset_of!(Input, mouse_x_total) == 16);
     assert!(offset_of!(Input, wheel_total) == 32);
+    assert!(offset_of!(Input, noclip_presses) == 36);
     assert!(offset_of!(Slot<Origin>, data) == 8);
     assert!(offset_of!(Shared, origin) == 40);
     assert!(offset_of!(Shared, skyrim_state) == 80);

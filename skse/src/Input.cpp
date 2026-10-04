@@ -1,7 +1,7 @@
 // Phase 1 step 1: input bridge. Skyrim keeps keyboard focus. While the puppet is on, Skyrim's
 // window is in front and no Skyrim menu has the input, keyboard and mouse go to Garry's Mod
 // (GmskyInput slot) instead of Skyrim's own player. Skyrim keeps Esc, ~, J, M, F9, and E for
-// activating doors, people and containers. Approach and hooks adapted from SkyCraft (MIT).
+// activating doors, people and containers. V toggles Garry's Mod's noclip (step 3e). Approach and hooks adapted from SkyCraft (MIT).
 #include "Input.h"
 
 #include "Link.h"
@@ -18,6 +18,7 @@ namespace gmsky::Input
 		constexpr uint32_t kDikM = 0x32;        // map
 		constexpr uint32_t kDikF9 = 0x43;       // quickload
 		constexpr uint32_t kDikE = 0x12;        // Skyrim activate
+		constexpr uint32_t kDikV = 0x2F;        // Garry's Mod noclip (its default key)
 
 		bool IsSkyrimMenuKey(uint32_t a_code)
 		{
@@ -45,6 +46,7 @@ namespace gmsky::Input
 		uint32_t g_held = 0;
 		int64_t g_mouseX = 0, g_mouseY = 0;
 		int32_t g_wheel = 0;
+		uint32_t g_noclipPresses = 0;  // running total, so a quick tap between two ticks isn't lost
 		uint64_t g_frame = 0;
 		std::string g_reason = "not started";
 
@@ -88,6 +90,7 @@ namespace gmsky::Input
 			in.mouse_x_total = g_mouseX;
 			in.mouse_y_total = g_mouseY;
 			in.wheel_total = g_wheel;
+			in.noclip_presses = g_noclipPresses;
 			SlotWrite(link.Shared().input, in);
 			++g_writes;
 		}
@@ -177,6 +180,14 @@ namespace gmsky::Input
 						if (code == kDikE) {
 							if (down) {
 								ActivateSkyrimTarget();
+							}
+							continue;
+						}
+						if (code == kDikV) {
+							if (down) {
+								++g_noclipPresses;
+								changed = true;
+								logger::info("V: noclip toggle #{} sent to Garry's Mod", g_noclipPresses);
 							}
 							continue;
 						}
@@ -292,9 +303,9 @@ namespace gmsky::Input
 
 	void LogSecond()
 	{
-		logger::info("INPUT {}: held={:#x} mouse this second=({}, {}) totals=({}, {}) wheel={} events={} writes={} activations={}",
+		logger::info("INPUT {}: held={:#x} mouse this second=({}, {}) totals=({}, {}) wheel={} noclip presses={} events={} writes={} activations={}",
 			g_routing ? "to Garry's Mod" : "to Skyrim", g_held, g_secMouseX, g_secMouseY, g_mouseX, g_mouseY, g_wheel,
-			g_events, g_writes, g_activations);
+			g_noclipPresses, g_events, g_writes, g_activations);
 		g_events = g_writes = g_activations = 0;
 		g_secMouseX = g_secMouseY = 0;
 	}

@@ -49,8 +49,8 @@ const INPUT_STALE_MS: u64 = 250;
 struct InputTrack {
     last_seq: u32,
     last_change_ms: u64,
-    /// Mouse/wheel totals already applied; None = start fresh on the next active read.
-    base: Option<(i64, i64, i32)>,
+    /// Mouse/wheel/noclip-press totals already applied; None = start fresh on the next active read.
+    base: Option<(i64, i64, i32, u32)>,
     /// GmskyInput.frame of the last active read (reported back to Skyrim with the player state).
     applied_frame: u64,
 }
@@ -236,9 +236,10 @@ unsafe extern "C" fn l_heartbeat(l: *mut State) -> c_int {
     })
 }
 
-/// gmsky.ReadInput() -> active, buttons, mouse_dx, mouse_dy, wheel_delta
+/// gmsky.ReadInput() -> active, buttons, mouse_dx, mouse_dy, wheel_delta, noclip_presses
 /// active is false unless Skyrim is alive, routing input (GmskyInput.active) and wrote it within
-/// INPUT_STALE_MS. The deltas are since the previous call that returned active.
+/// INPUT_STALE_MS. The deltas are since the previous call that returned active (so presses made
+/// while input went to Skyrim, e.g. in a menu, are not counted).
 unsafe extern "C" fn l_read_input(l: *mut State) -> c_int {
     guarded(l, |a, _| {
         let mut t = INPUT.lock().unwrap_or_else(|e| e.into_inner());
@@ -251,32 +252,35 @@ unsafe extern "C" fn l_read_input(l: *mut State) -> c_int {
                 t.last_change_ms = now;
             }
             if inp.active == 1 && m.peer_alive() && now.saturating_sub(t.last_change_ms) < INPUT_STALE_MS {
-                let (bx, by, bw) = t.base.unwrap_or((inp.mouse_x_total, inp.mouse_y_total, inp.wheel_total));
+                let (bx, by, bw, bn) = t.base.unwrap_or((inp.mouse_x_total, inp.mouse_y_total, inp.wheel_total, inp.noclip_presses));
                 let (mut dx, mut dy) = (inp.mouse_x_total - bx, inp.mouse_y_total - by);
                 if dx.abs() > 100_000 || dy.abs() > 100_000 {
                     dx = 0; // totals restarted (Skyrim restarted): start again from here
                     dy = 0;
                 }
-                result = Some((inp.buttons, dx, dy, inp.wheel_total.wrapping_sub(bw)));
-                t.base = Some((inp.mouse_x_total, inp.mouse_y_total, inp.wheel_total));
+                // More than a few presses since the last tick means the total restarted: ignore it.
+                let presses = match inp.noclip_presses.wrapping_sub(bn) { n if n <= 8 => n, _ => 0 };
+                result = Some((inp.buttons, dx, dy, inp.wheel_total.wrapping_sub(bw), presses));
+                t.base = Some((inp.mouse_x_total, inp.mouse_y_total, inp.wheel_total, inp.noclip_presses));
                 t.applied_frame = inp.frame;
             }
         }
         match result {
-            Some((buttons, dx, dy, dw)) => {
+            Some((buttons, dx, dy, dw, presses)) => {
                 (a.pushboolean)(l, 1);
                 (a.pushnumber)(l, buttons as f64);
                 (a.pushnumber)(l, dx as f64);
                 (a.pushnumber)(l, dy as f64);
                 (a.pushnumber)(l, dw as f64);
+                (a.pushnumber)(l, presses as f64);
             }
             None => {
                 t.base = None;
                 (a.pushboolean)(l, 0);
-                for _ in 0..4 { (a.pushnumber)(l, 0.0); }
+                for _ in 0..5 { (a.pushnumber)(l, 0.0); }
             }
         }
-        5
+        6
     })
 }
 
@@ -432,7 +436,7 @@ unsafe extern "C" fn l_write_player_state(l: *mut State) -> c_int {
             let t = INPUT.lock().unwrap_or_else(|e| e.into_inner());
             (t.base, t.applied_frame)
         };
-        let (mx, my, _) = applied.unwrap_or((0, 0, 0));
+        let (mx, my, _, _) = applied.unwrap_or((0, 0, 0, 0));
         s.player_state.write(&PlayerState {
             tick: n(1) as u64,
             origin_epoch: link.epoch,
