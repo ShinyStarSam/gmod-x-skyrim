@@ -77,6 +77,8 @@ hook.Add("Tick", "gmsky_player_state", function()
 	if ply:GetMoveType() == MOVETYPE_NOCLIP then flags = flags + 8 end
 	if driveCamera:GetBool() then flags = flags + 0x20 end
 	if smooth:GetBool() then flags = flags + 0x40 end
+	-- Step D: ask Skyrim for its collision shapes (gmsky_ground shapes) or the ray grid.
+	if T and T.ShapesMode() then flags = flags + 0x80 end
 	-- Degrees per Skyrim mouse count, so Skyrim can draw the mouse movement still on its way here.
 	local degPerCount = predict:GetBool() and 0.022 * sensitivity:GetFloat() or 0
 	CheckJump(ply, pos, vel, engine.TickCount())

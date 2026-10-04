@@ -11,7 +11,9 @@
 -- instead of making objects (SkyCraft fabric/.../world/TriCollider.java).
 --
 -- Step A: a test scene (console: gmsky_test_field, gmsky_test_field 0). Step B: Skyrim's ground
--- grid (terrain.lua puts each new grid into one `gmsky_field` entity with F.UseGrid).
+-- grid (terrain.lua puts each new grid into one `gmsky_field` entity with F.UseGrid). Step D:
+-- Skyrim's real collision shapes (F.UseShapes): the triangles stay in the gmsky module (Rust), which
+-- answers the same swept test (gmsky.Sweep); nothing is kept in Lua.
 
 local gmsky = gmsky
 local F = gmsky.field or {}
@@ -278,6 +280,7 @@ function ENT:SetupDataTables()
 	self:NetworkVar("Int", 1, "GridId")       -- Skyrim ground grid (step B); 0 = none
 	self:NetworkVar("Vector", 0, "BoundsLo")  -- collision bounds around the entity
 	self:NetworkVar("Vector", 1, "BoundsHi")
+	self:NetworkVar("Bool", 0, "Shapes")      -- Skyrim's collision shapes (step D), answered by the module
 end
 
 function ENT:UpdateTransmitState()
@@ -305,6 +308,17 @@ function ENT:Think()
 	-- The client builds its copy as soon as the entity and its data have arrived (a grid: once
 	-- the client has read that grid from shared memory too).
 	if not CLIENT or not self.GetSceneId then return end
+	if self:GetShapes() then
+		-- Shapes: the module has the triangles; only the bounds follow the server's.
+		local lo, hi = self:GetBoundsLo(), self:GetBoundsHi()
+		if not self.gmskyLo or self.gmskyLo ~= lo or self.gmskyHi ~= hi then
+			self.gmskyLo, self.gmskyHi = lo, hi
+			self.field, self.gmskyGridId = nil, 0
+			self:SetupCollision()
+		end
+		self:SetNextClientThink(CurTime() + 0.1)
+		return true
+	end
 	if self:GetSceneId() ~= 0 then
 		if not self.field then
 			self.field = F.BuildScene(self:GetSceneId(), Vector(0, 0, 0))
@@ -330,7 +344,8 @@ end
 F.argLogs = F.argLogs or 0
 function ENT:TestCollision(startpos, delta, isbox, extents, mask)
 	local f = self.field
-	if not f then return end
+	local shapes = self.GetShapes and self:GetShapes()
+	if not f and not shapes then return end
 	local t0 = SysTime()
 	-- The moving box: half size `extents`; its centre is startpos, or extents.z above it when
 	-- startpos is the bottom of the box (gmsky_field_feet 1).
@@ -341,7 +356,12 @@ function ENT:TestCollision(startpos, delta, isbox, extents, mask)
 	local o = self:GetPos()
 	local cz = startpos.z - o.z
 	if isbox and F.feet:GetBool() then cz = cz + ez end
-	local frac, nx, ny, nz = F.Sweep(f, startpos.x - o.x, startpos.y - o.y, cz, ex, ey, ez, delta.x, delta.y, delta.z)
+	local frac, nx, ny, nz
+	if shapes then
+		frac, nx, ny, nz = gmsky.Sweep(startpos.x - o.x, startpos.y - o.y, cz, ex, ey, ez, delta.x, delta.y, delta.z)
+	else
+		frac, nx, ny, nz = F.Sweep(f, startpos.x - o.x, startpos.y - o.y, cz, ex, ey, ez, delta.x, delta.y, delta.z)
+	end
 	local ms = (SysTime() - t0) * 1000
 	local s = F.stats
 	if isbox then s.box = s.box + 1 else s.ray = s.ray + 1 end
@@ -404,6 +424,7 @@ end
 -- Server: makes `ent` (at the anchor, terrain.lua) answer with grid g (nil = no ground). The client
 -- follows through the networked grid id. Returns the field.
 function F.UseGrid(ent, g)
+	ent:SetShapes(false)
 	if not g then
 		ent.field = nil
 		ent:SetGridId(0)
@@ -416,6 +437,33 @@ function F.UseGrid(ent, g)
 	ent:SetGridId(g.id)
 	ent:SetupCollision()
 	return f
+end
+
+-- ---- step D: Skyrim's collision shapes -------------------------------------------------------
+
+-- Server: makes `ent` (at the anchor) answer from the module's shapes store. The client follows
+-- through the networked Shapes flag and bounds.
+function F.UseShapes(ent)
+	ent.field = nil
+	ent:SetGridId(0)
+	ent:SetShapes(true)
+	F.ShapesBounds(ent, true)
+end
+
+-- Server, every tick: the entity's collision bounds cover every region the module holds (traces
+-- only ask TestCollision when they cross the bounds). Changed only when they grew or shrank by a
+-- region's worth or more, or `force`.
+function F.ShapesBounds(ent, force)
+	local lx, ly, lz, hx, hy, hz = gmsky.ShapesBounds()
+	if not lx then lx, ly, lz, hx, hy, hz = -1, -1, -1, 1, 1, 1 end
+	local lo, hi = ent:GetBoundsLo(), ent:GetBoundsHi()
+	local function far(a, b) return not a or math.abs(a.x - b.x) > 1 or math.abs(a.y - b.y) > 1 or math.abs(a.z - b.z) > 1 end
+	local nlo, nhi = Vector(lx - 1, ly - 1, lz - 1), Vector(hx + 1, hy + 1, hz + 1)
+	if force or far(lo, nlo) or far(hi, nhi) then
+		ent:SetBoundsLo(nlo)
+		ent:SetBoundsHi(nhi)
+		ent:SetupCollision()
+	end
 end
 
 -- ---- step A test scene ------------------------------------------------------------------------

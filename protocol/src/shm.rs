@@ -140,6 +140,90 @@ impl Mapping {
         }
     }
 
+    // ---- Collision ring (gmsky_protocol.h "Collision ring"; adapted from SkyCraft's Link.cpp, MIT) ----
+
+    fn ring_base(&self) -> *mut u8 {
+        unsafe { (self.view as *mut u8).add(crate::RING_OFFSET) }
+    }
+
+    fn ring_counter(&self, off: usize) -> &std::sync::atomic::AtomicU64 {
+        unsafe { &*(self.ring_base().add(off) as *const std::sync::atomic::AtomicU64) }
+    }
+
+    /// Bytes written but not read yet.
+    pub fn ring_pending(&self) -> u64 {
+        let head = self.ring_counter(crate::RING_HEAD_OFF).load(Ordering::Acquire);
+        let tail = self.ring_counter(crate::RING_TAIL_OFF).load(Ordering::Acquire);
+        head.saturating_sub(tail)
+    }
+
+    /// Writer side (Skyrim; the harness plays Skyrim with it). False if the ring is too full.
+    pub fn ring_write(&self, kind: u32, payload: &[u8]) -> bool {
+        use crate::{ColMsgHeader, COL_PAD, RING_DATA_BYTES, RING_DATA_OFF, RING_HEAD_OFF, RING_TAIL_OFF};
+        let size = RING_DATA_BYTES as u64;
+        let msg = ((8 + payload.len() as u64) + 7) & !7;
+        if msg > size / 2 {
+            return false;
+        }
+        let head_ref = self.ring_counter(RING_HEAD_OFF);
+        let mut head = head_ref.load(Ordering::Relaxed);
+        let tail = self.ring_counter(RING_TAIL_OFF).load(Ordering::Acquire);
+        let mut pos = head % size;
+        let pad = if pos + msg > size { size - pos } else { 0 };
+        if size - (head - tail) < msg + pad {
+            return false;
+        }
+        let data = unsafe { self.ring_base().add(RING_DATA_OFF) };
+        unsafe {
+            if pad > 0 {
+                std::ptr::write_unaligned(data.add(pos as usize) as *mut ColMsgHeader, ColMsgHeader { kind: COL_PAD, bytes: 0 });
+                head += pad;
+                pos = 0;
+            }
+            std::ptr::write_unaligned(data.add(pos as usize) as *mut ColMsgHeader,
+                                      ColMsgHeader { kind, bytes: payload.len() as u32 });
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), data.add(pos as usize + 8), payload.len());
+        }
+        head_ref.store(head + msg, Ordering::Release);
+        true
+    }
+
+    /// Reader side (Garry's Mod): calls `f(type, payload)` for each message, oldest first, until
+    /// the ring is empty or about `max_bytes` were read. Returns the bytes read, or an error if
+    /// the ring holds something that isn't a message (then everything pending is skipped).
+    pub fn ring_read(&self, max_bytes: u64, mut f: impl FnMut(u32, &[u8])) -> Result<u64, String> {
+        use crate::{ColMsgHeader, COL_PAD, RING_DATA_BYTES, RING_DATA_OFF, RING_HEAD_OFF, RING_TAIL_OFF};
+        let size = RING_DATA_BYTES as u64;
+        let tail_ref = self.ring_counter(RING_TAIL_OFF);
+        let head = self.ring_counter(RING_HEAD_OFF).load(Ordering::Acquire);
+        let start = tail_ref.load(Ordering::Relaxed);
+        let mut tail = start;
+        let data = unsafe { self.ring_base().add(RING_DATA_OFF) };
+        while tail < head && tail - start < max_bytes {
+            let pos = tail % size;
+            if size - pos < 8 {
+                tail += size - pos; // (never happens with 8-byte aligned messages; kept as a guard)
+                continue;
+            }
+            let h: ColMsgHeader = unsafe { std::ptr::read_unaligned(data.add(pos as usize) as *const ColMsgHeader) };
+            if h.kind == COL_PAD {
+                tail += size - pos;
+                continue;
+            }
+            let msg = ((8 + h.bytes as u64) + 7) & !7;
+            if pos + msg > size || tail + msg > head {
+                tail_ref.store(head, Ordering::Release);
+                return Err(format!("bad message in the collision ring (type {}, {} bytes at {}); skipped {} bytes",
+                                   h.kind, h.bytes, pos, head - start));
+            }
+            let payload = unsafe { std::slice::from_raw_parts(data.add(pos as usize + 8), h.bytes as usize) };
+            f(h.kind, payload);
+            tail += msg;
+        }
+        tail_ref.store(tail, Ordering::Release);
+        Ok(tail - start)
+    }
+
     /// Is the other game alive (heartbeat within the timeout)?
     pub fn peer_alive(&self) -> bool {
         let h = &self.shared().header;

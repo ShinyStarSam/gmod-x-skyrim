@@ -85,7 +85,14 @@ function RunConsoleCommand(name, value) HARNESS_CONVARS = HARNESS_CONVARS or {};
 function GetConVar(name) local v = (HARNESS_CONVARS or {})[name]; return v and { GetString = function() return v end } end
 FCVAR_ARCHIVE = 128
 FCVAR_REPLICATED = 8192
-function CreateConVar(name, default) return { GetFloat = function() return tonumber(default) end, GetBool = function() return tonumber(default) ~= 0 end } end
+-- HARNESS_CVARS[name] overrides a convar's value. The step B ground tests run on the ray grid;
+-- the step D tests switch gmsky_ground to shapes.
+HARNESS_CVARS = { gmsky_ground = "grid" }
+function CreateConVar(name, default)
+	local function v() local o = HARNESS_CVARS[name] if o ~= nil then return o end return default end
+	return { GetFloat = function() return tonumber(v()) end, GetBool = function() return tonumber(v()) ~= 0 end,
+		GetString = function() return tostring(v()) end }
+end
 function math.NormalizeAngle(a) return (a + 180) % 360 - 180 end
 function math.Clamp(v, lo, hi) return math.max(lo, math.min(hi, v)) end
 -- Garry's Mod's real IN_* values
@@ -164,6 +171,52 @@ function CurTime() return HARNESS_TIME or 0 end
 function SysTime() return os.clock() end
 function HARNESS_ADVANCE() t = t + 1 end
 "#;
+
+/// Collision ring messages, as Skyrim's Collision.cpp writes them (gmsky_protocol.h).
+fn clear_msg(col_epoch: u32, origin_epoch: u32) -> Vec<u8> {
+    let mut v = col_epoch.to_le_bytes().to_vec();
+    v.extend_from_slice(&origin_epoch.to_le_bytes());
+    v
+}
+
+fn region_msg(r: [i32; 3], col_epoch: u32, size: f32, tris: &[[f32; 9]]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(40 + 40 * tris.len());
+    for x in r {
+        v.extend_from_slice(&x.to_le_bytes());
+    }
+    v.extend_from_slice(&col_epoch.to_le_bytes());
+    v.extend_from_slice(&(tris.len() as u32).to_le_bytes());
+    v.extend_from_slice(&0u32.to_le_bytes());
+    for x in r {
+        v.extend_from_slice(&(x as f32 * size).to_le_bytes()); // lattice starts at 0 here
+    }
+    v.extend_from_slice(&size.to_le_bytes());
+    for t in tris {
+        for x in t {
+            v.extend_from_slice(&x.to_le_bytes());
+        }
+        v.extend_from_slice(&0u32.to_le_bytes());
+    }
+    v
+}
+
+/// Puts each triangle into every region (size `size`, lattice at 0) its box comes within 1 unit
+/// of, as Skyrim sends them.
+fn regions_of(tris: &[[f32; 9]], size: f32) -> std::collections::BTreeMap<[i32; 3], Vec<[f32; 9]>> {
+    let mut m: std::collections::BTreeMap<[i32; 3], Vec<[f32; 9]>> = Default::default();
+    for t in tris {
+        let lo = |k: usize| ((t[k].min(t[3 + k]).min(t[6 + k]) - 1.0) / size).floor() as i32;
+        let hi = |k: usize| ((t[k].max(t[3 + k]).max(t[6 + k]) + 1.0) / size).floor() as i32;
+        for x in lo(0)..=hi(0) {
+            for y in lo(1)..=hi(1) {
+                for z in lo(2)..=hi(2) {
+                    m.entry([x, y, z]).or_default().push(*t);
+                }
+            }
+        }
+    }
+    m
+}
 
 fn main() {
     let gmod = PathBuf::from(std::env::var("GMOD_DIR")
@@ -443,6 +496,107 @@ fn main() {
             check(r == Ok(Some("false bad path \"../secret.bin\"".into())), &format!("ReadGridFile refuses '..': {r:?}"));
         }
 
+        // 8d. Skyrim's collision shapes (re-plan step D): collision ring -> the module's store ->
+        //     gmsky.Sweep from the ground entity. The anchor is (-799, 0, -750) since the
+        //     re-centre test; the player is put at world (0, 0, 0) = (799, 0, 750) relative.
+        {
+            use gmsky_protocol::{COL_CLEAR, COL_REGION, PF_SHAPES};
+            lua.run(ls, "HARNESS_CVARS.gmsky_ground = 'shapes' HARNESS_POS = Vector(0, 0, 0) HARNESS_ADVANCE() hook.Run('Tick')").unwrap();
+            let r = lua.run(ls, "local T = gmsky.terrain return string.format('%s %s %s', tostring(T.ent:GetShapes()), tostring(T.holding), tostring(T.holdWhy))");
+            check(r == Ok(Some("true true waiting for Skyrim's collision".into())), &format!("shapes: ground entity switched to shapes; player held until collision arrives: {r:?}"));
+            match sky.shared().player_state.read() {
+                Some((p, _)) => check(p.flags & PF_SHAPES != 0, &format!("shapes: player state asks Skyrim for shapes (flags {:#x})", p.flags)),
+                None => check(false, "player state in shapes mode"),
+            }
+            // Skyrim: clear, then a floor at relative z 740 (x 700..900, y -100..100) in the two
+            // regions it touches, and the (empty) regions below them.
+            let floor = [[700.0, -100.0, 740.0, 900.0, -100.0, 740.0, 900.0, 100.0, 740.0f32],
+                         [700.0, -100.0, 740.0, 900.0, 100.0, 740.0, 700.0, 100.0, 740.0]];
+            check(sky.ring_write(COL_CLEAR, &clear_msg(1, 1)), "shapes: clear written to the ring");
+            for ry in [0, -1] {
+                sky.ring_write(COL_REGION, &region_msg([2, ry, 2], 1, 272.0, &floor));
+                sky.ring_write(COL_REGION, &region_msg([2, ry, 1], 1, 272.0, &[]));
+            }
+            lua.run(ls, "hook.Run('Think') HARNESS_ADVANCE() hook.Run('Tick')").unwrap();
+            let r = lua.run(ls, "local T = gmsky.terrain local n, t = gmsky.ShapesStatus(false) return string.format('%d %d %s', n, t, tostring(T.holding))");
+            check(r == Ok(Some("4 4 false".into())), &format!("shapes: 4 regions (4 triangles) arrive; player let go: {r:?}"));
+            // Feet at world (0, 0, 50) falling 100: the floor is at world z 740 - 750 = -10.
+            let r = lua.run(ls, "local T = gmsky.terrain local tr = HARNESS_ENTS.gmsky_field.TestCollision(T.ent, Vector(0, 0, 50), Vector(0, 0, -100), true, Vector(16, 16, 36), 0) \
+                return tr and string.format('%.4f %.1f %.2f', tr.Fraction, tr.HitPos.z, tr.Normal.z) or 'nil'");
+            check(r == Ok(Some("0.5997 -10.0 1.00".into())), &format!("shapes: entity's TestCollision stops a falling box on Skyrim's floor: {r:?}"));
+            let r = lua.run(ls, "local e = gmsky.terrain.ent local a, b = e:GetBoundsLo(), e:GetBoundsHi() return string.format('%d %d %d %d %d %d', a.x, a.y, a.z, b.x, b.y, b.z)");
+            check(r == Ok(Some("543 -273 271 817 273 817".into())), &format!("shapes: entity bounds cover the regions: {r:?}"));
+
+            // The Rust sweep gives the same answers as field.lua's on the same triangles: a hill
+            // (64 x 64 squares) and 400 random triangles, as f32 (what the ring carries).
+            let mut tris: Vec<[f32; 9]> = Vec::new();
+            let hill = |x: f64, y: f64| (120.0 * (1.0 + ((x - 2000.0) / 250.0).sin()) + 80.0 * (1.0 + (y / 180.0).cos())) as f32;
+            for i in 0..64 {
+                for j in 0..64 {
+                    let (x0, y0) = (1184.0 + i as f64 * 25.5, -816.0 + j as f64 * 25.5);
+                    let (x1, y1) = (x0 + 25.5, y0 + 25.5);
+                    let p = |x: f64, y: f64| [x as f32, y as f32, hill(x, y)];
+                    let (a, b, c, d) = (p(x0, y0), p(x1, y0), p(x1, y1), p(x0, y1));
+                    tris.push([a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]]);
+                    tris.push([a[0], a[1], a[2], c[0], c[1], c[2], d[0], d[1], d[2]]);
+                }
+            }
+            let mut seed = 12345u64;
+            let mut rnd = || { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); ((seed >> 33) as f64) / (1u64 << 31) as f64 };
+            for _ in 0..400 {
+                let (cx, cy, cz) = (1200.0 + rnd() * 1600.0, -800.0 + rnd() * 1600.0, rnd() * 450.0);
+                let mut t = [0f32; 9];
+                for v in 0..3 {
+                    t[v * 3] = (cx + (rnd() - 0.5) * 120.0) as f32;
+                    t[v * 3 + 1] = (cy + (rnd() - 0.5) * 120.0) as f32;
+                    t[v * 3 + 2] = (cz + (rnd() - 0.5) * 120.0) as f32;
+                }
+                tris.push(t);
+            }
+            sky.ring_write(COL_CLEAR, &clear_msg(2, 1));
+            let regions = regions_of(&tris, 272.0);
+            let mut written = true;
+            for (r, list) in &regions {
+                written &= sky.ring_write(COL_REGION, &region_msg(*r, 2, 272.0, list));
+            }
+            check(written, &format!("shapes: {} regions ({} triangles) written to the ring", regions.len(), tris.len()));
+            lua.run(ls, "hook.Run('Think')").unwrap();
+            // The same triangles into a field.lua field (exact f64 copies of the f32 values).
+            lua.run(ls, "HARNESS_TRIS = {}").unwrap();
+            for chunk in tris.chunks(500) {
+                let nums: Vec<String> = chunk.iter().flat_map(|t| t.iter().map(|x| format!("{:?}", *x as f64))).collect();
+                lua.run(ls, &format!("local t = HARNESS_TRIS for _, v in ipairs({{{}}}) do t[#t + 1] = v end", nums.join(","))).unwrap();
+            }
+            let r = lua.run(ls, "local F, T = gmsky.field, HARNESS_TRIS local f = F.New() \
+                for i = 1, #T, 9 do F.AddTri(f, {T[i], T[i+1], T[i+2]}, {T[i+3], T[i+4], T[i+5]}, {T[i+6], T[i+7], T[i+8]}) end \
+                math.randomseed(7) local cases, hits, bad, ties, lt, rt = 0, 0, 0, 0, 0, 0 \
+                local ext = { {16, 16, 36}, {16, 16, 18}, {0, 0, 0}, {8, 8, 36} } local lens = { 4, 40, 300, 3000 } \
+                for k = 1, 3000 do \
+                  local cx, cy, cz = 1200 + math.random() * 1600, -800 + math.random() * 1600, math.random() * 500 \
+                  local e = ext[math.random(4)] local L = lens[math.random(4)] \
+                  local dx, dy, dz = math.random() - 0.5, math.random() - 0.5, math.random() - 0.7 \
+                  local n = math.sqrt(dx * dx + dy * dy + dz * dz) dx, dy, dz = dx / n * L, dy / n * L, dz / n * L \
+                  local t0 = os.clock() local a, ax, ay, az = F.Sweep(f, cx, cy, cz, e[1], e[2], e[3], dx, dy, dz) lt = lt + os.clock() - t0 \
+                  t0 = os.clock() local b, bx, by, bz = gmsky.Sweep(cx, cy, cz, e[1], e[2], e[3], dx, dy, dz) rt = rt + os.clock() - t0 \
+                  cases = cases + 1 if a then hits = hits + 1 end \
+                  if (a == nil) ~= (b == nil) or (a and math.abs(a - b) > 1e-9) then bad = bad + 1 \
+                  elseif a and (math.abs(ax - bx) > 1e-9 or math.abs(ay - by) > 1e-9 or math.abs(az - bz) > 1e-9) then ties = ties + 1 end \
+                end \
+                return string.format('%d %d %d %.4f %.4f %d', cases, hits, bad, lt * 1000 / cases, rt * 1000 / cases, ties)");
+            // (A "tie": same fraction, another triangle's normal. The box touches several triangles at
+            // the same moment, e.g. it starts inside a corner; which one is reported depends on the
+            // order they are looked at, and either is right.)
+            println!("shapes: Rust vs Lua sweeps (cases hits mismatches lua-ms rust-ms ties): {r:?}");
+            let ok = matches!(&r, Ok(Some(s)) if { let v: Vec<&str> = s.split(' ').collect(); v.len() == 6 && v[2] == "0" && v[1].parse::<u32>().unwrap_or(0) > 300 });
+            check(ok, &format!("shapes: Rust sweep = field.lua sweep in 3000 random sweeps over {} regions: {r:?}", regions.len()));
+            // A new "clear" drops everything; the player is held again (in the air above nothing).
+            sky.ring_write(COL_CLEAR, &clear_msg(3, 1));
+            lua.run(ls, "hook.Run('Think') HARNESS_ADVANCE() hook.Run('Tick')").unwrap();
+            let r = lua.run(ls, "local n, t = gmsky.ShapesStatus(true) return string.format('%d %d %s', n, t, tostring(gmsky.terrain.holding))");
+            check(r == Ok(Some("0 0 true".into())), &format!("shapes: clear drops every region; player held: {r:?}"));
+            lua.run(ls, "HARNESS_CVARS.gmsky_ground = 'grid' HARNESS_POS = nil gmsky.terrain.holding = false").unwrap();
+        }
+
         // 8c. Collision field (re-plan step A): swept box against triangles.
         {
             let sweep = |setup: &str, args: &str| lua.run(ls, &format!(
@@ -528,6 +682,10 @@ fn main() {
     check(server_log.contains("JUMP tick ") && server_log.contains("speed explains (1.0, 0.0, 0.0)"),
           "gmod_server.log: a teleport no speed explains is logged as a JUMP");
     check(server_log.matches("JUMP tick ").count() == 1, &format!("gmod_server.log: exactly one JUMP ({})", server_log.matches("JUMP tick ").count()));
+    check(server_log.contains("shapes: clear (collision epoch 1, origin epoch 1): 0 regions dropped")
+          && server_log.contains("terrain: the ground is Skyrim's collision shapes now (gmsky_ground shapes)")
+          && server_log.contains("has arrived: released"),
+          "gmod_server.log: shapes clear, switch and release logged");
     check(server_log.matches("ERROR").count() == 1 && server_log.contains("another process (pid 424242)"),
           "gmod_server.log: exactly one ERROR, the expected takeover message");
     let client_log = std::fs::read_to_string(log_dir.join("gmod_client.log")).unwrap_or_default();

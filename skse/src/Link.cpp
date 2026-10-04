@@ -96,4 +96,58 @@ namespace gmsky
 		const auto last = std::atomic_ref<uint64_t>(shared_->header.gmod_heartbeat).load(std::memory_order_acquire);
 		return last != 0 && GetTickCount64() - last < GMSKY_HEARTBEAT_TIMEOUT_MS;
 	}
+
+	namespace
+	{
+		uint8_t* RingBase(GmskyShared* a_shared) { return reinterpret_cast<uint8_t*>(a_shared) + GMSKY_RING_OFFSET; }
+		std::atomic_ref<uint64_t> RingCounter(GmskyShared* a_shared, uint32_t a_off)
+		{
+			return std::atomic_ref<uint64_t>(*reinterpret_cast<uint64_t*>(RingBase(a_shared) + a_off));
+		}
+	}
+
+	bool Link::RingWrite(uint32_t a_type, const void* a_payload, uint32_t a_bytes)
+	{
+		if (!shared_) {
+			return false;
+		}
+		constexpr uint64_t size = GMSKY_RING_DATA_BYTES;
+		const uint64_t msg = (sizeof(GmskyColMsgHeader) + uint64_t(a_bytes) + 7) & ~7ull;
+		if (msg > size / 2) {
+			logger::error("collision message too large ({} bytes)", msg);
+			return false;
+		}
+		auto headRef = RingCounter(shared_, GMSKY_RING_HEAD_OFF);
+		uint64_t head = headRef.load(std::memory_order_relaxed);
+		const uint64_t tail = RingCounter(shared_, GMSKY_RING_TAIL_OFF).load(std::memory_order_acquire);
+		uint64_t pos = head % size;
+		const uint64_t pad = pos + msg > size ? size - pos : 0;
+		if (size - (head - tail) < msg + pad) {
+			return false;
+		}
+		uint8_t* data = RingBase(shared_) + GMSKY_RING_DATA_OFF;
+		if (pad) {
+			const GmskyColMsgHeader h{ GMSKY_COL_PAD, 0 };
+			std::memcpy(data + pos, &h, sizeof(h));
+			head += pad;
+			pos = 0;
+		}
+		const GmskyColMsgHeader h{ a_type, a_bytes };
+		std::memcpy(data + pos, &h, sizeof(h));
+		if (a_bytes) {
+			std::memcpy(data + pos + sizeof(h), a_payload, a_bytes);
+		}
+		headRef.store(head + msg, std::memory_order_release);
+		return true;
+	}
+
+	uint64_t Link::RingPending() const
+	{
+		if (!shared_) {
+			return 0;
+		}
+		const uint64_t head = RingCounter(shared_, GMSKY_RING_HEAD_OFF).load(std::memory_order_acquire);
+		const uint64_t tail = RingCounter(shared_, GMSKY_RING_TAIL_OFF).load(std::memory_order_acquire);
+		return head > tail ? head - tail : 0;
+	}
 }

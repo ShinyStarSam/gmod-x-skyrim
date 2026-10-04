@@ -175,6 +175,10 @@ namespace gmsky::Terrain
 		if (!SlotRead(Link::Get().Shared().player_state, g) || g.origin_epoch != a_origin.epoch) {
 			return;
 		}
+		if (g.flags & GMSKY_PF_SHAPES) {
+			g_job.running = false;  // Garry's Mod uses Skyrim's collision shapes instead (Collision.cpp)
+			return;
+		}
 		const auto pos = a_player->GetPosition();
 		if (g_job.running && g_job.epoch != a_origin.epoch) {
 			g_job.running = false;  // the origin changed under the grid: start again

@@ -11,11 +11,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define GMSKY_SHM_NAME L"Local\\GmodSkyrim_v1"
-#define GMSKY_MAP_SIZE 65536u
+// v2: the block grew (the collision ring), and an old process must not open the bigger block.
+#define GMSKY_SHM_NAME L"Local\\GmodSkyrim_v2"
+#define GMSKY_SLOTS_SIZE 65536u                // the latest-value slots (GmskyShared) live here
+#define GMSKY_RING_OFFSET GMSKY_SLOTS_SIZE     // then the collision ring (see "Collision ring")
+#define GMSKY_RING_BYTES (16u << 20)
+#define GMSKY_MAP_SIZE (GMSKY_RING_OFFSET + GMSKY_RING_BYTES)
 #define GMSKY_MAGIC 0x594B534Du      // "MSKY": layout initialized and ready
 #define GMSKY_MAGIC_INIT 0x54494E49u // "INIT": one side is initializing right now
-#define GMSKY_VERSION 7u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain
+#define GMSKY_VERSION 8u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain; 8: collision ring
 #define GMSKY_HEARTBEAT_TIMEOUT_MS 2000u
 
 // GmskyPlayerState.flags
@@ -26,6 +30,7 @@
 #define GMSKY_PF_INPUT_APPLIED 0x10u  // input_frame / mouse_*_applied are valid (input from Skyrim is on)
 #define GMSKY_PF_DRIVE_CAMERA 0x20u   // Skyrim may turn its camera directly (gmsky_camera 1)
 #define GMSKY_PF_SMOOTH 0x40u         // Skyrim may blend between ticks (gmsky_smooth 1)
+#define GMSKY_PF_SHAPES 0x80u         // Garry's Mod wants Skyrim's collision shapes (the ring), not the ray grid
 
 // GmskyInput.buttons: actions held in Skyrim's window (not raw keys; the key choice is Skyrim-side)
 #define GMSKY_IN_FORWARD 0x1u
@@ -157,6 +162,51 @@ typedef struct GmskyShared {
     GmskyTerrainSlot terrain;          // written by Skyrim
 } GmskyShared;
 
+// ---- Collision ring (Skyrim -> Garry's Mod; DESIGN.md re-plan step D; adapted from SkyCraft, MIT) ----
+// A byte ring at GMSKY_RING_OFFSET in the mapping: u64 head (total bytes written, by Skyrim) at
+// +GMSKY_RING_HEAD_OFF, u64 tail (total bytes read, by Garry's Mod) at +GMSKY_RING_TAIL_OFF, data
+// from +GMSKY_RING_DATA_OFF. Every message starts 8-byte aligned with a GmskyColMsgHeader; its
+// size is rounded up to 8. GMSKY_COL_PAD means "the rest of the ring is unused: go to its start".
+// One writer thread, one reader.
+#define GMSKY_RING_HEAD_OFF 0x00u
+#define GMSKY_RING_TAIL_OFF 0x40u
+#define GMSKY_RING_DATA_OFF 0x80u
+#define GMSKY_RING_DATA_BYTES (GMSKY_RING_BYTES - GMSKY_RING_DATA_OFF)
+
+#define GMSKY_COL_PAD 0u     // no payload
+#define GMSKY_COL_CLEAR 1u   // payload: GmskyColClear. Drop every region; newer messages are this epoch.
+#define GMSKY_COL_REGION 2u  // payload: GmskyColRegion + GmskyColTri[count]. Replaces that region.
+
+typedef struct GmskyColMsgHeader {
+    uint32_t type;   // GMSKY_COL_*
+    uint32_t bytes;  // payload bytes after this header
+} GmskyColMsgHeader;
+
+typedef struct GmskyColClear {
+    uint32_t col_epoch;     // +1 on every restart of the stream
+    uint32_t origin_epoch;  // the GmskyOrigin.epoch the triangles that follow belong to
+} GmskyColClear;
+
+// One cube of Skyrim's world, region_size Skyrim units a side, numbered in Skyrim's coordinates
+// (region (rx, ry, rz) starts at Skyrim (rx, ry, rz) * size). lo/size: the same cube in Garry's
+// Mod units relative to the anchor. Triangles touching the cube (and a little around it) are sent
+// with it, so one triangle can be in several regions.
+typedef struct GmskyColRegion {
+    int32_t rx, ry, rz;
+    uint32_t col_epoch;
+    uint32_t count;     // GmskyColTri that follow
+    uint32_t flags;     // reserved, 0
+    float lo[3];        // Garry's Mod units, relative to the anchor
+    float size;         // Garry's Mod units
+} GmskyColRegion;
+
+#define GMSKY_TRI_STAIR_HELPER 0x1u  // one of Skyrim's invisible ramps over stairs
+
+typedef struct GmskyColTri {
+    float v[9];       // three corners, Garry's Mod units relative to the anchor
+    uint32_t flags;   // GMSKY_TRI_*
+} GmskyColTri;
+
 // ---- Layout checks. The same numbers are asserted in protocol/src/lib.rs. ----
 #ifdef __cplusplus
 #define GMSKY_ASSERT(c) static_assert(c, #c)
@@ -197,7 +247,12 @@ GMSKY_ASSERT(offsetof(GmskyTerrain, skyrim_frame) == 40);
 GMSKY_ASSERT(offsetof(GmskyTerrain, height) == 48);
 GMSKY_ASSERT(offsetof(GmskyShared, terrain) == 344);
 GMSKY_ASSERT(sizeof(GmskyShared) == 17304);
-GMSKY_ASSERT(sizeof(GmskyShared) <= GMSKY_MAP_SIZE);
+GMSKY_ASSERT(sizeof(GmskyShared) <= GMSKY_SLOTS_SIZE);
+GMSKY_ASSERT(sizeof(GmskyColMsgHeader) == 8);
+GMSKY_ASSERT(sizeof(GmskyColClear) == 8);
+GMSKY_ASSERT(sizeof(GmskyColRegion) == 40);
+GMSKY_ASSERT(offsetof(GmskyColRegion, lo) == 24);
+GMSKY_ASSERT(sizeof(GmskyColTri) == 40);
 
 #ifdef __cplusplus
 #include <atomic>

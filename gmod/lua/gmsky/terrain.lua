@@ -10,6 +10,9 @@
 -- pieces, kept, guarded or held for it.
 -- On a new origin the player moves to the middle of the map's open space; while there is no Skyrim
 -- ground under it, it is held in place instead of falling to the map floor.
+-- Step D: with `gmsky_ground shapes` (the default) Skyrim streams its real collision shapes
+-- instead (the gmsky module keeps them; the same entity answers from them). The player is held
+-- while the collision where it stands hasn't arrived. `gmsky_ground grid` = the ray grid.
 -- Re-centre (re-plan step C): when the player gets far from the middle of the map, the player and
 -- the anchor move back by the same amount in one tick. Skyrim's position of the player doesn't
 -- change, and the ground only moves with its entity: nothing is rebuilt or waited for.
@@ -84,7 +87,23 @@ function T.PollGrid()
 	gmsky.Log(string.format("terrain: grid %d from Skyrim (origin epoch %d): %dx%d points %.1f apart, centre (%.1f, %.1f), ground z %.1f..%.1f (relative to the anchor), %d misses (%d NaN)",
 		id, epoch, n, n, spacing, cx, cy, lo, hi, misses, nan))
 end
-hook.Add("Think", "gmsky_terrain_poll", T.PollGrid)
+-- Step D: Skyrim's collision shapes from the ring into the module's store (server; the client
+-- shares the module, so its traces see them too). With the player's position, far regions go.
+function T.PollShapes()
+	local ply = player.GetAll()[1]
+	local a = T.Anchor and T.Anchor()
+	if IsValid(ply) and a then
+		local p = ply:GetPos()
+		gmsky.PollShapes(p.x - a.x, p.y - a.y, p.z - a.z)
+	else
+		gmsky.PollShapes()
+	end
+end
+
+hook.Add("Think", "gmsky_terrain_poll", function()
+	T.PollGrid()
+	if SERVER then T.PollShapes() end
+end)
 
 -- Where the grids' (0, 0, 0) is in Garry's Mod: the ground entity's position (the anchor), or nil.
 function T.GroundOrigin()
@@ -107,6 +126,9 @@ if SERVER then
 	T.recentreAt = CreateConVar("gmsky_recentre_at", "8000", FCVAR_ARCHIVE,
 		"Re-centre (move the player and the anchor back to the middle of the map) once the player is this far from it along x, y or z; 0 = never")
 	T.recentres = T.recentres or 0
+	T.groundMode = CreateConVar("gmsky_ground", "shapes", FCVAR_ARCHIVE,
+		"shapes = Skyrim's real collision shapes (step D), grid = Skyrim's ray grid (step B)")
+	function T.ShapesMode() return T.groundMode:GetString() ~= "grid" end
 
 	-- The anchor (the Garry's Mod point matching Skyrim's origin) as a Vector, or nil before the
 	-- first origin. The grids' coordinates are relative to it.
@@ -123,7 +145,7 @@ if SERVER then
 		T.holding, T.holdPos, T.holdWhy, T.heldTicks = true, pos, why, 0
 		T.holdVel = nil
 		if IsValid(ply) then
-			if why == "no ground" then T.holdVel = ply:GetVelocity() end
+			if why ~= "origin" then T.holdVel = ply:GetVelocity() end
 			ply:SetPos(pos)
 			ply:SetVelocity(-ply:GetVelocity())
 		end
@@ -219,6 +241,7 @@ if SERVER then
 			local e = T.ent:GetPos()
 			if math.abs(e.x - a.x) > 0.01 or math.abs(e.y - a.y) > 0.01 or math.abs(e.z - a.z) > 0.01 then T.ent:SetPos(a) end
 		end
+		if T.ShapesMode() then return T.UpdateShapes(ply, pos, a, anchored, connected) end
 		-- A new grid for the origin we're anchored to: it is the ground from this tick on.
 		if g and g.epoch == anchored and g.id ~= T.builtId then
 			local f = gmsky.field.UseGrid(GroundEntity(a), g)
@@ -273,6 +296,40 @@ if SERVER then
 		end
 	end
 
+	-- Step D: the ground entity answers from Skyrim's shapes (the module). Hold the player while
+	-- the collision where it stands hasn't arrived (SkyCraft's "freeze the player until Skyrim's
+	-- collision around them has arrived"), never in noclip.
+	local WAIT = "waiting for Skyrim's collision"
+	function T.UpdateShapes(ply, pos, a, anchored, connected)
+		local ent = GroundEntity(a)
+		if not ent:GetShapes() then
+			gmsky.field.UseShapes(ent)
+			T.ground, T.builtId = nil, nil
+			gmsky.Log("terrain: the ground is Skyrim's collision shapes now (gmsky_ground shapes)")
+		end
+		gmsky.field.ShapesBounds(ent)
+		local noclip = ply:GetMoveType() == MOVETYPE_NOCLIP
+		if T.holding then
+			if noclip then
+				Release(ply, "noclip")
+			elseif not connected then
+				Release(ply, "Skyrim not connected")
+			else
+				T.heldTicks = T.heldTicks + 1
+			end
+		end
+		local known = gmsky.ShapesKnown(pos.x - a.x, pos.y - a.y, pos.z - a.z)
+		if known then
+			if T.holding then
+				gmsky.Log(string.format("terrain: Skyrim's collision at (%.0f, %.0f, %.0f) has arrived: released", pos.x, pos.y, pos.z))
+				Release(ply, T.holdWhy)
+			end
+		elseif connected and anchored ~= 0 and not noclip and not T.holding then
+			T.Hold(ply, pos, WAIT)
+			gmsky.Log(string.format("terrain: HOLD at (%.0f, %.0f, %.0f): %s", pos.x, pos.y, pos.z, WAIT))
+		end
+	end
+
 	-- While held: no movement, no falling.
 	hook.Add("SetupMove", "gmsky_terrain_hold", function(ply, mv)
 		if not T.holding or not T.holdPos or ply:GetMoveType() == MOVETYPE_NOCLIP then return end
@@ -282,6 +339,16 @@ if SERVER then
 	end)
 
 	function T.GroundStatus(ply)
+		if T.ShapesMode() then
+			local p, a = ply:GetPos(), T.Anchor() or Vector(0, 0, 0)
+			local ground = ply:GetGroundEntity()
+			local _, _, line = gmsky.ShapesStatus(true, p.x - a.x, p.y - a.y, p.z - a.z)
+			local out = string.format(" | ground: Skyrim's shapes, standing on %s, held ticks %d, re-centres %d%s | %s",
+				ground == T.ent and "Skyrim's collision" or (IsValid(ground) and ground:GetClass()) or (ground == game.GetWorld() and "the map" or "nothing"),
+				T.stats.holdTicks, T.recentres, T.holding and (", HOLDING (" .. tostring(T.holdWhy) .. ")") or "", line)
+			T.stats.lifts, T.stats.holdTicks = 0, 0
+			return out
+		end
 		if not T.ground then return T.holding and " | ground: HOLDING (no grid yet)" or "" end
 		local p, a = ply:GetPos(), T.Anchor() or Vector(0, 0, 0)
 		local z = T.GridHeight(T.ground, p.x - a.x, p.y - a.y)

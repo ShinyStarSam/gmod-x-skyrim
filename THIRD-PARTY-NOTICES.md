@@ -16,6 +16,14 @@ memory) and adapts parts of its Skyrim plugin. Thank you to chasmlol.
   - `skse/src/Terrain.cpp`: ground rays around the player ("stage A").
   - `skse/src/Body.cpp`: dropping the puppet body's contacts above its feet, skipping Skyrim's
     land rescue (from SkyCraft's `DigPhysics.cpp`).
+  - `skse/src/Collision.cpp`: streaming Skyrim's Havok collision around the player region by
+    region (layer list, shape decoding and the offsets SkyCraft found, guarded reads, triangles
+    from boxes / capsules / convex hulls, refresh near the player, per-frame limits).
+  - `skse/src/Link.cpp` `RingWrite`, `protocol/src/shm.rs` `ring_write` / `ring_read`,
+    `protocol/gmsky_protocol.h` "Collision ring": the byte ring with pad messages.
+  - `gmod/module/src/shapes.rs`, `gmod/lua/gmsky/field.lua`: the idea of feeding Skyrim's exact
+    triangles to the other game's collision query (SkyCraft's `TriCollider.java`); the swept test
+    itself is our own.
   - `docs/DESIGN.md`: architecture.
 
 ```

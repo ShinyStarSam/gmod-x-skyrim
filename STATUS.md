@@ -1,7 +1,7 @@
 # STATUS
 
-Written 2026-10-04 after in-game test 22. Phase 1 steps 3d–3f and re-plan steps A, B and C are
-done and committed. "Verified" means checked with logged numbers
+Written 2026-10-04 after in-game test 23. Phase 1 steps 3d–3f and re-plan steps A–D are done
+and committed. "Verified" means checked with logged numbers
 from a real run; "not tested" means not checked in game. Full history with numbers: `MODLOG.md`.
 Design and plan: `docs/DESIGN.md` §12 ("Phase 1 re-plan after test 17").
 
@@ -50,7 +50,7 @@ Single-player and offline only.
 ## How to build and test
 
 - Rust (module, stub, harness, protocol): `cargo build --release`, then
-  `target\release\gmod_harness.exe` → `HARNESS PASSED` (87 checks). It runs our Lua in Garry's
+  `target\release\gmod_harness.exe` → `HARNESS PASSED` (97 checks); `cargo test --release` (ring and sweep unit tests). It runs our Lua in Garry's
   Mod's real `lua_shared.dll` with fake game objects (incl. the collision math and the ground
   entity's `TestCollision`); it does not run Garry's Mod's movement.
 - C++ layout test: `cmake --build build/protocol --config Release`, then
@@ -62,7 +62,7 @@ Single-player and offline only.
 
 ## What works (verified in game, numbers in MODLOG.md)
 
-- **The link** (shared memory, protocol version 7: ground grids relative to the anchor), disconnect detection, coordinate
+- **The link** (shared memory `Local\GmodSkyrim_v2`, protocol version 8: grids relative to the anchor, 16 MB collision ring), disconnect detection, coordinate
   conventions, scale 64 / 120.5 = 0.5311.
 - **Playing from the Skyrim window:** W/A/S/D, Shift, Space, Ctrl, mouse look, **V = Garry's
   Mod noclip** (17 launches in test 21), E activates Skyrim objects, Esc/~/J/M/F9 reach Skyrim.
@@ -83,15 +83,16 @@ Single-player and offline only.
   recent cast time (up to 1,205 units ahead), 4 ms of rays a frame above 1,000 units/s:
   **0 freezes** in 17 noclip launches (test 20 before the fix: 14).
 
+- **Skyrim's real collision shapes (step D), test 23:** walls, stairs, arches, interiors, objects;
+  0 faults, 0 dropped, up to 90,116 triangles, slowest sweep 0.1 ms.
 - **Re-centring (step C), test 22:** no map edge any more; Garry's Mod moves the player and the
   anchor back to the middle of gm_flatmap together, 42 times in test 22, ~109,000 Skyrim units
   travelled one way.
 
 ## What doesn't work yet
 
-- **Objects are bumpy, no buildings/interiors:** the ray grid only sees the top surface every 48
-  units; posts and rocks become steep spikes; no arches, roofs or interiors. Needs step D.
-- Ending noclip > ~2,100 Garry's Mod units under Skyrim's ground holds the player; press V again.
+- (By choice, not a bug) ending noclip under Skyrim's ground: you fall "under the earth" like in
+  Source until Skyrim moves you back up; the user likes it, keep it.
 - Garry's Mod physics props/ragdolls fall through Skyrim's ground (traces only).
 - Not started: camera height / view bob / FOV (step 4), Garry's Mod's hands/weapon/HUD in Skyrim,
   combat, save/load consistency.
@@ -113,15 +114,9 @@ shapes as soon as possible, triple-checked against SkyCraft):
   Open question from test 22: a few single-frame jumps of 100–260 Garry's Mod units, mostly
   near window switches, not at re-centres (MODLOG test 22). `gmod_server.log` now logs
   `JUMP tick …` lines (and `jumps N` in the status line) to find out; read them after the next test.
-- **Step D: Skyrim's real collision shapes (SkyCraft's stage C), ported.** SkyCraft
-  `skse/src/Collision.cpp/.h`: walk the loaded Havok world under its read lock; layers static,
-  anim static, transparent, trees, props, terrain, ground, invisible walls, stair helpers; decode
-  MOPP/BV trees, lists, compressed/extended meshes, convex shapes, boxes, capsules; regions of
-  8×8×8 blocks within radius 5, nearest first, continuously; worker thread; stair helpers as
-  ramps. We want **triangles** (test 19: they feel right; SkyCraft's own player collision,
-  `fabric/src/main/java/dev/skycraft/world/TriCollider.java`, also uses triangles), streamed
-  into `field.lua`'s cell store. Needs a larger shared-memory ring (the map is 64 KB) and a
-  protocol bump.
+- **Step D: Skyrim's real collision shapes: done (test 23, "perfect and superior to grid").**
+  Next in the plan: Phase 1 step 4 (camera height, crouch, view bob, FOV from Garry's Mod), then
+  Phase 2 (Garry's Mod's hands, weapon and HUD drawn in Skyrim).
 
 ## Evidence (latest test, 22)
 

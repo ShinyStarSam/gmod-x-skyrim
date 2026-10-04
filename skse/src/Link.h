@@ -24,6 +24,12 @@ namespace gmsky
 		// Garry's Mod wrote a heartbeat within GMSKY_HEARTBEAT_TIMEOUT_MS.
 		bool PeerAlive() const;
 
+		// Collision ring (gmsky_protocol.h; adapted from SkyCraft's Link::WriteCollision, MIT).
+		// One writer thread only. False if the ring is too full (Garry's Mod is behind) or closed.
+		bool RingWrite(uint32_t a_type, const void* a_payload, uint32_t a_bytes);
+		// Bytes written but not read by Garry's Mod yet.
+		uint64_t RingPending() const;
+
 	private:
 		// Logs an open failure, but only when it differs from the previous one (Open is retried).
 		bool Fail(std::string a_msg);

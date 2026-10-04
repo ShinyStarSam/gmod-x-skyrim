@@ -61,7 +61,13 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   units from the start in one direction; position relative to the link identical before and
   after every time; speed kept; no holds; the user: "works flawlessly".
 
+- **Skyrim's real collision** (tested in game 2026-10-04, test 23): Garry's Mod's movement
+  collides with Skyrim's exact collision shapes: buildings, walls, stairs, arches, interiors,
+  trees, fences, rocks. Streamed from Skyrim around you as you move (adapted from SkyCraft);
+  `gmsky_ground grid` switches back to the older ray-grid ground.
+
 ## What doesn't work yet
+
 
 - Walking around objects (posts, rocks, carts) is bumpy: the ground is measured with rays 48
   units apart, which turns objects into steep spikes. No walking under arches, into buildings

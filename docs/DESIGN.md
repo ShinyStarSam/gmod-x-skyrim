@@ -499,13 +499,78 @@ Steps, each tested on its own:
     (must match). Skyrim: the puppet's `big-steps` stay 0 and its `max-step` stays small through
     a re-centre. `gmsky_recentre_at` (default 8000) sets the distance; a small value (e.g. 500)
     makes it easy to trigger while walking for the test.
-- **D. Skyrim's real shapes (SkyCraft's stage C, ported).** Walk the loaded Havok world around
-  the player under its read lock (SkyCraft's layer list: static, anim static, transparent, trees,
-  props, terrain, ground, invisible walls, stair helpers), decode the shapes (MOPP/BV trees,
-  lists, compressed meshes, convex shapes, boxes, capsules), voxelize on a worker thread into
-  boxes, region by region, nearest first; steep surfaces become walls; stair helpers become
-  ramps. Streamed through a larger shared-memory ring (the 64 KB map is too small). This also
-  covers buildings, arches and interiors that the ray grid can't.
+- **D. Skyrim's real shapes (SkyCraft's stage C, ported; planned in detail 2026-10-04; D1–D3 built; works, test 23).** The
+  ray grid only sees the top surface every 48 units: posts and rocks become spikes, and there are
+  no walls, arches, roofs or interiors. Instead, Skyrim sends Garry's Mod the exact triangles of
+  its collision around the player.
+  **Read in SkyCraft first** (`skse/src/Collision.cpp/.h`, `Link.cpp` `WriteCollision`,
+  `protocol/skycraft_protocol.h` collision ring, `fabric/.../world/SkyCollision.java`, `SkyTri.java`,
+  `TriCollider.java`):
+  - Skyrim's world is cut into cube **regions**; each frame, the main thread walks the loaded
+    Havok world under its read lock for a few regions, nearest the player first, and copies out
+    every shape touching the region; a worker thread turns them into triangles and writes one
+    message per region into a **byte ring** in shared memory (32 MB in SkyCraft). A region message
+    replaces that region's triangles. A "clear" message with a new number (epoch) drops everything
+    (a new world/cell).
+  - Layers taken: static, anim static (doors), transparent, trees, props, terrain, ground,
+    invisible walls, stair helpers. Shapes decoded: MOPP/BV trees (queried with the region's box),
+    lists, collections, compressed and extended meshes, triangle collections, convex lists,
+    triangles, boxes, capsules/spheres (as boxes), convex hulls (from their planes), convex and
+    plain transforms; anything else convex → its bounding box. Every Havok read is guarded
+    (`__try`), and a fault skips that shape.
+  - Regions next to the player are sent again every second (doors open, things move).
+  - SkyCraft's final player collision uses these exact triangles (its voxels are for Minecraft's
+    blocks and lighting, which we don't need). Stair helpers (Skyrim's invisible ramps over
+    stairs) are ramps Skyrim's own player walks on.
+  **What we take, what we change:**
+  - Taken as is (adapted, credited): the region streaming, layer list, shape decoding, triangles
+    from boxes/capsules/hulls, the guarded reads, the byte ring with pad messages, the clear epoch,
+    the 1 s refresh near the player, SkyCraft's harvest limits per frame (3 regions, 2.5 ms).
+  - Not taken: voxels, digging, materials, contact-shadow boxes, Minecraft's axis swap (both of our
+    games are Z-up).
+  - **Regions are 512 Skyrim units** (≈ 272 Garry's Mod units; SkyCraft: 8 blocks = 560), ±5
+    around the player horizontally, 3 below, 2 above (as SkyCraft): 726 regions, ±2,800 units.
+  - **Order: what the player will reach first.** First the 3×3×3 regions around the player, then
+    the rest nearest-first around the point the player will be at in 0.5 s (our velocity
+    look-ahead from step B). Above 1,000 units/s the limits double (6 regions, 5 ms), like the
+    grid's fast budget.
+  - **Units:** triangles are sent in Garry's Mod units relative to the anchor (like the grids, so
+    re-centres need nothing). Regions are numbered in Skyrim's world (they don't move on a
+    re-centre); a new origin epoch sends "clear".
+  - **Stair helpers** are sent as normal solid triangles (Skyrim's own player collides with
+    them, so Garry's Mod walking them matches Skyrim), with a flag so they can be told apart later.
+  - **Garry's Mod side, in Rust, not Lua:** a building can have thousands of triangles; turning
+    them into Lua tables each frame and testing them in Lua would cost too much (step A: 0.02 ms
+    per sweep with a 64-unit cell lookup over ~8,000 triangles). The module drains the ring into
+    a triangle store (per region, with a 64-unit cell lookup like `field.lua`) and does the swept
+    test itself: `field.lua`'s swept separating-axis test ported line by line, with the same
+    rules (stop 1/32 short; a box already overlapping may move out or along, not further in; long
+    traces in 128-unit sections). Server and client share one module in the same process
+    (`gmod/stub` loads one copy per process), so one store answers both. Garry's Mod Lua only
+    calls `gmsky.Sweep(...)` from `ENT:TestCollision`. The Lua version stays (test scene, ray
+    grid); the harness checks both give the same answers.
+  - **Waiting for collision** (SkyCraft's `holdUntilReady`): when the region under the player's
+    feet (and the one below) hasn't arrived yet, the player is held, as with "no ground" now;
+    released when they arrive. Not while in noclip.
+  - Garry's Mod drops regions more than 8 regions from the player; Skyrim forgets that it sent a
+    region once it is more than 6 away, so anything Skyrim believes Garry's Mod has, it has.
+  - **Switch:** `gmsky_ground shapes` (default) or `gmsky_ground grid` (the step B ray grid, for
+    comparison). Garry's Mod tells Skyrim which one it wants with a player-state flag
+    (`GMSKY_PF_SHAPES`); Skyrim does only that one.
+  - **Protocol 8:** new byte ring (16 MB, after the 64 KB of slots), shared-memory name
+    `Local\GmodSkyrim_v2` (the size changes, and an old process must not open the new block).
+    Messages: pad, clear {epoch}, region {rx, ry, rz, epoch, count, flags} + triangles
+    {9 floats, flags}. Layout checked by both layout tests.
+  - **Logs:** Skyrim, each second: regions harvested, triangles, harvest ms, worker ms, ring bytes
+    and "ring full" waits, faults; the first time each shape type is seen; per region near the
+    player: triangle count. Garry's Mod: messages read, regions and triangles stored, ring bytes
+    behind, sweeps / hits / µs / slowest, whether the region under the player has arrived, holds.
+  - Sub-steps, each tested on its own: **D1** the ring and the module's store (harness: fake
+    Skyrim messages, wrap-around, clear, replace, evict); **D2** the Rust sweep and the entity
+    using it (harness: same answers as the Lua sweep; a box falls onto a region's floor; holds
+    until a region arrives); **D3** Skyrim's harvester (`skse/src/Collision.cpp`, built only;
+    the in-game test is the real check). In-game test: walk into a building's wall, up stairs,
+    under an arch, into an interior (a load door: new origin epoch), past trees and fences.
 
 ## 13. Repo layout
 

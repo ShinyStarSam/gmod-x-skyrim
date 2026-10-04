@@ -5,6 +5,7 @@
 
 #include "Body.h"
 #include "Camera.h"
+#include "Collision.h"
 #include "Input.h"
 #include "Link.h"
 #include "Puppet.h"
@@ -138,6 +139,7 @@ namespace gmsky::Probe
 		g_haveLastLogPos = false;
 		Puppet::Reset("game loaded");
 		Terrain::Reset();
+		Collision::Reset();
 		logger::info("game loaded: will publish a new origin on the next frame");
 	}
 
@@ -208,6 +210,7 @@ namespace gmsky::Probe
 		Input::PerFrame(g_frame);
 		Camera::AfterPlayerUpdate();
 		Terrain::PerFrame(a_player, g_origin, g_frame);
+		Collision::PerFrame(a_player, g_origin);
 
 		g_logTimer += a_delta;
 		if (g_logTimer >= 1.0f) {
@@ -216,6 +219,7 @@ namespace gmsky::Probe
 			Input::LogSecond();
 			Camera::LogSecond();
 			Terrain::LogSecond(a_player);
+			Collision::LogSecond();
 			Body::LogSecond();
 			g_logTimer = 0.0f;
 		}

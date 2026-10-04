@@ -7,11 +7,15 @@ use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 
 pub mod shm;
 
-pub const SHM_NAME: &str = r"Local\GmodSkyrim_v1";
-pub const MAP_SIZE: usize = 65536;
+/// v2: the block grew (the collision ring), and an old process must not open the bigger block.
+pub const SHM_NAME: &str = r"Local\GmodSkyrim_v2";
+pub const SLOTS_SIZE: usize = 65536; // the latest-value slots (Shared) live here
+pub const RING_OFFSET: usize = SLOTS_SIZE; // then the collision ring
+pub const RING_BYTES: usize = 16 << 20;
+pub const MAP_SIZE: usize = RING_OFFSET + RING_BYTES;
 pub const MAGIC: u32 = 0x594B_534D;
 pub const MAGIC_INIT: u32 = 0x5449_4E49;
-pub const VERSION: u32 = 7; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain
+pub const VERSION: u32 = 8; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain; 8: collision ring
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
 
 pub const PF_ON_GROUND: u32 = 0x1;
@@ -21,6 +25,51 @@ pub const PF_NOCLIP: u32 = 0x8;
 pub const PF_INPUT_APPLIED: u32 = 0x10; // input_frame / mouse_*_applied are valid
 pub const PF_DRIVE_CAMERA: u32 = 0x20; // Skyrim may turn its camera directly (gmsky_camera 1)
 pub const PF_SMOOTH: u32 = 0x40; // Skyrim may blend between ticks (gmsky_smooth 1)
+pub const PF_SHAPES: u32 = 0x80; // Garry's Mod wants Skyrim's collision shapes (the ring), not the ray grid
+
+// ---- Collision ring (gmsky_protocol.h "Collision ring"; adapted from SkyCraft, MIT) ----
+pub const RING_HEAD_OFF: usize = 0x00;
+pub const RING_TAIL_OFF: usize = 0x40;
+pub const RING_DATA_OFF: usize = 0x80;
+pub const RING_DATA_BYTES: usize = RING_BYTES - RING_DATA_OFF;
+pub const COL_PAD: u32 = 0;
+pub const COL_CLEAR: u32 = 1;
+pub const COL_REGION: u32 = 2;
+pub const TRI_STAIR_HELPER: u32 = 0x1;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ColMsgHeader {
+    pub kind: u32,
+    pub bytes: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ColClear {
+    pub col_epoch: u32,
+    pub origin_epoch: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ColRegion {
+    pub rx: i32,
+    pub ry: i32,
+    pub rz: i32,
+    pub col_epoch: u32,
+    pub count: u32,
+    pub flags: u32,
+    pub lo: [f32; 3],
+    pub size: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ColTri {
+    pub v: [f32; 9],
+    pub flags: u32,
+}
 
 pub const IN_FORWARD: u32 = 0x1;
 pub const IN_BACK: u32 = 0x2;
@@ -227,7 +276,12 @@ const _: () = {
     assert!(offset_of!(Terrain, height) == 48);
     assert!(offset_of!(Shared, terrain) == 344);
     assert!(size_of::<Shared>() == 17304);
-    assert!(size_of::<Shared>() <= MAP_SIZE);
+    assert!(size_of::<Shared>() <= SLOTS_SIZE);
+    assert!(size_of::<ColMsgHeader>() == 8);
+    assert!(size_of::<ColClear>() == 8);
+    assert!(size_of::<ColRegion>() == 40);
+    assert!(offset_of!(ColRegion, lo) == 24);
+    assert!(size_of::<ColTri>() == 40);
 };
 
 #[cfg(test)]
@@ -320,5 +374,42 @@ mod tests {
         let writes = writer.join().unwrap();
         println!("seqlock stress: {writes} writes, {reads} consistent reads");
         assert!(writes > 1000 && reads > 1000);
+    }
+
+    /// The collision ring: messages come out in order and whole, across the wrap-around (pad),
+    /// and a full ring refuses writes instead of overwriting unread data.
+    #[test]
+    fn collision_ring_wraps_and_fills() {
+        let name = unique_name("ring");
+        let w = Mapping::open_named(&name, Side::Skyrim).unwrap();
+        let r = Mapping::open_named(&name, Side::Gmod).unwrap();
+        // ~1 MB messages: 16 fill the ring; read some, write more, so writes wrap around.
+        let big = |n: u32| -> Vec<u8> { let mut v = vec![(n % 251) as u8; 1_000_003]; v[0..4].copy_from_slice(&n.to_le_bytes()); v };
+        let mut next_w = 0u32;
+        let mut next_r = 0u32;
+        let mut refused = 0;
+        for round in 0..6 {
+            loop {
+                if w.ring_write(COL_REGION, &big(next_w)) { next_w += 1 } else { refused += 1; break }
+            }
+            let mut got = 0;
+            let max = if round % 2 == 0 { 5_000_000 } else { u64::MAX };
+            r.ring_read(max, |kind, p| {
+                assert_eq!(kind, COL_REGION);
+                assert_eq!(p.len(), 1_000_003);
+                let n = u32::from_le_bytes(p[0..4].try_into().unwrap());
+                assert_eq!(n, next_r, "messages in order");
+                assert!(p[4..].iter().all(|&b| b == (n % 251) as u8), "payload intact");
+                next_r += 1;
+                got += 1;
+            }).unwrap();
+            assert!(got > 0);
+        }
+        r.ring_read(u64::MAX, |_, _| next_r += 1).unwrap();
+        assert_eq!(next_r, next_w);
+        assert_eq!(r.ring_pending(), 0);
+        assert!(refused == 6 && next_w > 40, "ring filled each round ({next_w} written)");
+        // Too big for half the ring: refused.
+        assert!(!w.ring_write(COL_REGION, &vec![0u8; RING_DATA_BYTES / 2]));
     }
 }

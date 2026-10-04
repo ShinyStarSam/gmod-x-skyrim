@@ -5,6 +5,7 @@
 //! Logs: logs/gmod_server.log, logs/gmod_client.log
 
 mod lua;
+mod shapes;
 
 use gmsky_protocol::shm::{now_ms, now_qpc, Mapping, Side};
 use gmsky_protocol::{PlayerState, PF_INPUT_APPLIED};
@@ -164,7 +165,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 13] = [
+    let funcs: [(&str, lua::CFn); 18] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -177,6 +178,11 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("OriginEpoch", l_origin_epoch),
         ("Anchor", l_anchor),
         ("ShiftAnchor", l_shift_anchor),
+        ("PollShapes", l_poll_shapes),
+        ("Sweep", l_sweep),
+        ("ShapesKnown", l_shapes_known),
+        ("ShapesBounds", l_shapes_bounds),
+        ("ShapesStatus", l_shapes_status),
         ("ReadGridFile", l_read_grid_file),
     ];
     for (name, f) in funcs {
@@ -439,6 +445,142 @@ unsafe extern "C" fn l_shift_anchor(l: *mut State) -> c_int {
         for v in link.anchor {
             (a.pushnumber)(l, v);
         }
+        3
+    })
+}
+
+// ---- Skyrim's collision shapes (DESIGN.md re-plan step D; shapes.rs) ----
+
+/// One store for both sides: the server and client Lua share this module in one process.
+static SHAPES: Mutex<Option<shapes::Store>> = Mutex::new(None);
+
+fn with_shapes<R>(f: impl FnOnce(&mut shapes::Store) -> R) -> R {
+    let mut g = SHAPES.lock().unwrap_or_else(|e| e.into_inner());
+    f(g.get_or_insert_with(shapes::Store::default))
+}
+
+/// The origin epoch Garry's Mod is anchored to (shapes are only used for that one).
+fn anchored_epoch() -> u32 {
+    LINK.lock().unwrap_or_else(|e| e.into_inner()).epoch
+}
+
+/// gmsky.PollShapes([x, y, z]) -> messages, bytes: reads what Skyrim put in the collision ring
+/// (up to 8 MB per call) into the store; with the player's position (relative to the anchor),
+/// drops regions far from it. Only the process that writes the Garry's Mod side reads the ring.
+unsafe extern "C" fn l_poll_shapes(l: *mut State) -> c_int {
+    guarded(l, |a, side| {
+        let Some(m) = writable_mapping() else { return 0 };
+        let mut notes = Vec::new();
+        let (count, bytes) = with_shapes(|st| {
+            let mut count = 0u32;
+            let r = m.ring_read(8 << 20, |kind, p| {
+                count += 1;
+                if let Some(note) = st.apply(kind, p) {
+                    notes.push(note);
+                }
+            });
+            let bytes = match r {
+                Ok(b) => b,
+                Err(e) => {
+                    notes.push(format!("ERROR {e}"));
+                    0
+                }
+            };
+            if (a.type_)(l, 1) == 3 {
+                st.evict([(a.tonumber)(l, 1), (a.tonumber)(l, 2), (a.tonumber)(l, 3)]);
+            }
+            (count, bytes)
+        });
+        for n in notes {
+            log(side, &n);
+        }
+        (a.pushnumber)(l, count as f64);
+        (a.pushnumber)(l, bytes as f64);
+        2
+    })
+}
+
+/// gmsky.Sweep(cx, cy, cz, ex, ey, ez, dx, dy, dz) -> fraction, nx, ny, nz, or nothing:
+/// where a box (centre c, half size e, relative to the anchor) moving by d first touches
+/// Skyrim's triangles. Same rules as field.lua's F.Sweep.
+unsafe extern "C" fn l_sweep(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let n = |i: c_int| (a.tonumber)(l, i);
+        let epoch = anchored_epoch();
+        let hit = with_shapes(|st| {
+            if epoch == 0 || st.origin_epoch != epoch {
+                return None;
+            }
+            st.sweep([n(1), n(2), n(3)], [n(4), n(5), n(6)], [n(7), n(8), n(9)])
+        });
+        match hit {
+            Some((f, nv)) => {
+                (a.pushnumber)(l, f);
+                for v in nv {
+                    (a.pushnumber)(l, v);
+                }
+                4
+            }
+            None => 0,
+        }
+    })
+}
+
+/// gmsky.ShapesKnown(x, y, z) -> true if Skyrim's collision at that point (relative to the
+/// anchor) and just below it has arrived.
+unsafe extern "C" fn l_shapes_known(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let epoch = anchored_epoch();
+        let p = [(a.tonumber)(l, 1), (a.tonumber)(l, 2), (a.tonumber)(l, 3)];
+        let known = with_shapes(|st| epoch != 0 && st.origin_epoch == epoch && st.known(p));
+        (a.pushboolean)(l, known as c_int);
+        1
+    })
+}
+
+/// gmsky.ShapesBounds() -> lo x, y, z, hi x, y, z around every stored region (relative to the
+/// anchor), or nothing.
+unsafe extern "C" fn l_shapes_bounds(l: *mut State) -> c_int {
+    guarded(l, |a, _| match with_shapes(|st| st.bounds()) {
+        Some((lo, hi)) => {
+            for v in lo.into_iter().chain(hi) {
+                (a.pushnumber)(l, v);
+            }
+            6
+        }
+        None => 0,
+    })
+}
+
+/// gmsky.ShapesStatus(reset[, x, y, z]) -> regions, triangles, line: a status line for the log
+/// (since the last reset). With the player's position: what is stored where it is.
+unsafe extern "C" fn l_shapes_status(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let reset = (a.toboolean)(l, 1) != 0;
+        let at = ((a.type_)(l, 2) == 3).then(|| [(a.tonumber)(l, 2), (a.tonumber)(l, 3), (a.tonumber)(l, 4)]);
+        let pending = mapping().map(|m| m.ring_pending()).unwrap_or(0);
+        let (regions, tris, line) = with_shapes(|st| {
+            let s = st.stats;
+            let here = match at {
+                Some(p) => match st.tris_at(p) {
+                    Some(n) => format!(", {} triangles in the player's region, collision here {}", n,
+                                       if st.known(p) { "arrived" } else { "NOT arrived (region below missing)" }),
+                    None => ", the player's region has NOT arrived".into(),
+                },
+                None => String::new(),
+            };
+            let line = format!("shapes: {} regions, {} triangles ({} stair helper) stored, collision epoch {} origin epoch {}{} | in: {} messages, {} regions, {} triangles, {:.0} KB, {} ignored, {} evicted, ring {:.0} KB behind | sweeps {} hits {} triangles tested {} Rust {:.2} ms (slowest {:.0} us)",
+                st.regions(), st.tris(), st.stair_helpers(), st.col_epoch, st.origin_epoch, here,
+                s.messages, s.regions_in, s.tris_in, s.bytes as f64 / 1024.0, s.ignored, s.evicted, pending as f64 / 1024.0,
+                s.sweeps, s.hits, s.tested, s.us / 1000.0, s.worst_us);
+            if reset {
+                st.stats = shapes::Stats::default();
+            }
+            (st.regions(), st.tris(), line)
+        });
+        (a.pushnumber)(l, regions as f64);
+        (a.pushnumber)(l, tris as f64);
+        lua::push_str(a, l, &line);
         3
     })
 }

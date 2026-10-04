@@ -571,3 +571,26 @@ Skipped: header stuck at INIT if a process dies mid-initialization (tiny window;
 **Tested how:** `cargo build --release`; `gmod_harness.exe` → HARNESS PASSED (87).
 **Not tested in game.**
 
+## 2026-10-04 Test 22's jumps: explained by the user
+
+User: they alt-tabbed several times during test 22, gameplay was "buttery smooth"; don't pursue the single-frame jumps further. (Consistent with the logs: most odd seconds were within ~1 s of a window switch.) The JUMP log stays in for now.
+
+## 2026-10-04 Re-plan step D: Skyrim's real collision shapes, streamed and answered in Rust (not tested in game)
+
+**Plan:** `docs/DESIGN.md` re-plan step D (written first). **Read in SkyCraft first:** `skse/src/Collision.cpp/.h`, `Link.cpp` `WriteCollision`, the collision ring in `protocol/skycraft_protocol.h`, `fabric/.../world/SkyCollision.java`, `SkyTri.java`, `TriCollider.java`. Taken: region streaming, layers, shape decoding with SkyCraft's offsets, guarded reads, triangles from boxes/capsules/hulls, byte ring with pad messages, clear epoch, 1 s refresh near the player, per-frame limits. Not taken: voxels, digging, materials, Minecraft's axis swap.
+**Changed:**
+- **Protocol 8:** shared memory renamed `Local\GmodSkyrim_v2` and grown to 64 KB + a 16 MB collision ring (messages: pad, clear {collision epoch, origin epoch}, region {rx, ry, rz, epoch, count, lo, size} + triangles {9 floats, flags}); flag `GMSKY_PF_SHAPES` (Garry's Mod asks for shapes instead of the ray grid). Ring writer in C++ (`Link::RingWrite`) and Rust (`shm.rs` `ring_write`, for tests), reader in Rust (`ring_read`).
+- **Skyrim** `skse/src/Collision.cpp/.h` (new, adapted from SkyCraft): regions of 512 Skyrim units, ±5 around the player, 3 below, 2 above (726); the 27 around the player first, then nearest the point the player reaches in 0.5 s; 3 regions / 2.5 ms per frame (6 / 5 ms above 1,000 units/s); worker thread makes triangles and writes the ring in Garry's Mod units relative to the anchor; regions forgotten beyond 6 (Garry's Mod drops at 8); dropped (ring full) regions are sent again. Starts with "clear" when Garry's Mod asks for shapes / on a new origin; stops when the puppet is off or Garry's Mod asks for the grid. `Terrain.cpp` skips the ray grid while shapes are asked for. `Probe.cpp` calls it every frame, logs each second.
+- **Garry's Mod module** `gmod/module/src/shapes.rs` (new): the triangle store (per region, 64-unit lookup cells) and the swept test, `field.lua`'s ported line by line. Lua functions `gmsky.PollShapes`, `Sweep`, `ShapesKnown`, `ShapesBounds`, `ShapesStatus`; `lua_toboolean` binding.
+- **Lua:** `gmsky_ground shapes` (default) / `grid`. Shapes mode: the ground entity's `TestCollision` calls `gmsky.Sweep`; its bounds cover the stored regions; the player is held ("waiting for Skyrim's collision") until the region it stands in and the one below have arrived, never in noclip. The server polls the ring every frame; status lines show regions, triangles, sweeps, Rust ms.
+- `THIRD-PARTY-NOTICES.md`: the new files adapted from SkyCraft.
+**Tested how:** `cargo test --release` (protocol: new ring test, 1 MB messages, wrap-around, full ring refuses; module: Rust sweep matches field.lua's numbers, region known/evict/epochs) all pass; `gmod_harness.exe` → HARNESS PASSED, **97 checks** (new: switch to shapes holds the player, flag sent, clear + 4 regions arrive and release it, the entity's `TestCollision` lands a falling box on Skyrim's floor at the right height, bounds, a new clear drops everything; and **3,000 random sweeps over 137 regions (8,592 triangles): Rust and field.lua give the same fraction every time**, 6 ties (same fraction, another triangle's normal, box starting inside a corner), Rust 0.0013 ms vs Lua 0.020 ms per sweep); `protocol_test.exe` PASSED; Skyrim plugin built (no warnings) and copied.
+**Not tested in game.** Not known: whether SkyCraft's Havok offsets hold for every shape we meet (same game build 1.7.104; every read is guarded and a fault is counted in the log); harvest cost in cities; ring throughput; how stair helpers feel in Garry's Mod's movement; doors (refreshed every second near the player).
+**Known limit (by design for now):** in shapes mode nothing lifts a player who ends noclip under the ground (the grid mode's lift rule needs the grid's heights); it falls until V is pressed. Not fixed: Garry's Mod alone can't tell "under the land" from "in a cave"; Skyrim's land height would.
+**Next:** in-game test 23 (STATUS.md).
+
+## 2026-10-04 In-game test 23 (step D, Skyrim's real shapes): "perfect and superior to grid"
+
+**Result (logs: `build/logs-ingame-test-23/`):** user: shapes are "perfect and superior to grid". Skyrim: 9 × `COLLISION streaming starts` (loads, doors, origin changes), **0 faults** and **0 dropped** in every second; slowest harvesting frame 35.9 ms (a one-frame hitch; the budget is 2.5/5 ms per frame plus gathering bodies, worth watching in cities). Garry's Mod: up to 1,199 regions / 90,116 triangles stored, slowest Rust sweep 99 µs, no Lua errors, 5 short `waiting for Skyrim's collision` holds.
+**Noclip under the ground (decided):** the user likes it as it is: you fall "under the earth" like in Source, and Skyrim eventually moves the player back up (seen as "Skyrim moved the player" → new origin). Not to be changed.
+
