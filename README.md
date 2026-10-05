@@ -73,25 +73,30 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
 - `tools/launch_gmod.ps1` loads gm_flatmap directly (test 24), with `gm_flatmap.bsp` in
   `garrysmod/maps`.
 
+- **Garry's Mod's hands, weapon and HUD inside Skyrim's window** (Phase 2, tested in game
+  2026-10-05, tests 42-50): type `gmsky_overlay 1` in Garry's Mod's console.
+  - Garry's Mod's hands, weapon, HUD (the patched HOLOHUD 2, see `tools/build_holohud.py`), menus
+    and console are drawn over Skyrim's world every frame, 7-9 ms old, with correct transparency
+    (blended in linear light; checked by snapshot, `gmsky_overlay_shot`).
+  - Hidden while a Skyrim menu is open. The physgun's grab outline (halo) works (test 45).
+  - HOLOHUD's plates are frosted: Skyrim is blurred behind them (`gmsky_overlay_blur 0/1`).
+  - Skyrim's own first-person arms and weapon, crosshair, health / magicka / stamina bars,
+    compass, charge meters and arrow count are hidden while the overlay is on; they come back
+    when it's off.
+  - Garry's Mod's window moves off-screen while the overlay is on and comes back afterwards
+    (`gmsky_overlay_hidewindow 0` keeps it in place). Alt+Tab to it still works for its console.
+
 ## What doesn't work yet
 
-- **Garry's Mod's hands, weapon and HUD inside Skyrim** (Phase 2): step 2a done in Garry's Mod
-  alone: the hands/weapon (test 30) and the patched HOLOHUD 2 (test 39, flat and curved visor;
-  plates alpha 94/255, glow adds light only) come out as one picture with a usable alpha. Not
-  sent to Skyrim yet (steps 2b, 2c). Until then the Garry's Mod window shows them.
-
-
-
-- Walking around objects (posts, rocks, carts) is bumpy: the ground is measured with rays 48
-  units apart, which turns objects into steep spikes. No walking under arches, into buildings
-  with roofs, or in interiors. Fix planned: Skyrim's real collision shapes (step D).
+- Quest markers and locations: Skyrim's compass is hidden while the overlay is on, and HOLOHUD's
+  compass and minimap don't show Skyrim's markers yet (planned). No stamina / magicka display.
+- Garry's Mod's window size isn't matched to Skyrim's automatically: use
+  `tools\launch_gmod.ps1 -Width W -Height H` with Skyrim's size (both are 1280×720 so far).
 - Ending noclip more than ~2,100 Garry's Mod units under Skyrim's ground holds you in place;
   press V again.
 - Garry's Mod's physics props and ragdolls fall through Skyrim's ground (it is only answered to
   traces, not to Garry's Mod's physics engine).
-- The mouse wheel, weapons switching, and Garry's Mod's weapons/HUD in Skyrim's window.
-- Camera position while walking is one frame late, and no crouch height or view bob (Phase 1 step 4).
-- Crouching: lowers only Garry's Mod's eye, so it shows in Skyrim with the camera step (step 4).
+- The mouse wheel and weapon switching from Skyrim's window (not tested).
 - Everything else in [docs/DESIGN.md](docs/DESIGN.md) §12.
 
 ## Credits

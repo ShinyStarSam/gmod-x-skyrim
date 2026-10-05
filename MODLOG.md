@@ -983,3 +983,7 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 **Result:** Skyrim's HUD: **all 10 element paths found** (Health, Magica, Stamina, LeftChargeMeter, RightChargeMeter, ArrowInfoInstance, CompassShoutMeterHolder, CrosshairInstance, CrosshairAlert, StealthMeterInstance); hidden at 03:55:04, shown again at 03:55:46. Garry's Mod's window (1280×720) moved from (43, 24) to (1430, 24) (the screens end at x = 1366) and put back at (43, 24). **Source keeps drawing off-screen:** 11 status lines with the overlay on, every frame published (e.g. 1007/1007, 940/940, 834/834 per 5 s, ~170-200 fps).
 **Changed:** `liveoverlay.lua`: no "window wasn't moved" line at start-up (cosmetic; harness PASSED).
 **Next:** Phase 2's planned steps (2a-2d, blur) are done; what's left is listed in STATUS.md.
+## 2026-10-05 README: Phase 2 in "What works"
+
+**Changed:** `README.md`: Garry's Mod's overlay in Skyrim (tests 42-50) moved to "What works"; "What doesn't work yet" now lists quest markers / stamina-magicka display, the window size not matched automatically, and the mouse wheel / weapon switching from Skyrim's window (not tested). Removed three items made out of date by tests 23-24 (bumpy walking and no interiors: fixed by Skyrim's real collision; camera one frame late / no crouch height or view bob: fixed by the camera step).
+**Tested how:** documentation only.
