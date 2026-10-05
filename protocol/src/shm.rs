@@ -36,6 +36,33 @@ pub fn now_ms() -> u64 {
     unsafe { GetTickCount64() }
 }
 
+/// Creates the named block if it doesn't exist yet (zero-filled by Windows), otherwise opens it,
+/// and maps all of it. For the overlay picture block (overlay.rs).
+pub(crate) fn map_named(name: &str, size: usize) -> Result<(isize, *mut u8), String> {
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let handle = unsafe {
+        CreateFileMappingW(INVALID_HANDLE_VALUE, std::ptr::null(), PAGE_READWRITE, (size as u64 >> 32) as u32,
+                           size as u32, wide.as_ptr())
+    };
+    if handle == 0 {
+        return Err(format!("CreateFileMappingW({name}) failed, error {}", unsafe { GetLastError() }));
+    }
+    let view = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, size) } as *mut u8;
+    if view.is_null() {
+        let err = unsafe { GetLastError() };
+        unsafe { CloseHandle(handle) };
+        return Err(format!("MapViewOfFile({name}) failed, error {err}"));
+    }
+    Ok((handle, view))
+}
+
+pub(crate) fn unmap(handle: isize, view: *mut u8) {
+    unsafe {
+        UnmapViewOfFile(view as *const c_void);
+        CloseHandle(handle);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
     Skyrim,

@@ -60,10 +60,45 @@ static void TestAngles() {
     CHECK(Near(gmsky::GmodPitchToSkyrimPitch(45.0), 45.0 * d2r));
 }
 
+// The three slot numbers (middle, writer, reader) are always 0, 1, 2 in some order.
+static bool Permutation(uint32_t s) {
+    const uint32_t m = s & 3u, w = (s >> GMSKY_OVS_WRITER_SHIFT) & 3u, r = (s >> GMSKY_OVS_READER_SHIFT) & 3u;
+    return m < 3 && w < 3 && r < 3 && m != w && m != r && w != r;
+}
+
+static void TestOverlayStates() {
+    uint32_t w = 9, r = 9, got = 9, next = 0;
+    // Zero-filled block; writer first, then reader.
+    uint32_t s = gmsky::ov::Attach(0, true, &w);
+    s = gmsky::ov::Attach(s, false, &r);
+    CHECK(Permutation(s) && w == 1 && r == 2);
+    CHECK(!gmsky::ov::Take(s, &next, &got));  // nothing published yet
+    s = gmsky::ov::Publish(s, &w);            // writer's slot 1 becomes the middle, writer gets 0
+    CHECK(Permutation(s) && (s & 3u) == 1 && w == 0 && (s & GMSKY_OVS_NEW));
+    CHECK(gmsky::ov::Take(s, &next, &got) && got == 1);
+    s = next;
+    CHECK(Permutation(s) && !(s & GMSKY_OVS_NEW) && !gmsky::ov::Take(s, &next, &got));
+    // Reader first on a fresh block, then the writer: different slots.
+    s = gmsky::ov::Attach(0, false, &r);
+    s = gmsky::ov::Attach(s, true, &w);
+    CHECK(Permutation(s) && r == 2 && w == 1);
+    // Skyrim restarts: detaches (or crashes, bit still set), re-attaches: same slot, still a permutation.
+    for (int i = 0; i < 5; ++i) s = gmsky::ov::Publish(s, &w);
+    const uint32_t before = (s >> GMSKY_OVS_READER_SHIFT) & 3u;
+    s = gmsky::ov::Attach(s, false, &r);  // crashed: bit still set
+    CHECK(Permutation(s) && r == before);
+    s = gmsky::ov::Attach(gmsky::ov::Detach(s, false), false, &r);  // detached properly
+    CHECK(Permutation(s) && r == before);
+    // Garry's Mod restarts while Skyrim holds a slot.
+    s = gmsky::ov::Attach(gmsky::ov::Detach(s, true), true, &w);
+    CHECK(Permutation(s));
+}
+
 int main() {
     TestSlot();
     TestPosition();
     TestAngles();
+    TestOverlayStates();
     std::printf("sizeof(GmskyShared)=%zu  player_state@%zu  failures=%d\n", sizeof(GmskyShared),
                 offsetof(GmskyShared, player_state), g_failures);
     std::printf(g_failures ? "PROTOCOL TEST FAILED\n" : "PROTOCOL TEST PASSED\n");

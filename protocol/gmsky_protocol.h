@@ -211,6 +211,76 @@ typedef struct GmskyColTri {
     uint32_t flags;   // GMSKY_TRI_*
 } GmskyColTri;
 
+// ---- Overlay picture block (Garry's Mod -> Skyrim; DESIGN.md "Step 2b in detail") ----
+// A second shared memory block, so the link block above (and GMSKY_VERSION) stay as they are.
+// Garry's Mod's finished picture (hands, weapon, HUD on a transparent background) goes into one of
+// three slots, a "triple buffer" (adapted from SkyCraft, MIT: skycraft_protocol.h overlay slots,
+// Link.cpp AcquireOverlayFrame): the writer always owns one slot to fill, the reader always owns
+// one whole slot to read, the third ("middle") holds the newest finished picture. Neither waits.
+//
+// Unlike SkyCraft, the whole arrangement lives in ONE 32-bit word, `state`, changed only by
+// compare-and-swap, so the three slot numbers are always a permutation of 0, 1, 2 even when a
+// game restarts or crashes (each side re-attaches to the slot it had, or a free one):
+//   bits 0-1  middle slot               bit 2   middle holds a picture the reader hasn't taken
+//   bits 4-5  writer's slot             bit 6   writer attached
+//   bits 8-9  reader's slot             bit 10  reader attached
+// Writer publishes: (middle, writer) = (writer, middle), new-picture bit set.
+// Reader takes (only if the bit is set): (middle, reader) = (reader, middle), bit cleared.
+// A zero-filled block is valid: middle 0, nobody attached.
+#define GMSKY_OV_SHM_NAME L"Local\\GmodSkyrim_overlay_v1"
+#define GMSKY_OV_MAGIC 0x564F534Du      // "MSOV"
+#define GMSKY_OV_VERSION 1u
+#define GMSKY_OV_MAX_W 3840u
+#define GMSKY_OV_MAX_H 2160u
+#define GMSKY_OV_MASK_MAX_W (GMSKY_OV_MAX_W / 4u)  // plate mask for the planned blur, quarter size
+#define GMSKY_OV_MASK_MAX_H (GMSKY_OV_MAX_H / 4u)
+#define GMSKY_OV_PIXELS_OFF 0x1000u              // slot 0's pixels; slot i at + i * GMSKY_OV_SLOT_BYTES
+#define GMSKY_OV_MASK_OFF (GMSKY_OV_MAX_W * GMSKY_OV_MAX_H * 4u)  // the mask, inside each slot
+#define GMSKY_OV_SLOT_BYTES ((GMSKY_OV_MASK_OFF + GMSKY_OV_MASK_MAX_W * GMSKY_OV_MASK_MAX_H + 0xFFFFu) & ~0xFFFFu)
+#define GMSKY_OV_MAP_SIZE (GMSKY_OV_PIXELS_OFF + 3u * GMSKY_OV_SLOT_BYTES)
+
+#define GMSKY_OVS_MIDDLE_MASK 0x3u
+#define GMSKY_OVS_NEW 0x4u
+#define GMSKY_OVS_WRITER_SHIFT 4u
+#define GMSKY_OVS_WRITER_ON 0x40u
+#define GMSKY_OVS_READER_SHIFT 8u
+#define GMSKY_OVS_READER_ON 0x400u
+
+// GmskyOverlaySlotHdr.format
+#define GMSKY_OV_FMT_BGRA8 1u  // bytes B, G, R, A per pixel (Direct3D 9 A8R8G8B8 = DXGI B8G8R8A8_UNORM)
+// GmskyOverlaySlotHdr.flags
+#define GMSKY_OVF_PREMULTIPLIED 0x1u  // colour already multiplied by alpha (drawn over transparent black)
+#define GMSKY_OVF_SRGB 0x2u           // colour values are sRGB-encoded (blend in linear light, test 32)
+
+typedef struct GmskyOverlayCtl {
+    uint32_t magic;              // GMSKY_OV_MAGIC once initialized (GMSKY_MAGIC_INIT while one side sets it up)
+    uint32_t version;            // GMSKY_OV_VERSION
+    uint64_t map_size;           // GMSKY_OV_MAP_SIZE
+    uint32_t state;              // the triple buffer (see above); compare-and-swap only
+    uint32_t reserved0;
+    uint64_t frames_published;   // by Garry's Mod
+    uint64_t frames_taken;       // by Skyrim
+    uint32_t skyrim_width;       // Skyrim's back buffer size (step 2b-4), 0 = not known yet
+    uint32_t skyrim_height;
+    int64_t skyrim_size_qpc;     // when Skyrim last wrote its size (QueryPerformanceCounter)
+} GmskyOverlayCtl;
+
+typedef struct GmskyOverlaySlotHdr {  // written by Garry's Mod into its own slot before publishing
+    uint32_t width;
+    uint32_t height;
+    uint32_t format;          // GMSKY_OV_FMT_*
+    uint32_t flags;           // GMSKY_OVF_*
+    uint64_t frame;           // Garry's Mod's frame (presents counted by the hook)
+    int64_t capture_qpc;      // when the picture was taken (QueryPerformanceCounter), for its age
+    uint32_t row_bytes;       // bytes per row in the slot (width * 4, rows top to bottom)
+    uint32_t mask_width;      // plate mask (1 byte per pixel at GMSKY_OV_MASK_OFF); 0 = none
+    uint32_t mask_height;
+    uint32_t reserved0;
+    uint8_t reserved[16];
+} GmskyOverlaySlotHdr;
+
+#define GMSKY_OV_SLOT_HDR_OFF 0x40u  // three GmskyOverlaySlotHdr
+
 // ---- Layout checks. The same numbers are asserted in protocol/src/lib.rs. ----
 #ifdef __cplusplus
 #define GMSKY_ASSERT(c) static_assert(c, #c)
@@ -258,6 +328,19 @@ GMSKY_ASSERT(sizeof(GmskyColClear) == 8);
 GMSKY_ASSERT(sizeof(GmskyColRegion) == 40);
 GMSKY_ASSERT(offsetof(GmskyColRegion, lo) == 24);
 GMSKY_ASSERT(sizeof(GmskyColTri) == 40);
+GMSKY_ASSERT(sizeof(GmskyOverlayCtl) == 56);
+GMSKY_ASSERT(offsetof(GmskyOverlayCtl, state) == 16);
+GMSKY_ASSERT(offsetof(GmskyOverlayCtl, frames_published) == 24);
+GMSKY_ASSERT(offsetof(GmskyOverlayCtl, skyrim_width) == 40);
+GMSKY_ASSERT(offsetof(GmskyOverlayCtl, skyrim_size_qpc) == 48);
+GMSKY_ASSERT(sizeof(GmskyOverlaySlotHdr) == 64);
+GMSKY_ASSERT(offsetof(GmskyOverlaySlotHdr, frame) == 16);
+GMSKY_ASSERT(offsetof(GmskyOverlaySlotHdr, capture_qpc) == 24);
+GMSKY_ASSERT(offsetof(GmskyOverlaySlotHdr, row_bytes) == 32);
+GMSKY_ASSERT(sizeof(GmskyOverlayCtl) <= GMSKY_OV_SLOT_HDR_OFF);
+GMSKY_ASSERT(GMSKY_OV_SLOT_HDR_OFF + 3 * sizeof(GmskyOverlaySlotHdr) <= GMSKY_OV_PIXELS_OFF);
+GMSKY_ASSERT(GMSKY_OV_SLOT_BYTES == 33751040u);
+GMSKY_ASSERT(GMSKY_OV_MAP_SIZE == 101257216u);
 
 #ifdef __cplusplus
 #include <atomic>
@@ -300,6 +383,76 @@ inline bool SlotRead(Slot& slot, T& out, uint32_t* seq_out = nullptr) {
     }
     return false;
 }
+
+// ---- Overlay triple buffer (see "Overlay picture block"); the same rules as protocol/src/overlay.rs ----
+namespace ov {
+
+// Pure rules: old state word -> new state word; *slot = the caller's slot afterwards.
+inline uint32_t Attach(uint32_t s, bool writer, uint32_t* slot) {
+    const uint32_t shift = writer ? GMSKY_OVS_WRITER_SHIFT : GMSKY_OVS_READER_SHIFT;
+    const uint32_t on = writer ? GMSKY_OVS_WRITER_ON : GMSKY_OVS_READER_ON;
+    const uint32_t oshift = writer ? GMSKY_OVS_READER_SHIFT : GMSKY_OVS_WRITER_SHIFT;
+    const uint32_t oon = writer ? GMSKY_OVS_READER_ON : GMSKY_OVS_WRITER_ON;
+    const uint32_t m = s & GMSKY_OVS_MIDDLE_MASK;
+    uint32_t own;
+    if (s & on) {
+        own = (s >> shift) & 3u;  // a restarted side takes back the slot it had
+    } else if (s & oon) {
+        own = 3u - m - ((s >> oshift) & 3u);  // the one neither the middle nor the other side has
+    } else {
+        own = (m + (writer ? 1u : 2u)) % 3u;  // nobody else: writer and reader pick different ones
+    }
+    *slot = own;
+    return (s & ~(3u << shift)) | (own << shift) | on;
+}
+
+inline uint32_t Publish(uint32_t s, uint32_t* slot) {  // writer: its slot becomes the middle
+    const uint32_t w = (s >> GMSKY_OVS_WRITER_SHIFT) & 3u, m = s & GMSKY_OVS_MIDDLE_MASK;
+    *slot = m;
+    return (s & ~(GMSKY_OVS_MIDDLE_MASK | (3u << GMSKY_OVS_WRITER_SHIFT))) | w | (m << GMSKY_OVS_WRITER_SHIFT) | GMSKY_OVS_NEW;
+}
+
+inline bool Take(uint32_t s, uint32_t* next, uint32_t* slot) {  // reader: the middle becomes its slot
+    if (!(s & GMSKY_OVS_NEW)) return false;
+    const uint32_t r = (s >> GMSKY_OVS_READER_SHIFT) & 3u, m = s & GMSKY_OVS_MIDDLE_MASK;
+    *slot = m;
+    *next = (s & ~(GMSKY_OVS_MIDDLE_MASK | GMSKY_OVS_NEW | (3u << GMSKY_OVS_READER_SHIFT))) | r | (m << GMSKY_OVS_READER_SHIFT);
+    return true;
+}
+
+inline uint32_t Detach(uint32_t s, bool writer) {
+    return s & ~(writer ? GMSKY_OVS_WRITER_ON : GMSKY_OVS_READER_ON);
+}
+
+// The same, applied to the shared word with compare-and-swap.
+inline uint32_t AttachShared(GmskyOverlayCtl& c, bool writer) {
+    std::atomic_ref<uint32_t> st(c.state);
+    uint32_t s = st.load(std::memory_order_acquire), slot = 0;
+    while (!st.compare_exchange_weak(s, Attach(s, writer, &slot), std::memory_order_acq_rel, std::memory_order_acquire)) {
+    }
+    return slot;
+}
+
+// Reader: if there is a new picture, makes it the reader's slot (returned in *slot) and true.
+inline bool TakeShared(GmskyOverlayCtl& c, uint32_t* slot) {
+    std::atomic_ref<uint32_t> st(c.state);
+    uint32_t s = st.load(std::memory_order_acquire), next = 0, got = 0;
+    do {
+        if (!Take(s, &next, &got)) return false;
+    } while (!st.compare_exchange_weak(s, next, std::memory_order_acq_rel, std::memory_order_acquire));
+    *slot = got;
+    std::atomic_ref<uint64_t>(c.frames_taken).fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+inline void DetachShared(GmskyOverlayCtl& c, bool writer) {
+    std::atomic_ref<uint32_t> st(c.state);
+    uint32_t s = st.load(std::memory_order_acquire);
+    while (!st.compare_exchange_weak(s, Detach(s, writer), std::memory_order_acq_rel, std::memory_order_acquire)) {
+    }
+}
+
+}  // namespace ov
 
 // ---- Coordinate conversion (the only place it happens) ----
 //

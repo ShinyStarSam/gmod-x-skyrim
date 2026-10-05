@@ -14,3 +14,7 @@ path = "src/fake_gmod.rs"
 
 [dependencies]
 gmsky-protocol = { path = "../../protocol" }
+
+[[bin]]
+name = "fake_overlay"
+path = "src/fake_overlay.rs"

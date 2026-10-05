@@ -907,6 +907,9 @@ hook can't point at freed code.
   asserted in both. Unit test: a writer thread and a reader thread hammering the triple buffer;
   every picture the reader gets must be whole (all of it from one frame). `tools/overlay_read.py`
   opens the block and saves the newest picture as a PNG with its numbers.
+- **2b-2 built (2026-10-05):** as above, with one change from SkyCraft: all three slot numbers live
+  in the one 32-bit word (layout in `gmsky_protocol.h`), so a restarted side can't end up sharing a
+  slot. Also `fake_overlay` (a fake picture writer, for testing 2c without Garry's Mod).
 - **2b-3. Copy every frame.** Lua's live overlay mode (`gmsky_overlay 1`, client console
   variable): every frame, what the tests did for one frame: clear to transparent at the view
   model, depth-in-alpha off, alpha writes forced from `PreDrawHUD` (`gmsky.alphaForced` for the

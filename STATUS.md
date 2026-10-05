@@ -115,7 +115,10 @@ its own function table in ordinary memory, and the search only accepted tables i
 Test 41: Ex device, pure + multithreaded; `Present` counted on every frame (= client frames);
 drawing thread = Lua's thread even with `mat_queue_mode -1`; back buffer `A8R8G8B8` 1280×720, no
 multisampling; hook 0.001 ms per frame; no crash.
-- **Next:** step 2b-2 (picture block + triple buffer), then 2b-3 (copy every frame), 2b-4
+- **2b-2 done (no game needed):** the picture block `Local\GmodSkyrim_overlay_v1` with a triple
+  buffer whose slots can never overlap, even across restarts; unit-tested (20,000 pictures, all
+  whole; the test was shown to fail on a broken rule). `fake_overlay` + `tools\overlay_read.py`.
+- **Next:** 2b-3 (copy every frame), 2b-4
   (Skyrim's window size); plan in `docs/DESIGN.md` "Step 2b in detail". Then 2c (Skyrim draws
   it), then blur behind the plates done in Skyrim from a plate mask.
 ## Evidence (tests 33-37)
@@ -207,4 +210,4 @@ For the HUD's alpha (in the order I'd suggest):
   search). Phase 2b: `liveoverlay.lua` (`gmsky_overlay_probe`), `gmod/module/src/present.rs`
   (the `Present` hook).
 - Tests: `gmod/harness/src/main.rs` (78 checks), `protocol/test/`.
-- Tools: `tools/overlay_preview.py`, `tools/alpha2d_report.py`, `tools/launch_gmod.ps1`, `tools/install_gmod_stubs.ps1`, `tools/install_gmod_autoload.ps1`.
+- Tools: `tools/overlay_read.py` (newest picture in the overlay block), `fake_overlay` (fake picture writer), `tools/overlay_preview.py`, `tools/alpha2d_report.py`, `tools/launch_gmod.ps1`, `tools/install_gmod_stubs.ps1`, `tools/install_gmod_autoload.ps1`.

@@ -5,6 +5,7 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 
+pub mod overlay;
 pub mod shm;
 
 /// v2: the block grew (the collision ring), and an old process must not open the bigger block.
