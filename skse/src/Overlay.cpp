@@ -160,6 +160,30 @@ namespace gmsky::Overlay
 
 	GmskyOverlaySlotHdr Header(uint32_t a_slot) { return SlotHdr(a_slot); }
 
+	double NewestAgeMs()
+	{
+		if (!g_base) {
+			return -1.0;
+		}
+		// The newest published picture is in the middle slot OR in the reader's (Skyrim's) slot: when
+		// Skyrim takes a picture, its previous slot becomes the middle, holding whatever Skyrim took
+		// last, which is old if Skyrim hadn't taken any for a while (a menu). Reading only the middle
+		// (test 46) made a live overlay look stopped for a frame: Skyrim's arms flashed. So: the newer
+		// of the two. (Only headers are read; the writer's slot, being written, is not.)
+		const uint32_t s = std::atomic_ref<uint32_t>(Ctl().state).load(std::memory_order_acquire);
+		int64_t newest = SlotHdr(s & GMSKY_OVS_MIDDLE_MASK).capture_qpc;
+		if (s & GMSKY_OVS_READER_ON) {
+			newest = std::max(newest, SlotHdr((s >> GMSKY_OVS_READER_SHIFT) & 3u).capture_qpc);
+		}
+		if (!newest) {
+			return -1.0;
+		}
+		LARGE_INTEGER q{}, f{};
+		QueryPerformanceCounter(&q);
+		QueryPerformanceFrequency(&f);
+		return double(q.QuadPart - newest) * 1000.0 / double(f.QuadPart);
+	}
+
 	uint32_t ShotRequest() { return g_base ? std::atomic_ref<uint32_t>(Ctl().shot_request).load(std::memory_order_acquire) : 0; }
 
 	const uint8_t* Pixels(uint32_t a_slot) { return g_base + GMSKY_OV_PIXELS_OFF + uint64_t(a_slot) * GMSKY_OV_SLOT_BYTES; }

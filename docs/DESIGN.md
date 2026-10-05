@@ -985,7 +985,11 @@ use), and exactly those are shown again afterwards.
   (2c-2).
 - **2c-2. Skyrim's first-person arms hidden** while the overlay is drawn (SkyCraft's
   `HideFirstPersonMeshes`, on the game thread in the per-frame driver, not in the `Present` hook).
-  Logs the number of meshes hidden / shown again.
+  Logs the number of meshes hidden / shown again. Refined before building: "while the overlay is
+  live" = the puppet drives the player and Garry's Mod's newest picture is under 0.5 s old (not
+  "drawn this frame", which would show Skyrim's arms during every Skyrim menu). The model is walked
+  every frame while hidden, because Skyrim rebuilds it (weapon drawn / changed) and new meshes
+  must be hidden too (SkyCraft does the same). New file `skse/src/Arms.cpp`.
 
 - **2c-1 done (tests 44, 45):** linear blending confirmed by snapshot (≤ 1 level). Garry's Mod's
   halo library (physgun grab outline) made the frame opaque: while the overlay is on, `halo.Render`

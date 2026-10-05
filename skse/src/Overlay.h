@@ -23,4 +23,6 @@ namespace gmsky::Overlay
 	const uint8_t* Pixels(uint32_t a_slot);
 	// Garry's Mod's snapshot request counter (gmsky_overlay_shot); 0 if the block isn't open.
 	uint32_t ShotRequest();
+	// Step 2c-2: age in ms of Garry's Mod's newest published picture; -1 if none (or no block).
+	double NewestAgeMs();
 }

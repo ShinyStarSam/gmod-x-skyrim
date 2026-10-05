@@ -131,7 +131,9 @@ multisampling; hook 0.001 ms per frame; no crash.
   blacked out Skyrim's screen (Garry's Mod's halo makes the frame opaque): **fixed**
   (`liveoverlay.lua` keeps the alpha around halos; test 45: ≤ 10% opaque with halos, 100% without
   the fix). Garry's Mod's menus and console show in Skyrim too: **kept, user's choice**.
-  Next: 2c-2 (hide Skyrim's arms), then blur behind the plates.
+  **2c-2 works (tests 46-48)** (`skse/src/Arms.cpp`): Skyrim's arms hidden while the overlay is
+  live; single-frame flashes around Skyrim menus fixed (0 in test 48). **Step 2c is done.**
+  Next: blur behind HOLOHUD's plates, done in Skyrim.
 
 ## Evidence (tests 33-37)
 

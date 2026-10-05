@@ -941,3 +941,22 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 **Decided (user):** keep Garry's Mod's menus and console in the overlay ("I like that"). Nothing to change: they are already drawn (test 44's snapshot).
 **Changed:** nothing in code since the fix. `docs/DESIGN.md` / `STATUS.md`: the decision, 2c-1 done.
 **Next:** step 2c-2: hide Skyrim's own first-person arms while the overlay is drawn.
+## 2026-10-05 Step 2c-2 built: Skyrim's first-person arms hidden while the overlay is live
+
+**Changed:** new `skse/src/Arms.cpp` / `.h` (adapted from SkyCraft's `HideFirstPersonMeshes`, MIT), called every frame from `Probe.cpp` (game thread): while the puppet drives the player and Garry's Mod's newest picture is under 0.5 s old, every mesh of the player's first-person model is marked culled (never the nodes; the model is walked every frame, since Skyrim rebuilds it when a weapon is drawn or changed); otherwise exactly the meshes hidden are shown again (also on game load). Once a second: hidden / shown, meshes hidden now, newly hidden, shown again, changes, last reason. `Overlay.cpp`: `NewestAgeMs()` (age of the newest published picture, from the middle slot's header). `docs/DESIGN.md`: the rule refined before building ("live", not "drawn this frame", so Skyrim's arms don't flash back during Skyrim menus).
+**Tested how:** plugin build: no warnings, copied into `Data\SKSE\Plugins`. **Not run in game.**
+**Still broken / not tested:** in game (test 46).
+**Next:** in-game test 46.
+## 2026-10-05 In-game test 46 (Skyrim's arms hidden): works, but Skyrim's weapon flashed for single frames around Skyrim menus
+
+**Tested how:** user played with both games, overlay on. User: Skyrim's weapons "flash on screen for a split second", in odd positions for that frame; normal otherwise. Logs: `build/logs-ingame-test-46/`.
+**Result:** hiding works (4 meshes hidden, shown again exactly). But Garry's Mod's overlay was switched on **once and never off**, and Skyrim showed its arms 5 times, each for **one frame** (16-18 ms, e.g. `03:30:15.354` shown, `.370` hidden), reason "Garry's Mod's pictures stopped". Garry's Mod never stopped: 0 stale pictures, picture age ≤ 14 ms in those seconds, publishing steady. **Every flash is in a second when a Skyrim menu opened or closed** (menu counts 61, 40, 37, 38, 13, 2 next to them). The odd positions: probably Skyrim doesn't update hidden meshes, so for that one frame they are drawn where they last were (inferred, not measured).
+**Cause, part known:** "newest picture's age" read only the middle slot's header. When Skyrim takes a picture, its previous slot becomes the middle; after a pause in taking (a Skyrim menu) that slot holds a picture from before the pause, so the newest picture looked seconds old until Garry's Mod's next publish. That explains flashes right after a menu closes; the ones just before a menu opens are **not explained**.
+**Changed:** `Overlay.cpp` `NewestAgeMs`: the newer of the middle slot and Skyrim's own slot. `Arms.cpp`: the arms are shown again only after 3 frames in a row (~50 ms) say the overlay isn't live; shorter blips are counted and logged ("overlay looked stopped for N frame(s), arms kept hidden") instead of acted on; the age is written into the "shown again" line; once a second, the oldest "newest picture" age seen while live. Plugin rebuilt (no warnings).
+**Still broken / not tested:** not tested in game. Why some blips happen just before a menu opens: unknown; the new log lines will show their ages.
+**Next:** next play session: check `arms:` lines for blips and ages; then commit 2c-2.
+## 2026-10-05 In-game test 47/48 (arms flash fix): no flashes; step 2c done
+
+**Tested how:** user played with both games, overlay on, Skyrim menus opened and closed. User: "Perfect". Logs: `build/logs-ingame-test-48/` (`-47` is a shorter earlier run, saved by the launch script).
+**Result:** arms hidden once at 03:36:19 and shown again once at 03:37:59 when Garry's Mod stopped ("newest 538 ms old"); **0 blips** across 127 seconds, 21 of them with a Skyrim menu open. The newest picture's age while live stayed low until shutdown (73.7 ms and 488.1 ms only in the last two seconds, as Garry's Mod closed). The unexplained "just before a menu opens" blips of test 46 did not appear (0 logged), so their cause stays unknown but harmless behind the 3-frame margin.
+**Next:** commit; next step: blur behind HOLOHUD's plates, done in Skyrim (DESIGN.md "HOLOHUD 2, patched").

@@ -3,6 +3,7 @@
 // (Puppet.cpp). Once a second, log Skyrim's numbers next to Garry's Mod's.
 #include "Probe.h"
 
+#include "Arms.h"
 #include "Body.h"
 #include "Camera.h"
 #include "Collision.h"
@@ -142,6 +143,7 @@ namespace gmsky::Probe
 		Puppet::Reset("game loaded");
 		Terrain::Reset();
 		Collision::Reset();
+		Arms::Reset("game loaded");
 		logger::info("game loaded: will publish a new origin on the next frame");
 	}
 
@@ -214,6 +216,7 @@ namespace gmsky::Probe
 		Terrain::PerFrame(a_player, g_origin, g_frame);
 		Collision::PerFrame(a_player, g_origin);
 		Overlay::PerFrame();
+		Arms::PerFrame(a_player);
 
 		g_logTimer += a_delta;
 		if (g_logTimer >= 1.0f) {
@@ -226,6 +229,7 @@ namespace gmsky::Probe
 			Body::LogSecond();
 			Overlay::LogSecond();
 			Draw::LogSecond();
+			Arms::LogSecond();
 			g_logTimer = 0.0f;
 		}
 	}
