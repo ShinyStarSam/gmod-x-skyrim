@@ -19,7 +19,7 @@
 #define GMSKY_MAP_SIZE (GMSKY_RING_OFFSET + GMSKY_RING_BYTES)
 #define GMSKY_MAGIC 0x594B534Du      // "MSKY": layout initialized and ready
 #define GMSKY_MAGIC_INIT 0x54494E49u // "INIT": one side is initializing right now
-#define GMSKY_VERSION 11u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain; 8: collision ring; 9: view punch; 10: GmskyActors; 11: GmskyHitboxes
+#define GMSKY_VERSION 13u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain; 8: collision ring; 9: view punch; 10: GmskyActors; 11: GmskyHitboxes; 12: hit test; 13: hit events
 #define GMSKY_HEARTBEAT_TIMEOUT_MS 2000u
 
 // GmskyPlayerState.flags
@@ -235,6 +235,79 @@ typedef struct GmskyHitboxes {
     GmskyHitPart parts[GMSKY_HB_MAX_PARTS];
 } GmskyHitboxes;
 
+// Hitbox test (Phase 3 step 3c-3, DESIGN.md "3c-3 in detail", gmsky_hitbox_test): Garry's Mod
+// sends rays over one NPC, Skyrim answers each against its current parts and with its own physics.
+#define GMSKY_HT_MAX_RAYS 441  // 21 x 21
+typedef struct GmskyHitTestRay {
+    float o[3];  // start, Garry's Mod units relative to the anchor
+    float d[3];  // the whole ray (end = o + d)
+} GmskyHitTestRay;
+
+typedef struct GmskyHitTestRequest {  // Garry's Mod -> Skyrim
+    uint32_t id;            // +1 per test; Skyrim answers each new id once
+    uint32_t form_id;       // the NPC
+    uint32_t count;         // rays
+    uint32_t origin_epoch;
+    GmskyHitTestRay rays[GMSKY_HT_MAX_RAYS];
+} GmskyHitTestRequest;
+
+// GmskyHitTestAnswer.havok: what Skyrim's own physics ray hit first
+#define GMSKY_HTH_NOTHING 0u
+#define GMSKY_HTH_THIS_NPC 1u   // a collision body of this NPC (one of its parts, or its character controller)
+#define GMSKY_HTH_OTHER 2u      // something else (the world, another actor)
+#define GMSKY_HTH_FAILED 3u     // couldn't cast (no physics world)
+typedef struct GmskyHitTestAnswer {
+    float now_t;        // fraction along the ray where Skyrim's current parts are hit; < 0 = missed
+    float havok_t;      // fraction where Skyrim's physics ray hit (if havok != NOTHING)
+    uint8_t now_group;  // GMSKY_HBG_* of the part hit
+    uint8_t havok;      // GMSKY_HTH_*
+    uint8_t havok_layer;  // collision layer of what it hit
+    uint8_t reserved0;
+} GmskyHitTestAnswer;
+
+typedef struct GmskyHitTestResult {  // Skyrim -> Garry's Mod
+    uint32_t id;            // the request answered
+    uint32_t form_id;
+    uint32_t count;
+    uint32_t flags;         // GMSKY_HBA_* of the NPC at that moment (dead, parts in the physics world)
+    uint64_t skyrim_frame;
+    uint32_t parts;         // parts read for it
+    uint32_t reserved0;
+    GmskyHitTestAnswer answers[GMSKY_HT_MAX_RAYS];
+} GmskyHitTestResult;
+
+// Hits on Skyrim's NPCs, Garry's Mod -> Skyrim (Phase 3 step 3d, DESIGN.md "3d in detail"). Not a
+// latest-value slot but a ring of events: Garry's Mod writes ev[head % GMSKY_EV_MAX], then adds 1
+// to head (release). Skyrim keeps its own read position, starting at head when it first reads it
+// (so old hits never land). head only counts up: the block lives as long as either game has it
+// open, so a restarted game continues from it. More than GMSKY_EV_MAX events between two reads
+// are lost (and counted by Skyrim).
+#define GMSKY_EV_MAX 64
+#define GMSKY_HITK_OTHER 0u
+#define GMSKY_HITK_BULLET 1u
+#define GMSKY_HITK_MELEE 2u
+#define GMSKY_HITK_EXPLOSION 3u
+typedef struct GmskyHitEvent {
+    uint32_t form_id;
+    float damage;          // Skyrim damage (already scaled)
+    float gmod_damage;     // what Garry's Mod's weapon did (for the logs)
+    float pos[3];          // where it landed, Garry's Mod units relative to the anchor (explosions: the blast)
+    float dir[3];          // unit direction of the hit
+    float force;           // Garry's Mod damage force length
+    uint32_t dmg_type;     // Garry's Mod DMG_* bits
+    uint32_t origin_epoch; // the origin pos[] belongs to
+    uint8_t group;         // GMSKY_HBG_* body group hit
+    uint8_t bone;          // index of the part (GmskyHitPart.bone), 255 = none
+    uint8_t kind;          // GMSKY_HITK_*
+    uint8_t flags;
+} GmskyHitEvent;
+
+typedef struct GmskyHitEvents {
+    uint32_t head;      // events written so far (Garry's Mod); atomic
+    uint32_t session;   // process id of the Garry's Mod that wrote last (for logs)
+    GmskyHitEvent ev[GMSKY_EV_MAX];
+} GmskyHitEvents;
+
 GMSKY_DEFINE_SLOT(GmskyOriginSlot, GmskyOrigin);
 GMSKY_DEFINE_SLOT(GmskySkyrimStateSlot, GmskySkyrimState);
 GMSKY_DEFINE_SLOT(GmskyPlayerStateSlot, GmskyPlayerState);
@@ -242,6 +315,8 @@ GMSKY_DEFINE_SLOT(GmskyInputSlot, GmskyInput);
 GMSKY_DEFINE_SLOT(GmskyTerrainSlot, GmskyTerrain);
 GMSKY_DEFINE_SLOT(GmskyActorsSlot, GmskyActors);
 GMSKY_DEFINE_SLOT(GmskyHitboxesSlot, GmskyHitboxes);
+GMSKY_DEFINE_SLOT(GmskyHitTestRequestSlot, GmskyHitTestRequest);
+GMSKY_DEFINE_SLOT(GmskyHitTestResultSlot, GmskyHitTestResult);
 
 typedef struct GmskyShared {
     GmskyHeader header;
@@ -252,6 +327,9 @@ typedef struct GmskyShared {
     GmskyTerrainSlot terrain;          // written by Skyrim
     GmskyActorsSlot actors;            // written by Skyrim (v10)
     GmskyHitboxesSlot hitboxes;        // written by Skyrim (v11)
+    GmskyHitTestRequestSlot hit_test_request;  // written by Garry's Mod (v12)
+    GmskyHitTestResultSlot hit_test_result;    // written by Skyrim (v12)
+    GmskyHitEvents hit_events;                 // written by Garry's Mod, read by Skyrim (v13)
 } GmskyShared;
 
 // ---- Collision ring (Skyrim -> Garry's Mod; DESIGN.md re-plan step D; adapted from SkyCraft, MIT) ----
@@ -422,7 +500,19 @@ GMSKY_ASSERT(sizeof(GmskyHitActor) == 16);
 GMSKY_ASSERT(offsetof(GmskyHitboxes, actors) == 32);
 GMSKY_ASSERT(sizeof(GmskyHitboxes) == 32 + 16 * GMSKY_HB_MAX_ACTORS + 32 * GMSKY_HB_MAX_PARTS);
 GMSKY_ASSERT(offsetof(GmskyShared, hitboxes) == 21952);
-GMSKY_ASSERT(sizeof(GmskyShared) == 21952 + 8 + 16800);
+GMSKY_ASSERT(sizeof(GmskyHitTestRay) == 24);
+GMSKY_ASSERT(sizeof(GmskyHitTestRequest) == 16 + 24 * GMSKY_HT_MAX_RAYS);
+GMSKY_ASSERT(sizeof(GmskyHitTestAnswer) == 12);
+GMSKY_ASSERT(offsetof(GmskyHitTestResult, answers) == 32);
+GMSKY_ASSERT(sizeof(GmskyHitTestResult) == 32 + 12 * GMSKY_HT_MAX_RAYS + 4);
+GMSKY_ASSERT(offsetof(GmskyShared, hitboxes) + 8 + sizeof(GmskyHitboxes) == offsetof(GmskyShared, hit_test_request));
+GMSKY_ASSERT(offsetof(GmskyShared, hit_test_request) == 38760);
+GMSKY_ASSERT(offsetof(GmskyShared, hit_test_result) == 38760 + 8 + 10600);
+GMSKY_ASSERT(sizeof(GmskyHitEvent) == 52);
+GMSKY_ASSERT(offsetof(GmskyHitEvent, dmg_type) == 40);
+GMSKY_ASSERT(sizeof(GmskyHitEvents) == 8 + 52 * GMSKY_EV_MAX);
+GMSKY_ASSERT(offsetof(GmskyShared, hit_events) == 54704);
+GMSKY_ASSERT(sizeof(GmskyShared) == 54704 + 3336);
 GMSKY_ASSERT(sizeof(GmskyShared) <= GMSKY_SLOTS_SIZE);
 GMSKY_ASSERT(sizeof(GmskyColMsgHeader) == 8);
 GMSKY_ASSERT(sizeof(GmskyColClear) == 8);

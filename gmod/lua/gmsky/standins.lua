@@ -17,6 +17,11 @@ S.solid = S.solid or CreateConVar("gmsky_actor_solid", "1", FCVAR_REPLICATED,
 	"1 = you bump into Skyrim's NPCs, 0 = you walk through them (bullets hit them either way)")
 S.gear = S.gear or CreateConVar("gmsky_hitbox_gear", "0", FCVAR_REPLICATED,
 	"1 = a carried bow, weapon or shield counts as a hit on the NPC, 0 = shots pass by it")
+-- Step 3d (the user's choice: a flat x3 for now, head x2, nothing else scaled).
+S.damageScale = S.damageScale or CreateConVar("gmsky_damage_scale", "3", FCVAR_ARCHIVE,
+	"Skyrim damage = Garry's Mod damage x this (hits on Skyrim's NPCs)")
+S.headScale = S.headScale or CreateConVar("gmsky_headshot_scale", "2", FCVAR_ARCHIVE,
+	"Extra damage multiplier for head shots on Skyrim's NPCs")
 S.stats = S.stats or { rays = 0, boxes = 0, hits = 0, ms = 0 }
 
 local GROUPS = { [0] = "generic", "head", "chest", "stomach", "left arm", "right arm", "left leg", "right leg", [10] = "gear" }
@@ -88,21 +93,50 @@ function ENT:TestCollision(startpos, delta, isbox, extents, mask)
 end
 
 if SERVER then
-	-- Logged, not passed to Skyrim yet (step 3d). The body part is the one nearest to where the
-	-- damage landed.
+	-- Garry's Mod damage types (DMG_*) -> what kind of hit Skyrim plays (GMSKY_HITK_*).
+	local DMG_KIND = { { 64, 3 }, { 128, 2 }, { 4, 2 }, { 2, 1 }, { 0x20000000, 1 } } -- blast, club, slash, bullet, buckshot
+	local function KindOf(t)
+		for _, k in ipairs(DMG_KIND) do
+			if bit.band(t, k[1]) ~= 0 then return k[2] end
+		end
+		return 0
+	end
+	local KIND_NAMES = { [0] = "other", "bullet", "melee", "explosion" }
+
+	-- Step 3d: the hit goes to Skyrim (gmsky.SendHit), scaled (gmsky_damage_scale, head x
+	-- gmsky_headshot_scale). The body part is the one nearest to where the damage landed;
+	-- explosions have none (their damage is placed at the blast).
 	function ENT:OnTakeDamage(dmg)
 		local id = self:FormId()
 		local pos = dmg:GetDamagePosition()
 		local group, bone, dist = gmsky.HitPartAt(id, pos.x, pos.y, pos.z)
+		local kind = KindOf(dmg:GetDamageType())
+		if kind == 3 then group, bone = 0, 255 end
+		local gdmg = dmg:GetDamage()
+		local sdmg = gdmg * S.damageScale:GetFloat() * (group == 1 and S.headScale:GetFloat() or 1)
+		local force = dmg:GetDamageForce()
+		local fl = force:Length()
+		local dir = fl > 0.001 and force * (1 / fl) or nil
+		if not dir then
+			local att0 = dmg:GetAttacker()
+			local from = IsValid(att0) and (att0.EyePos and att0:EyePos() or att0:GetPos()) or pos
+			local d = pos - from
+			local l = d:Length()
+			dir = l > 0.001 and d * (1 / l) or Vector(1, 0, 0)
+		end
+		local sent = gmsky.SendHit(id, sdmg, gdmg, pos.x, pos.y, pos.z, dir.x, dir.y, dir.z, fl, dmg:GetDamageType(),
+			group or 0, bone or 255, kind)
+		S.sent = (S.sent or 0) + (sent and 1 or 0)
 		local a = gmsky.actors and gmsky.actors.byId[id]
 		local att, inf = dmg:GetAttacker(), dmg:GetInflictor()
 		local weapon = IsValid(att) and att.GetActiveWeapon and att:GetActiveWeapon()
 		S.damaged = (S.damaged or 0) + 1
 		if (S.damageLines or 0) < 20 then
 			S.damageLines = (S.damageLines or 0) + 1
-			gmsky.Log(string.format("STAND-IN HIT %s %08X%s: %s, %.1f damage (type %d) by %s (inflictor %s), %s",
+			gmsky.Log(string.format("STAND-IN HIT %s %08X%s: %s %s, %.1f damage (type %d) -> %.1f Skyrim damage %s, by %s (inflictor %s), %s",
 				a and a.name or "?", id, bit.band(self.gmskyFlags or 0, 1) ~= 0 and " (dead)" or "",
-				group and S.GroupName(group) or "no part", dmg:GetDamage(), dmg:GetDamageType(),
+				KIND_NAMES[kind], group and S.GroupName(group) or "no part", gdmg, dmg:GetDamageType(), sdmg,
+				sent and "sent" or "NOT sent (no link / origin)",
 				IsValid(weapon) and weapon:GetClass() or (IsValid(att) and att:GetClass() or "?"),
 				IsValid(inf) and inf:GetClass() or "?",
 				dist and string.format("%.1f units from the part (bone %d)", dist, bone) or "no hitboxes"))
@@ -113,6 +147,35 @@ else
 end
 
 scripted_ents.Register(ENT, "gmsky_actor")
+
+-- ---- an NPC walking into the player shoves them (after test 58; the user's choice) ---------------
+-- A trace that starts inside a hull doesn't hit it (so nobody gets stuck), which let NPCs walk
+-- through the player. Now, while the player's box overlaps a living NPC's hull, the player gets a
+-- speed out of it along the shorter way, scaled by how deep (out in about 0.08 s, at most 300
+-- units/s). Garry's Mod's own movement applies it, so it never pushes the player into a wall, and
+-- ground friction stops them once clear. Both sides run it (movement prediction).
+S.shoveTime = 0.08
+S.shoveMax = 300
+S.shoves = S.shoves or { ticks = 0, deepest = 0 }
+
+hook.Add("SetupMove", "gmsky_actor_shove", function(ply, mv)
+	if not S.solid:GetBool() or ply:GetMoveType() == MOVETYPE_NOCLIP then return end
+	local mins, maxs = ply:GetHull()
+	if ply:Crouching() then mins, maxs = ply:GetHullDuck() end
+	local o = mv:GetOrigin()
+	local dx, dy, depth = gmsky.HitPushOut(o.x, o.y, o.z, maxs.x, maxs.z - mins.z)
+	if not dx then return end
+	local want = math.min(depth / S.shoveTime, S.shoveMax)
+	local v = mv:GetVelocity()
+	local along = v.x * dx + v.y * dy
+	if along < want then
+		v.x = v.x + dx * (want - along)
+		v.y = v.y + dy * (want - along)
+		mv:SetVelocity(v)
+	end
+	S.shoves.ticks = S.shoves.ticks + 1
+	S.shoves.deepest = math.max(S.shoves.deepest, depth)
+end)
 
 -- ---- the server keeps one per actor -------------------------------------------------------------
 
@@ -185,6 +248,35 @@ if SERVER then
 		return string.format("%s %08X %s at %.0f", a and a.name or "?", id, group and S.GroupName(group) or "?", tr.HitPos:Distance(eye))
 	end
 
+	-- Step 3c-3: gmsky_hitbox_test (aim at an NPC): Garry's Mod's copy of its hitboxes against
+	-- Skyrim's own, ray by ray (DESIGN.md "3c-3 in detail"). The report goes to the log and console.
+	concommand.Add("gmsky_hitbox_test", function(ply)
+		ply = IsValid(ply) and ply or player.GetAll()[1]
+		if not IsValid(ply) then return end
+		local eye = ply:EyePos()
+		local tr = util.TraceLine({ start = eye, endpos = eye + ply:GetAimVector() * 8192, filter = ply, mask = MASK_SHOT })
+		local e = tr.Entity
+		if not IsValid(e) or e:GetClass() ~= "gmsky_actor" then
+			print("[gmsky] hitbox test: aim at a Skyrim NPC first")
+			return
+		end
+		local f = ply:GetAimVector()
+		local id, why = gmsky.HitTestStart(e:FormId(), f.x, f.y, f.z)
+		local a = gmsky.actors and gmsky.actors.byId[e:FormId()]
+		local line = id and string.format("hitbox test started on %s %08X", a and a.name or "?", e:FormId())
+			or ("hitbox test not started: " .. tostring(why))
+		gmsky.Log(line)
+		print("[gmsky] " .. line)
+	end)
+
+	hook.Add("Tick", "gmsky_hitbox_test", function()
+		local text = gmsky.HitTestReport()
+		if text then
+			gmsky.Log(text)
+			print("[gmsky] " .. text)
+		end
+	end)
+
 	-- Once a second (server.lua's status line).
 	function S.Status(ply)
 		local n = 0
@@ -192,12 +284,13 @@ if SERVER then
 		local s, c = S.stats, S.counts
 		local line = ""
 		if n > 0 or c.removed > 0 then
-			line = string.format(" | stand-ins %d (+%d -%d, table %.0f ms old), traces %d lines %d boxes %d hits %.2f ms, damage taken %d, aim: %s",
-				n, c.made, c.removed, S.age or -1, s.rays, s.boxes, s.hits, s.ms, S.damaged or 0, ply and AimTarget(ply) or "-")
+			line = string.format(" | stand-ins %d (+%d -%d, table %.0f ms old), traces %d lines %d boxes %d hits %.2f ms, shoved %d ticks (deepest %.1f), damage taken %d (sent to Skyrim %d), aim: %s",
+				n, c.made, c.removed, S.age or -1, s.rays, s.boxes, s.hits, s.ms, S.shoves.ticks, S.shoves.deepest, S.damaged or 0, S.sent or 0, ply and AimTarget(ply) or "-")
 		end
 		S.stats = { rays = 0, boxes = 0, hits = 0, ms = 0 }
 		S.counts = { made = 0, removed = 0 }
-		S.damaged, S.damageLines = 0, 0
+		S.shoves = { ticks = 0, deepest = 0 }
+		S.damaged, S.damageLines, S.sent = 0, 0, 0
 		return line
 	end
 end

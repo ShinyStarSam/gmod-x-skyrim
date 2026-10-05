@@ -1126,6 +1126,50 @@ traces is enough for bullets and the crowbar, the same way the ground is answere
   `ApplyHit` (own hit function, checked first; stand-in Skyrim weapon by damage type for blood and
   sound; skill experience; `StartCombat`). Damage scaling: console variable, default decided with
   the user (§14 question 5). Test: crowbar a bandit until they die; Skyrim's log shows each hit.
+  **3d in detail (planned 2026-10-05):**
+  - *Found in 3c-3 (test 59):* Garry's Mod's copy agrees with Skyrim's parts on 99.3-100% of rays;
+    where the parts are in Skyrim's physics world (corpses, some living NPCs) Skyrim's own
+    projectile ray hits exactly them; for the other living NPCs it hits their movement capsule
+    (CHARCONTROLLER) instead, so Skyrim's arrows are coarser there than our copy. We keep the
+    parts (head shots need them).
+  - *Decided (the user):* Skyrim damage = Garry's Mod damage × **3** (`gmsky_damage_scale`, flat
+    for now, tuned later); **head × 2**, everything else × 1 (`gmsky_headshot_scale`); explosions
+    have no body part (their damage is placed at the blast).
+  - **Event queue Garry's Mod → Skyrim** (protocol v13): a ring of 64 hit events in the slots
+    area. Garry's Mod writes an event, then advances `head`; Skyrim keeps its own read position
+    (starts at `head` when it attaches, so old hits never land; if Garry's Mod restarted, `head`
+    goes back and Skyrim follows). Lost events (more than 64 between two Skyrim frames) are counted.
+    Event: formId, Skyrim damage (already scaled), hit position and direction (Garry's Mod units
+    relative to the anchor), damage force, Garry's Mod damage type, body group, bone index, kind
+    (bullet / melee / explosion / other).
+  - **Garry's Mod:** `gmsky_actor:OnTakeDamage` → scale → event (`gmsky.SendHit`); logged.
+  - **Skyrim (new `Combat.cpp`, adapted from SkyCraft's `Combat.cpp` `ApplyHit`, MIT):** every frame
+    while the puppet drives, drain the queue; for a living NPC feed the hit into Skyrim's own melee
+    hit function (ID 38586, used only after checking that the engine's melee code at ID 38627 +
+    0x4A8 really calls it; otherwise plain `DoDamage`) with a vanilla stand-in weapon chosen by
+    damage type (bullets: Hunting Bow, for arrow-like blood and sound; clubs: Iron Mace; slashes:
+    Iron Sword; explosions: no weapon, `DoDamage` and Skyrim's explosion knock-back, as SkyCraft's
+    `ApplyExplosion`), at the bone that was hit (blood and impact sound there), then `StartCombat`
+    if not fighting yet. Skyrim's hit function does the rest: hit reactions, aggro, **crime**
+    (hitting a citizen is assault, as in Skyrim), kill credit. Armour is not applied (SkyCraft's
+    choice: the damage is set directly). Skill experience: not in 3d.
+  - **3d-2, corpses:** a hit on a dead NPC pushes its ragdoll: an impulse along the shot on the
+    body part hit (bullets, melee) or on all its bodies away from the blast (explosions), as
+    SkyCraft's `FlingRagdoll`. Strength from Garry's Mod's damage force; tuned in game.
+  - Logs: Garry's Mod: every hit sent (NPC, part, Garry's Mod damage, Skyrim damage); Skyrim: every
+    hit applied (path used, health before → after, killed or not), events lost.
+  - Test (3d-1): shoot a hostile (bandit, wolf): it reacts, bleeds, fights back, dies; head shots
+    take fewer bullets. Shooting a townsperson is a crime in Skyrim (a bounty); test on hostiles.
+  - **Found in test 60 (hits work; for later, after Phase 3's core):** Garry's Mod's *world* objects
+    and effects aren't in Skyrim, because the overlay only carries the hands, weapon and HUD:
+    grenades, rockets, AR2 balls, explosions, tracers and the physgun beam are invisible. And
+    Garry's Mod's *physics* objects don't meet Skyrim's world or NPCs (grenades and AR2 balls fall
+    through; the ground and stand-ins answer traces only). Two later steps, planned when we get
+    there: (a) **draw Garry's Mod's world objects and effects into the overlay**, hidden behind
+    Skyrim's walls (needs both games' depth; the hard part); (b) **Skyrim's world and NPCs for
+    Garry's Mod's physics** (physics ground away from the player, where tests 12-17's crash
+    doesn't apply, or moving those objects by traces), then AR2 balls and grabbing corpses with
+    the physgun (moving Skyrim's ragdoll).
 - **3e. Skyrim's NPCs hurt the Garry's Mod player.** SkyCraft's refund + attacker / kind
   detection; the player essential in Skyrim while the puppet drives; an event queue Skyrim →
   Garry's Mod; Garry's Mod applies it as damage from the attacker's stand-in (so its damage
@@ -1264,6 +1308,33 @@ ray cast against the world.
   nearest part) — not passed to Skyrim yet (3d); once a second the NPC and body group under
   Garry's Mod's crosshair (Skyrim's own crosshair target next to it moves to 3c-3, with the check
   against Skyrim's real physics).
+
+**NPCs walking into the player (after test 58, the user's choice: "NPC shoves me"):** while the
+player's box overlaps a living NPC's hull, `SetupMove` gives the player a speed out of it along the
+shorter way (depth / 0.08 s, at most 300 units/s); Garry's Mod's movement applies it (never into
+a wall), friction stops it once clear. Logged: shoved ticks and deepest overlap per second.
+
+**3c-3 in detail (planned 2026-10-05, after test 56 showed most living NPCs' parts are not in
+Skyrim's physics world):** `gmsky_hitbox_test` (server console command; works from the console in
+single-player):
+- Garry's Mod takes the NPC under the crosshair, lays a 21 × 21 grid of rays (441) over its parts'
+  box, square to the view, from in front of it through it, and answers each ray from its copy
+  (hit or not, body group, distance). It sends the rays to Skyrim (new slot `hit_test_request`,
+  protocol v12; rays relative to the anchor).
+- Skyrim, on the next frame, answers each ray twice (slot `hit_test_result`):
+  1. **"Skyrim now":** the same ray maths against the parts it reads *that frame* (no conversion,
+     no delay). Garry's Mod vs "Skyrim now" = conversion error + the copy's delay. Standing
+     target: should agree on ≥ 98% of rays (misses at part edges only).
+  2. **Skyrim's own physics** (Havok ray cast in the NPC's cell, as a projectile's collision
+     layer): what it hits first (layer, and whether it belongs to this NPC, and how far). For
+     corpses and NPCs whose parts are in the physics world this checks our shape reading against
+     Skyrim's own physics; for the other living ones it shows what a projectile-like ray hits
+     instead (the character controller capsule? nothing?) — the open question from test 56.
+- Report (Garry's Mod log, one block per test): rays hit in both / only Garry's Mod / only Skyrim
+  now; same body group; distance difference (avg, max); the delay (table age); the Havok answers
+  counted by what they hit and, where they hit this NPC's parts, their distance against "Skyrim
+  now".
+- Cost: once per command, not per frame.
 
 *Sub-steps:* **3c-1** read and log the body shapes (Skyrim only; decides option 2 or the
 fallback). **3c-2** send them (protocol bump) and build the stand-ins in Garry's Mod, with the

@@ -11,6 +11,8 @@
 // - Once per NPC kind (race), alive and dead: the full list of parts with their groups.
 // - Every frame, for the nearest three living NPCs and the nearest corpse: each part's centre in
 //   its bone's own frame (stays the same while the bones move = the parts follow the animation).
+// - 3c-3 (gmsky_hitbox_test): Garry's Mod's rays over one NPC are answered against the parts as
+//   they are this frame, and with a Havok ray cast as a projectile would (DESIGN.md "3c-3").
 #include "Hitboxes.h"
 
 #include "Link.h"
@@ -331,6 +333,165 @@ namespace gmsky::Hitboxes
 			return true;
 		}
 
+		// ---- 3c-3: the hitbox test ----------------------------------------------------------------
+		// Ray o + t·d (t in 0..1) against a capsule / a box: first t, or -1 (also when it starts
+		// inside). The same rules as gmod/module/src/hitboxes.rs.
+		double Dot3(const double* a, const double* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+
+		double RaySphere(const double* o, const double* u, double len, const double* c, double r)
+		{
+			const double oc[3] = { o[0] - c[0], o[1] - c[1], o[2] - c[2] };
+			const double b = Dot3(u, oc), cc = Dot3(oc, oc) - r * r;
+			if (cc <= 0.0) return -1.0;
+			const double h = b * b - cc;
+			if (h < 0.0) return -1.0;
+			const double t = -b - std::sqrt(h);
+			return (t < 0.0 || t > len) ? -1.0 : t;
+		}
+
+		double RayCapsule(const double* o, const double* u, double len, const double* a, const double* b, double r)
+		{
+			const double ba[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+			const double oa[3] = { o[0] - a[0], o[1] - a[1], o[2] - a[2] };
+			const double baba = Dot3(ba, ba);
+			if (baba < 1e-9) return RaySphere(o, u, len, a, r);
+			const double h0 = std::clamp(Dot3(oa, ba) / baba, 0.0, 1.0);
+			const double in[3] = { oa[0] - ba[0] * h0, oa[1] - ba[1] * h0, oa[2] - ba[2] * h0 };
+			if (Dot3(in, in) <= r * r) return -1.0;
+			const double bard = Dot3(ba, u), baoa = Dot3(ba, oa), rdoa = Dot3(u, oa), oaoa = Dot3(oa, oa);
+			const double qa = baba - bard * bard;
+			if (qa > 1e-12) {
+				const double qb = baba * rdoa - baoa * bard, qc = baba * oaoa - baoa * baoa - r * r * baba;
+				const double h = qb * qb - qa * qc;
+				if (h >= 0.0) {
+					const double t = (-qb - std::sqrt(h)) / qa;
+					const double y = baoa + t * bard;
+					if (y > 0.0 && y < baba) return (t < 0.0 || t > len) ? -1.0 : t;
+				}
+			}
+			const double ta = RaySphere(o, u, len, a, r), tb = RaySphere(o, u, len, b, r);
+			if (ta < 0.0) return tb;
+			if (tb < 0.0) return ta;
+			return std::min(ta, tb);
+		}
+
+		double RayBox(const double* o, const double* u, double len, const float* lo, const float* hi)
+		{
+			if (o[0] > lo[0] && o[0] < hi[0] && o[1] > lo[1] && o[1] < hi[1] && o[2] > lo[2] && o[2] < hi[2]) return -1.0;
+			double tmin = 0.0, tmax = len;
+			bool entered = false;
+			for (int i = 0; i < 3; ++i) {
+				if (std::fabs(u[i]) < 1e-12) {
+					if (o[i] < lo[i] || o[i] > hi[i]) return -1.0;
+					continue;
+				}
+				double t1 = (lo[i] - o[i]) / u[i], t2 = (hi[i] - o[i]) / u[i];
+				if (t1 > t2) std::swap(t1, t2);
+				if (t1 > tmin) {
+					tmin = t1;
+					entered = true;
+				}
+				tmax = std::min(tmax, t2);
+				if (tmin > tmax) return -1.0;
+			}
+			return entered ? tmin : -1.0;
+		}
+
+		uint32_t g_lastTestId = 0;
+
+		void AnswerHitTest(const GmskyOrigin& a_origin, uint64_t a_frame)
+		{
+			auto& link = Link::Get();
+			static GmskyHitTestRequest req;
+			if (!SlotRead(link.Shared().hit_test_request, req) || req.id == g_lastTestId || req.id == 0) {
+				return;
+			}
+			g_lastTestId = req.id;
+			static GmskyHitTestResult res;
+			res = GmskyHitTestResult{};
+			res.id = req.id;
+			res.form_id = req.form_id;
+			res.skyrim_frame = a_frame;
+			auto* actor = RE::TESForm::LookupByID<RE::Actor>(req.form_id);
+			if (!actor || req.origin_epoch != a_origin.epoch || !actor->Get3D()) {
+				logger::info("HITBOX TEST #{}: {:08X} not loaded or another origin; not answered", req.id, req.form_id);
+				SlotWrite(link.Shared().hit_test_result, res);
+				return;
+			}
+			uint32_t faults = 0;
+			const auto parts = ReadActor(actor, faults);
+			res.parts = uint32_t(parts.size());
+			res.flags = actor->IsDead() ? GMSKY_HBA_DEAD : 0u;
+			for (const auto& p : parts) {
+				if (p.read.inWorld) res.flags |= GMSKY_HBA_IN_WORLD;
+			}
+			res.count = std::min<uint32_t>(req.count, GMSKY_HT_MAX_RAYS);
+			auto* tes = RE::TES::GetSingleton();
+			auto* player = RE::PlayerCharacter::GetSingleton();
+			const float hs = RE::bhkWorld::GetWorldScale();
+			uint32_t now = 0, onNpc = 0, other = 0;
+			for (uint32_t i = 0; i < res.count; ++i) {
+				const auto& ray = req.rays[i];
+				const double og[3] = { ray.o[0], ray.o[1], ray.o[2] };
+				const auto os = GmodToSkyrim(og, kNoAnchor, a_origin.skyrim_origin);
+				const double o[3] = { os.x, os.y, os.z };
+				const double d[3] = { ray.d[0] / kGmodPerSkyrim, ray.d[1] / kGmodPerSkyrim, ray.d[2] / kGmodPerSkyrim };
+				const double len = std::sqrt(Dot3(d, d));
+				auto& ans = res.answers[i];
+				ans.now_t = -1.0f;
+				if (len < 1e-6) continue;
+				const double u[3] = { d[0] / len, d[1] / len, d[2] / len };
+				// 1. "Skyrim now": the parts as read this frame (gear skipped, as Garry's Mod does).
+				double best = -1.0;
+				for (const auto& p : parts) {
+					if (p.group == GMSKY_HBG_GEAR) continue;
+					double t;
+					if (p.read.capsule) {
+						const double a[3] = { p.read.a[0], p.read.a[1], p.read.a[2] }, b[3] = { p.read.b[0], p.read.b[1], p.read.b[2] };
+						t = RayCapsule(o, u, len, a, b, p.read.r);
+					} else {
+						t = RayBox(o, u, len, p.read.lo, p.read.hi);
+					}
+					if (t >= 0.0 && (best < 0.0 || t < best)) {
+						best = t;
+						ans.now_group = p.group;
+					}
+				}
+				if (best >= 0.0) {
+					ans.now_t = float(best / len);
+					++now;
+				}
+				// 2. Skyrim's own physics: a ray on the projectile layer, first hit (TES::Pick, as
+				// Terrain.cpp's ground rays: proven on 1.7.104; the player's group so it skips the player).
+				if (!tes || !player) {
+					ans.havok = GMSKY_HTH_FAILED;
+					continue;
+				}
+				RE::bhkPickData pick;
+				pick.rayInput.from = RE::hkVector4(float(o[0] * hs), float(o[1] * hs), float(o[2] * hs), 0.0f);
+				pick.rayInput.to = RE::hkVector4(float((o[0] + d[0]) * hs), float((o[1] + d[1]) * hs), float((o[2] + d[2]) * hs), 0.0f);
+				RE::CFilter filter;
+				player->GetCollisionFilterInfo(filter);
+				filter.SetCollisionLayer(RE::COL_LAYER::kProjectile);
+				pick.rayInput.filterInfo = filter;
+				tes->Pick(pick);
+				if (!pick.rayOutput.HasHit()) {
+					ans.havok = GMSKY_HTH_NOTHING;
+					continue;
+				}
+				ans.havok_t = pick.rayOutput.hitFraction;
+				ans.havok_layer = uint8_t(pick.rayOutput.rootCollidable->GetCollisionLayer());
+				auto* ref = RE::TESHavokUtilities::FindCollidableRef(*pick.rayOutput.rootCollidable);
+				ans.havok = ref == actor ? GMSKY_HTH_THIS_NPC : GMSKY_HTH_OTHER;
+				(ref == actor ? onNpc : other) += 1;
+			}
+			SlotWrite(link.Shared().hit_test_result, res);
+			logger::info("HITBOX TEST #{}: {} {:08X}{}{}, {} parts, {} rays: {} hit its parts now; physics ray: {} hit it, {} hit something else",
+				req.id, actor->GetDisplayFullName(), req.form_id, actor->IsDead() ? " (dead)" : "",
+				(res.flags & GMSKY_HBA_IN_WORLD) ? ", parts in the physics world" : ", parts NOT in the physics world", parts.size(), res.count, now,
+				onNpc, other);
+		}
+
 		void Measure(RE::Actor* a_actor, float a_dist, const std::vector<Part>& a_parts, std::unordered_map<RE::FormID, Track>& a_seen)
 		{
 			++g_sec.actorFrames;
@@ -409,6 +570,9 @@ namespace gmsky::Hitboxes
 			}
 		}
 		g_tracks = std::move(seen);
+		if (a_origin.epoch != 0) {
+			AnswerHitTest(a_origin, a_frame);
+		}
 		if (a_origin.epoch != 0) {
 			g_out.origin_epoch = a_origin.epoch;
 			g_out.skyrim_frame = a_frame;

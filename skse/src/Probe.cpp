@@ -8,6 +8,7 @@
 #include "Body.h"
 #include "Camera.h"
 #include "Collision.h"
+#include "Combat.h"
 #include "Draw.h"
 #include "Hitboxes.h"
 #include "Hud.h"
@@ -223,6 +224,7 @@ namespace gmsky::Probe
 		Hud::PerFrame(a_player, Arms::Live());
 		Actors::PerFrame(a_player, g_origin, g_frame);
 		Hitboxes::PerFrame(a_player, g_origin, g_frame);
+		Combat::PerFrame(a_player, g_origin, Puppet::IsActive());
 
 		g_logTimer += a_delta;
 		if (g_logTimer >= 1.0f) {
@@ -239,6 +241,7 @@ namespace gmsky::Probe
 			Hud::LogSecond();
 			Actors::LogSecond();
 			Hitboxes::LogSecond();
+			Combat::LogSecond();
 			g_logTimer = 0.0f;
 		}
 	}

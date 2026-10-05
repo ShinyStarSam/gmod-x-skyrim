@@ -92,7 +92,20 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   the overlay) and no camera movement while it's out (`gmsky_cursor_speed`). The physics gun's
   wheel pushes / pulls a held prop. Not done: typing in the spawn menu's search box, the C menu.
 
+- **Shooting Skyrim's NPCs** (Phase 3, tested in game 2026-10-05, tests 56-60): every Garry's Mod
+  weapon that fires bullets, the crowbar and the RPG hit Skyrim's NPCs through invisible stand-ins
+  shaped like Skyrim's own per-bone hitboxes (the copy matches Skyrim's on 99.3-100% of test
+  rays, `gmsky_hitbox_test`), and the hits go through Skyrim's own hit system: NPCs bleed, react,
+  fight back and die. Damage × 3, head shots × 2 more (`gmsky_damage_scale`,
+  `gmsky_headshot_scale`). You bump into NPCs like Garry's Mod's own; they shove you aside.
+
 ## What doesn't work yet
+
+- Garry's Mod's world objects and effects are invisible in Skyrim (grenades, rockets, AR2 balls,
+  explosions, tracers, the physgun beam): only the hands, weapon and HUD are drawn.
+- Grenades and AR2 balls fall through Skyrim's world and don't hurt NPCs; the physgun can't grab
+  NPCs or corpses (Garry's Mod's physics doesn't see Skyrim's world or NPCs).
+- Skyrim's NPCs can't hurt you yet; shooting corpses doesn't move them yet.
 
 - Quest markers and locations: Skyrim's compass is hidden while the overlay is on, and HOLOHUD's
   compass and minimap don't show Skyrim's markers yet (planned). No stamina / magicka display.

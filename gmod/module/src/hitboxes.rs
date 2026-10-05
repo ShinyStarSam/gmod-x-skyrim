@@ -318,6 +318,139 @@ impl Store {
     pub fn actor(&self, id: u32) -> Option<&Actor> {
         self.actors.iter().find(|a| a.id == id)
     }
+
+    /// The player's box (feet at `feet`, half width `ext`, `height` tall) inside living NPCs'
+    /// hulls (test 58: an NPC walking into the player passed through): the horizontal way out of
+    /// the deepest overlap, along the shorter axis, as (direction x, y, depth, actor id).
+    pub fn push_out(&self, feet: [f64; 3], ext: f64, height: f64) -> Option<([f64; 2], f64, u32)> {
+        let mut best: Option<([f64; 2], f64, u32)> = None;
+        for a in &self.actors {
+            let Some(Shape::Box { lo, hi }) = a.body else { continue };
+            if feet[2] >= hi[2] || feet[2] + height <= lo[2] {
+                continue;
+            }
+            // How far to move along -x, +x, -y, +y to be clear of the hull.
+            let ways = [
+                ([-1.0, 0.0], feet[0] + ext - lo[0]),
+                ([1.0, 0.0], hi[0] - (feet[0] - ext)),
+                ([0.0, -1.0], feet[1] + ext - lo[1]),
+                ([0.0, 1.0], hi[1] - (feet[1] - ext)),
+            ];
+            if ways.iter().any(|w| w.1 <= 0.0) {
+                continue; // not overlapping
+            }
+            let (dir, depth) = ways.iter().copied().min_by(|x, y| x.1.total_cmp(&y.1)).unwrap();
+            if best.map_or(true, |b| depth > b.1) {
+                best = Some((dir, depth, a.id));
+            }
+        }
+        best
+    }
+}
+
+// ---- 3c-3: the hitbox test (gmsky_hitbox_test, DESIGN.md "3c-3 in detail") ----------------------
+
+pub const TEST_N: usize = 21; // rays per side
+
+/// The rays laid over an actor and Garry's Mod's own answers (fraction, group) to them.
+pub struct TestPlan {
+    pub rays: Vec<([f64; 3], [f64; 3])>, // start, whole ray; relative to the anchor
+    pub gmod: Vec<Option<(f64, u8)>>,
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+fn unit(a: [f64; 3]) -> Option<[f64; 3]> {
+    let l = len(a);
+    (l > 1e-9).then(|| [a[0] / l, a[1] / l, a[2] / l])
+}
+
+/// A TEST_N × TEST_N grid of parallel rays along `fwd` (the view), square to it, covering the
+/// actor's parts, from in front of it to behind it.
+pub fn plan_test(actor: &Actor, fwd: [f64; 3]) -> Option<TestPlan> {
+    let f = unit(fwd)?;
+    let right = unit(cross(f, [0.0, 0.0, 1.0])).unwrap_or([1.0, 0.0, 0.0]);
+    let up = cross(right, f);
+    let c = [(actor.lo[0] + actor.hi[0]) * 0.5, (actor.lo[1] + actor.hi[1]) * 0.5, (actor.lo[2] + actor.hi[2]) * 0.5];
+    let r = len(sub(actor.hi, actor.lo)) * 0.5;
+    let back = r + 16.0;
+    let mut plan = TestPlan { rays: Vec::new(), gmod: Vec::new() };
+    for i in 0..TEST_N {
+        for j in 0..TEST_N {
+            let u = -r + 2.0 * r * i as f64 / (TEST_N - 1) as f64;
+            let v = -r + 2.0 * r * j as f64 / (TEST_N - 1) as f64;
+            let o = [
+                c[0] - f[0] * back + right[0] * u + up[0] * v,
+                c[1] - f[1] * back + right[1] * u + up[1] * v,
+                c[2] - f[2] * back + right[2] * u + up[2] * v,
+            ];
+            let d = [f[0] * back * 2.0, f[1] * back * 2.0, f[2] * back * 2.0];
+            plan.gmod.push(actor.trace(o, d, [0.0; 3], false).map(|(t, _, g, _)| (t, g)));
+            plan.rays.push((o, d));
+        }
+    }
+    Some(plan)
+}
+
+/// Garry's Mod's answers against Skyrim's (its parts that frame, and its own physics ray).
+pub fn report(plan: &TestPlan, res: &gmsky_protocol::HitTestResult) -> String {
+    use gmsky_protocol::{HTH_FAILED, HTH_NOTHING, HTH_THIS_NPC};
+    let n = (res.count as usize).min(plan.rays.len());
+    let (mut both, mut only_g, mut only_s, mut neither, mut same_group) = (0, 0, 0, 0, 0);
+    let (mut diff_sum, mut diff_max) = (0.0f64, 0.0f64);
+    let (mut hk_nothing, mut hk_npc, mut hk_other, mut hk_failed) = (0, 0, 0, 0);
+    let mut layers: std::collections::BTreeMap<u8, u32> = Default::default();
+    let (mut hk_vs_now, mut hk_diff_sum, mut hk_diff_max) = (0, 0.0f64, 0.0f64);
+    for i in 0..n {
+        let l = len(plan.rays[i].1);
+        let a = &res.answers[i];
+        let s = (a.now_t >= 0.0).then(|| (a.now_t as f64, a.now_group));
+        match (plan.gmod[i], s) {
+            (Some((tg, gg)), Some((ts, gs))) => {
+                both += 1;
+                same_group += (gg == gs) as u32;
+                let d = (tg - ts).abs() * l;
+                diff_sum += d;
+                diff_max = diff_max.max(d);
+            }
+            (Some(_), None) => only_g += 1,
+            (None, Some(_)) => only_s += 1,
+            (None, None) => neither += 1,
+        }
+        match a.havok {
+            HTH_NOTHING => hk_nothing += 1,
+            HTH_THIS_NPC => {
+                hk_npc += 1;
+                *layers.entry(a.havok_layer).or_default() += 1;
+                if let Some((ts, _)) = s {
+                    hk_vs_now += 1;
+                    let d = (a.havok_t as f64 - ts).abs() * l;
+                    hk_diff_sum += d;
+                    hk_diff_max = hk_diff_max.max(d);
+                }
+            }
+            HTH_FAILED => hk_failed += 1,
+            _ => hk_other += 1,
+        }
+    }
+    let agree = both + neither;
+    let layer_text: Vec<String> = layers.iter().map(|(k, v)| format!("layer {k}: {v}")).collect();
+    format!(
+        "{n} rays over {} parts{}{}: Garry's Mod vs Skyrim's parts now: {agree} agree ({:.1}%; {both} hit both, {neither} missed both), \
+         {only_g} only Garry's Mod, {only_s} only Skyrim; same body group {same_group}/{both}; hit point apart {:.2} avg, {:.2} max (Garry's Mod units) | \
+         Skyrim's physics ray: {hk_npc} hit this NPC ({}), {hk_other} something else first, {hk_nothing} nothing, {hk_failed} failed; \
+         where it hit this NPC and its parts were hit: {:.2} avg, {:.2} max apart over {hk_vs_now} rays",
+        res.parts,
+        if res.flags & HBA_DEAD != 0 { ", dead" } else { "" },
+        if res.flags & gmsky_protocol::HBA_IN_WORLD != 0 { ", parts in the physics world" } else { ", parts NOT in the physics world" },
+        100.0 * agree as f64 / n.max(1) as f64,
+        if both > 0 { diff_sum / both as f64 } else { 0.0 },
+        diff_max,
+        if layer_text.is_empty() { "-".to_string() } else { layer_text.join(", ") },
+        if hk_vs_now > 0 { hk_diff_sum / hk_vs_now as f64 } else { 0.0 },
+        hk_diff_max,
+    )
 }
 
 fn part_from(p: &HitPart) -> Part {
@@ -395,6 +528,37 @@ mod tests {
     }
 
     #[test]
+    fn hit_test_plan_and_report() {
+        use gmsky_protocol::{HitTestResult, HTH_NOTHING, HTH_THIS_NPC};
+        let mut s = Store::default();
+        s.load(&person(), 7, None);
+        let a = s.actor(0x1234).unwrap();
+        let plan = plan_test(a, [1.0, 0.0, 0.0]).unwrap();
+        assert_eq!(plan.rays.len(), TEST_N * TEST_N);
+        let hits = plan.gmod.iter().filter(|x| x.is_some()).count();
+        assert!(hits > 20 && hits < 300, "{hits} of 441 rays hit the made-up person");
+        assert!(plan.gmod.iter().flatten().any(|x| x.1 == HBG_HEAD) && plan.gmod.iter().flatten().any(|x| x.1 == HBG_CHEST));
+        // Skyrim answering exactly the same: 100%, 0 apart.
+        let mut res = HitTestResult::default();
+        res.count = 441;
+        res.parts = 3;
+        for (i, g) in plan.gmod.iter().enumerate() {
+            res.answers[i].now_t = g.map_or(-1.0, |x| x.0 as f32);
+            res.answers[i].now_group = g.map_or(0, |x| x.1);
+            res.answers[i].havok = if g.is_some() { HTH_THIS_NPC } else { HTH_NOTHING };
+            res.answers[i].havok_t = res.answers[i].now_t;
+            res.answers[i].havok_layer = 8;
+        }
+        let text = report(&plan, &res);
+        assert!(text.contains("441 agree (100.0%") && text.contains("0 only Garry's Mod, 0 only Skyrim") && text.contains(&format!("same body group {hits}/{hits}")), "{text}");
+        assert!(text.contains(&format!("{hits} hit this NPC (layer 8: {hits})")), "{text}");
+        // One ray Skyrim misses: 440 agree.
+        let k = plan.gmod.iter().position(|x| x.is_some()).unwrap();
+        res.answers[k].now_t = -1.0;
+        assert!(report(&plan, &res).contains("440 agree") && report(&plan, &res).contains("1 only Garry's Mod"));
+    }
+
+    #[test]
     fn store_traces_parts_and_body() {
         let mut s = Store::default();
         s.load(&person(), 7, None);
@@ -443,6 +607,14 @@ mod tests {
         let c = s3.actor(0x1234).unwrap();
         assert!(c.trace([-100.0, 0.0, 36.0], [200.0, 0.0, 0.0], [16.0, 16.0, 36.0], false).is_none());
         assert!(c.trace([-100.0, 0.0, 64.0], [200.0, 0.0, 0.0], [0.0; 3], false).is_some());
+        // Push-out: the player 4 units into the hull's -x face is pushed back along -x by 4.
+        let (dir, depth, id) = s2.push_out([-24.0, 0.0, 0.0], 16.0, 72.0).unwrap();
+        assert!(dir == [-1.0, 0.0] && near(depth, 4.0) && id == 0x1234, "{dir:?} {depth}");
+        // Just clear (touching) or above its top: nothing.
+        assert!(s2.push_out([-28.0, 0.0, 0.0], 16.0, 72.0).is_none());
+        assert!(s2.push_out([0.0, 0.0, 70.0], 16.0, 72.0).is_none());
+        // Corpses (no hull) never push.
+        assert!(s3.push_out([0.0, 0.0, 0.0], 16.0, 72.0).is_none());
         // Nearest part to a point just right of the head.
         let (g, bone, d) = a.part_at([7.0, 0.0, 64.0]).unwrap();
         assert_eq!((g, bone), (HBG_HEAD, 1));

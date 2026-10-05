@@ -16,7 +16,7 @@ pub const RING_BYTES: usize = 16 << 20;
 pub const MAP_SIZE: usize = RING_OFFSET + RING_BYTES;
 pub const MAGIC: u32 = 0x594B_534D;
 pub const MAGIC_INIT: u32 = 0x5449_4E49;
-pub const VERSION: u32 = 11; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain; 8: collision ring; 9: view punch; 10: Actors; 11: Hitboxes
+pub const VERSION: u32 = 13; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain; 8: collision ring; 9: view punch; 10: Actors; 11: Hitboxes; 12: hit test; 13: hit events
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
 
 pub const PF_ON_GROUND: u32 = 0x1;
@@ -290,6 +290,117 @@ impl Default for Hitboxes {
     }
 }
 
+/// Hitbox test (Phase 3 step 3c-3). See gmsky_protocol.h.
+pub const HT_MAX_RAYS: usize = 441;
+pub const HTH_NOTHING: u8 = 0;
+pub const HTH_THIS_NPC: u8 = 1;
+pub const HTH_OTHER: u8 = 2;
+pub const HTH_FAILED: u8 = 3;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct HitTestRay {
+    pub o: [f32; 3],
+    pub d: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HitTestRequest {
+    pub id: u32,
+    pub form_id: u32,
+    pub count: u32,
+    pub origin_epoch: u32,
+    pub rays: [HitTestRay; HT_MAX_RAYS],
+}
+
+impl Default for HitTestRequest {
+    fn default() -> Self {
+        HitTestRequest { id: 0, form_id: 0, count: 0, origin_epoch: 0, rays: [HitTestRay::default(); HT_MAX_RAYS] }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct HitTestAnswer {
+    pub now_t: f32,
+    pub havok_t: f32,
+    pub now_group: u8,
+    pub havok: u8,
+    pub havok_layer: u8,
+    pub reserved0: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HitTestResult {
+    pub id: u32,
+    pub form_id: u32,
+    pub count: u32,
+    pub flags: u32,
+    pub skyrim_frame: u64,
+    pub parts: u32,
+    pub reserved0: u32,
+    pub answers: [HitTestAnswer; HT_MAX_RAYS],
+}
+
+impl Default for HitTestResult {
+    fn default() -> Self {
+        HitTestResult { id: 0, form_id: 0, count: 0, flags: 0, skyrim_frame: 0, parts: 0, reserved0: 0,
+                        answers: [HitTestAnswer::default(); HT_MAX_RAYS] }
+    }
+}
+
+/// Hits on Skyrim's NPCs (Phase 3 step 3d): a ring of events, see gmsky_protocol.h.
+pub const EV_MAX: usize = 64;
+pub const HITK_OTHER: u8 = 0;
+pub const HITK_BULLET: u8 = 1;
+pub const HITK_MELEE: u8 = 2;
+pub const HITK_EXPLOSION: u8 = 3;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct HitEvent {
+    pub form_id: u32,
+    pub damage: f32,
+    pub gmod_damage: f32,
+    pub pos: [f32; 3],
+    pub dir: [f32; 3],
+    pub force: f32,
+    pub dmg_type: u32,
+    pub origin_epoch: u32,
+    pub group: u8,
+    pub bone: u8,
+    pub kind: u8,
+    pub flags: u8,
+}
+
+#[repr(C)]
+pub struct HitEvents {
+    pub head: AtomicU32,
+    pub session: AtomicU32,
+    ev: UnsafeCell<[HitEvent; EV_MAX]>,
+}
+
+// Safety: one writer (Garry's Mod) by protocol; readers only read slots behind `head`.
+unsafe impl Sync for HitEvents {}
+
+impl HitEvents {
+    /// Writer (Garry's Mod): appends an event; returns the new head.
+    pub fn push(&self, e: &HitEvent) -> u32 {
+        self.session.store(std::process::id(), Ordering::Relaxed);
+        let h = self.head.load(Ordering::Relaxed);
+        unsafe { std::ptr::write_volatile((self.ev.get() as *mut HitEvent).add(h as usize % EV_MAX), *e) };
+        fence(Ordering::Release);
+        self.head.store(h.wrapping_add(1), Ordering::Release);
+        h.wrapping_add(1)
+    }
+    /// Reader (tests; Skyrim has its own): event number i (0-based).
+    pub fn get(&self, i: u32) -> HitEvent {
+        unsafe { std::ptr::read_volatile((self.ev.get() as *const HitEvent).add(i as usize % EV_MAX)) }
+    }
+}
+
 /// A latest-value slot guarded by a seqlock. `seq == 0` means never written.
 #[repr(C)]
 pub struct Slot<T> {
@@ -347,6 +458,9 @@ pub struct Shared {
     pub terrain: Slot<Terrain>,
     pub actors: Slot<Actors>,
     pub hitboxes: Slot<Hitboxes>,
+    pub hit_test_request: Slot<HitTestRequest>,
+    pub hit_test_result: Slot<HitTestResult>,
+    pub hit_events: HitEvents,
 }
 
 // ---- Layout checks: the same numbers as gmsky_protocol.h ----
@@ -398,7 +512,18 @@ const _: () = {
     assert!(offset_of!(Hitboxes, actors) == 32);
     assert!(size_of::<Hitboxes>() == 32 + 16 * HB_MAX_ACTORS + 32 * HB_MAX_PARTS);
     assert!(offset_of!(Shared, hitboxes) == 21952);
-    assert!(size_of::<Shared>() == 21952 + 8 + 16800);
+    assert!(size_of::<HitTestRay>() == 24);
+    assert!(size_of::<HitTestRequest>() == 16 + 24 * HT_MAX_RAYS);
+    assert!(size_of::<HitTestAnswer>() == 12);
+    assert!(offset_of!(HitTestResult, answers) == 32);
+    assert!(size_of::<HitTestResult>() == 32 + 12 * HT_MAX_RAYS + 4);
+    assert!(offset_of!(Shared, hit_test_request) == 38760);
+    assert!(offset_of!(Shared, hit_test_result) == 38760 + 8 + 10600);
+    assert!(size_of::<HitEvent>() == 52);
+    assert!(offset_of!(HitEvent, dmg_type) == 40);
+    assert!(size_of::<HitEvents>() == 8 + 52 * EV_MAX);
+    assert!(offset_of!(Shared, hit_events) == 54704);
+    assert!(size_of::<Shared>() == 54704 + 3336);
     assert!(size_of::<Shared>() <= SLOTS_SIZE);
     assert!(size_of::<ColMsgHeader>() == 8);
     assert!(size_of::<ColClear>() == 8);

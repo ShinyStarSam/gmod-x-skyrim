@@ -181,7 +181,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 34] = [
+    let funcs: [(&str, lua::CFn); 38] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -216,6 +216,10 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("HitboxActors", l_hitbox_actors),
         ("HitTrace", l_hit_trace),
         ("HitPartAt", l_hit_part_at),
+        ("HitPushOut", l_hit_push_out),
+        ("HitTestStart", l_hit_test_start),
+        ("HitTestReport", l_hit_test_report),
+        ("SendHit", l_send_hit),
     ];
     for (name, f) in funcs {
         (a.pushnumber)(l, side as f64); // upvalue 1 = side
@@ -646,6 +650,127 @@ unsafe extern "C" fn l_hit_part_at(l: *mut State) -> c_int {
             }
             None => 0,
         }
+    })
+}
+
+/// gmsky.HitPushOut(x, y, z, ext, height) -> dx, dy, depth, id: the player's box (feet at x, y, z,
+/// half width ext) inside a living NPC's hull: the horizontal way out of the deepest overlap and
+/// how deep it is. Nothing if it overlaps none.
+unsafe extern "C" fn l_hit_push_out(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let n = |i: c_int| (a.tonumber)(l, i);
+        let found = with_hitboxes(|st, anchor| st.push_out([n(1) - anchor[0], n(2) - anchor[1], n(3) - anchor[2]], n(4), n(5))).flatten();
+        match found {
+            Some((dir, depth, id)) => {
+                (a.pushnumber)(l, dir[0]);
+                (a.pushnumber)(l, dir[1]);
+                (a.pushnumber)(l, depth);
+                (a.pushnumber)(l, id as f64);
+                4
+            }
+            None => 0,
+        }
+    })
+}
+
+/// Phase 3 step 3c-3: a hitbox test waiting for Skyrim's answer.
+struct PendingTest {
+    id: u32,
+    form_id: u32,
+    plan: hitboxes::TestPlan,
+    started_ms: u64,
+    table_age_ms: f64,
+}
+static HIT_TEST: Mutex<Option<PendingTest>> = Mutex::new(None);
+
+/// gmsky.HitTestStart(id, fx, fy, fz) -> test id, or false and why: lays a 21 × 21 grid of rays along
+/// the view (f) over actor id, answers them from Garry's Mod's copy and asks Skyrim (server only).
+unsafe extern "C" fn l_hit_test_start(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let n = |i: c_int| (a.tonumber)(l, i);
+        let id = n(1) as u32;
+        let planned = with_hitboxes(|st, _| {
+            let age = if st.qpc > 0 { qpc_ms(now_qpc() - st.qpc) } else { -1.0 };
+            (st.actor(id).and_then(|act| hitboxes::plan_test(act, [n(2), n(3), n(4)])), st.origin_epoch, age)
+        });
+        let why = match (planned, writable_mapping()) {
+            (Some((Some(plan), epoch, age)), Some(m)) => {
+                let mut req = Box::new(gmsky_protocol::HitTestRequest::default());
+                // Never 0, and different after a Garry's Mod restart (Skyrim answers each id once).
+                req.id = (now_ms() as u32) | 1;
+                req.form_id = id;
+                req.origin_epoch = epoch;
+                req.count = plan.rays.len().min(gmsky_protocol::HT_MAX_RAYS) as u32;
+                for (i, (o, d)) in plan.rays.iter().take(req.count as usize).enumerate() {
+                    req.rays[i] = gmsky_protocol::HitTestRay { o: [o[0] as f32, o[1] as f32, o[2] as f32], d: [d[0] as f32, d[1] as f32, d[2] as f32] };
+                }
+                m.shared().hit_test_request.write(&req);
+                let test_id = req.id;
+                *HIT_TEST.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(PendingTest { id: test_id, form_id: id, plan, started_ms: now_ms(), table_age_ms: age });
+                (a.pushnumber)(l, test_id as f64);
+                return 1;
+            }
+            (Some((None, _, _)), _) => "that NPC has no hitboxes in the newest table",
+            (None, _) => "no hitbox table for the current origin",
+            (_, None) => "this process doesn't write the Garry's Mod side",
+        };
+        (a.pushboolean)(l, 0);
+        lua::push_str(a, l, why);
+        2
+    })
+}
+
+/// gmsky.HitTestReport() -> text: the comparison once Skyrim has answered the pending test (or
+/// "no answer" after 2 s); nothing while waiting or when no test is pending.
+unsafe extern "C" fn l_hit_test_report(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let mut pending = HIT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(p) = pending.as_ref() else { return 0 };
+        let res = mapping().ok().and_then(|m| m.shared().hit_test_result.read()).map(|(r, _)| r);
+        let text = match res {
+            Some(r) if r.id == p.id => format!("hitbox test {:08X}: {}; Garry's Mod's table was {:.1} ms old; answered after {} ms",
+                p.form_id, hitboxes::report(&p.plan, &r), p.table_age_ms, now_ms().saturating_sub(p.started_ms)),
+            _ if now_ms().saturating_sub(p.started_ms) > 2000 => format!("hitbox test {:08X}: no answer from Skyrim in 2 s", p.form_id),
+            _ => return 0,
+        };
+        *pending = None;
+        lua::push_str(a, l, &text);
+        1
+    })
+}
+
+/// gmsky.SendHit(id, damage, gmod_damage, x, y, z, dx, dy, dz, force, dmg_type, group, bone, kind)
+/// -> events sent so far, or nothing: a hit on Skyrim's NPC id for Skyrim (Phase 3 step 3d).
+/// x, y, z: where it landed (world units); d: its direction. Server side; nothing before an origin.
+unsafe extern "C" fn l_send_hit(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let n = |i: c_int| (a.tonumber)(l, i);
+        let (epoch, anchor) = {
+            let link = LINK.lock().unwrap_or_else(|e| e.into_inner());
+            (link.epoch, link.anchor)
+        };
+        let Some(m) = writable_mapping() else { return 0 };
+        if epoch == 0 {
+            return 0;
+        }
+        let e = gmsky_protocol::HitEvent {
+            form_id: n(1) as u32,
+            damage: n(2) as f32,
+            gmod_damage: n(3) as f32,
+            pos: [(n(4) - anchor[0]) as f32, (n(5) - anchor[1]) as f32, (n(6) - anchor[2]) as f32],
+            dir: [n(7) as f32, n(8) as f32, n(9) as f32],
+            force: n(10) as f32,
+            dmg_type: n(11) as u32,
+            origin_epoch: epoch,
+            group: n(12) as u8,
+            bone: n(13) as u8,
+            kind: n(14) as u8,
+            flags: 0,
+        };
+        let head = m.shared().hit_events.push(&e);
+        (a.pushnumber)(l, head as f64);
+        1
     })
 }
 

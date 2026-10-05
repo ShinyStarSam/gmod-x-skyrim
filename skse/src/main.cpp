@@ -1,5 +1,6 @@
 #include "Body.h"
 #include "Camera.h"
+#include "Combat.h"
 #include "Draw.h"
 #include "Input.h"
 #include "Link.h"
@@ -32,6 +33,7 @@ namespace
 			gmsky::Camera::Install();
 			gmsky::Body::Install();
 			gmsky::Draw::Install();
+			gmsky::Combat::Install();
 			break;
 		case SKSE::MessagingInterface::kPostLoadGame:
 		case SKSE::MessagingInterface::kNewGame:

@@ -171,6 +171,8 @@ function ply:SetVelocity() end
 function ply:GetGroundEntity() return nil end
 function ply:GetAimVector() return Vector(1, 0, 0) end
 function ply:GetClass() return "player" end
+function ply:GetHull() return Vector(-16, -16, 0), Vector(16, 16, 72) end
+function ply:GetHullDuck() return Vector(-16, -16, 0), Vector(16, 16, 36) end
 -- Weapons (step 3a): HARNESS_WEAPONS = list made with HARNESS_WEAPON, HARNESS_ACTIVE = held one.
 function HARNESS_WEAPON(class, slot, pos)
 	return { GetClass = function() return class end, GetSlot = function() return slot end,
@@ -602,14 +604,66 @@ fn main() {
                 HARNESS_CVARS.gmsky_actor_solid = off \
                 return string.format('%.1f %s', tr.HitPos.x - ax, tostring(none))");
             check(r == Ok(Some("-24.0 nil".into())), &format!("stand-ins: the player bumps into the hull; gmsky_actor_solid 0 walks through: {r:?}"));
+            // An NPC walked into the player (test 58): the player, 4 units inside the hull (around the
+            // parts here: x -8..8), is shoved out along -x at 4 / 0.08 = 50 units/s; clear of it, nothing.
+            let r = lua.run(ls, "local ax, ay, az = gmsky.Anchor() \
+                local function run(x) local v = Vector(0, 0, 0) local mv = { GetOrigin = function() return Vector(ax + x, ay, az) end, \
+                    GetVelocity = function() return v end, SetVelocity = function(_, nv) v = nv end, SetOrigin = function() end } \
+                    hook.Run('SetupMove', HARNESS_PLY, mv) return v end \
+                local held = gmsky.terrain.holding gmsky.terrain.holding = nil                 local a, b = run(-20), run(-30) gmsky.terrain.holding = held \
+                return string.format('%.1f %.1f %.1f', a.x, a.y, b.x)");
+            check(r == Ok(Some("-50.0 0.0 0.0".into())), &format!("stand-ins: an NPC walking into the player shoves them out: {r:?}"));
             // Damage on the stand-in: logged with the body part.
             lua.run(ls, "local ax, ay, az = gmsky.Anchor() HARNESS_SI:OnTakeDamage({ \
                 GetDamagePosition = function() return Vector(ax - 5, ay, az + 64) end, GetDamage = function() return 75 end, \
                 GetDamageType = function() return 2 end, GetAttacker = function() return HARNESS_PLY end, \
-                GetInflictor = function() return HARNESS_PLY end })").unwrap();
+                GetInflictor = function() return HARNESS_PLY end, GetDamageForce = function() return Vector(300, 0, 0) end })").unwrap();
+            // Step 3d: the hit is in the queue for Skyrim: 75 x 3 (gmsky_damage_scale) x 2 (head).
+            {
+                let ev = &sky.shared().hit_events;
+                let head = ev.head.load(std::sync::atomic::Ordering::Acquire);
+                let e = ev.get(head.wrapping_sub(1));
+                check(head >= 1 && e.form_id == 0xFF00ABCD && (e.damage - 450.0).abs() < 1e-3 && (e.gmod_damage - 75.0).abs() < 1e-3
+                        && e.group == 1 && e.kind == gmsky_protocol::HITK_BULLET && e.dmg_type == 2 && e.origin_epoch == 1
+                        && (e.pos[0] + 5.0).abs() < 1e-3 && e.pos[1].abs() < 1e-3 && (e.pos[2] - 64.0).abs() < 1e-3
+                        && (e.dir[0] - 1.0).abs() < 1e-6 && (e.force - 300.0).abs() < 1e-3,
+                    &format!("hit event for Skyrim: head {head}, {e:?}"));
+                // An explosion: no body part, x3 only.
+                lua.run(ls, "local ax, ay, az = gmsky.Anchor() HARNESS_SI:OnTakeDamage({ \
+                    GetDamagePosition = function() return Vector(ax - 5, ay, az + 64) end, GetDamage = function() return 40 end, \
+                    GetDamageType = function() return 64 end, GetAttacker = function() return HARNESS_PLY end, \
+                    GetInflictor = function() return HARNESS_PLY end, GetDamageForce = function() return Vector(0, 0, 0) end })").unwrap();
+                let e = ev.get(ev.head.load(std::sync::atomic::Ordering::Acquire).wrapping_sub(1));
+                check(e.kind == gmsky_protocol::HITK_EXPLOSION && e.group == 0 && e.bone == 255 && (e.damage - 120.0).abs() < 1e-3,
+                    &format!("hit event: an explosion has no body part and isn't a head shot: {e:?}"));
+            }
             let r = lua.run(ls, "return gmsky.standins.Status(HARNESS_PLY)");
-            check(r.as_ref().map_or(false, |v| v.as_deref().map_or(false, |v| v.contains("stand-ins 1 (+1 -0") && v.contains("damage taken 1"))),
+            check(r.as_ref().map_or(false, |v| v.as_deref().map_or(false, |v| v.contains("stand-ins 1 (+1 -0") && v.contains("damage taken 2 (sent to Skyrim 2)"))),
                 &format!("stand-ins: status line: {r:?}"));
+            // Step 3c-3: gmsky_hitbox_test round trip. The harness plays Skyrim: it answers every ray
+            // as "missed", so the report must show Garry's Mod's hits as "only Garry's Mod".
+            lua.run(ls, "local real = util.TraceLine util.TraceLine = function() return { Hit = true, Entity = HARNESS_SI, HitPos = Vector() } end \
+                HARNESS_SI.GetClass = function() return 'gmsky_actor' end \
+                concommand._c.gmsky_hitbox_test(HARNESS_PLY) util.TraceLine = real").unwrap();
+            match sky.shared().hit_test_request.read() {
+                Some((req, _)) => {
+                    check(req.id != 0 && req.form_id == 0xFF00ABCD && req.count == 441 && req.origin_epoch == 1,
+                        &format!("hitbox test: request sent (id {}, {:08X}, {} rays, epoch {})", req.id, req.form_id, req.count, req.origin_epoch));
+                    let mut res = Box::new(gmsky_protocol::HitTestResult::default());
+                    res.id = req.id;
+                    res.form_id = req.form_id;
+                    res.count = req.count;
+                    res.parts = 3;
+                    for i in 0..441 {
+                        res.answers[i].now_t = -1.0;
+                    }
+                    sky.shared().hit_test_result.write(&res);
+                }
+                None => check(false, "hitbox test: request sent"),
+            }
+            let r = lua.run(ls, "hook.Run('Tick') return tostring(HARNESS_PRINTED)");
+            check(r.as_ref().map_or(false, |v| v.as_deref().map_or(false, |v| v.contains("hitbox test FF00ABCD: 441 rays over 3 parts") && v.contains(" only Garry's Mod, 0 only Skyrim"))),
+                &format!("hitbox test: report after Skyrim's answer: {r:?}"));
             // Skyrim stops sending it: removed.
             t.actor_count = 0;
             t.part_count = 0;
@@ -974,7 +1028,7 @@ fn main() {
     check(server_log.contains("terrain: hold released (noclip) after "), "gmod_server.log: noclip ends a hold");
     check(server_log.contains("terrain: hold released (no ground) after 1 ticks, speed (66, 0, 0) given back"),
           "gmod_server.log: a no-ground hold gives the speed back");
-    check(server_log.contains("stand-in for ? FF00ABCD: 3 parts") && server_log.contains("STAND-IN HIT ? FF00ABCD: head, 75.0 damage (type 2)"),
+    check(server_log.contains("stand-in for ? FF00ABCD: 3 parts") && server_log.contains("STAND-IN HIT ? FF00ABCD: bullet head, 75.0 damage (type 2) -> 450.0 Skyrim damage sent"),
           "gmod_server.log: stand-in made and its damage logged with the body part");
     check(server_log.contains("actor near: Bandit 0001A2B3 lvl 9 (hostile fighting)") && server_log.contains("actors: table dropped (2 actors)"),
           "gmod_server.log: actors appearing and the dropped table logged");

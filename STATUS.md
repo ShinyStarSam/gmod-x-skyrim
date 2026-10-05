@@ -67,7 +67,7 @@ Single-player and offline only.
 
 ## What works (verified in game, numbers in MODLOG.md)
 
-- **The link** (shared memory `Local\GmodSkyrim_v2`, protocol version 11 (step 3b: actors; 3c-2: hitboxes): grids relative to the anchor, 16 MB collision ring, view punch), disconnect detection, coordinate
+- **The link** (shared memory `Local\GmodSkyrim_v2`, protocol version 13 (3b: actors; 3c-2: hitboxes; 3c-3: hit test; 3d: hit events): grids relative to the anchor, 16 MB collision ring, view punch), disconnect detection, coordinate
   conventions, scale 64 / 120.5 = 0.5311.
 - **Playing from the Skyrim window:** W/A/S/D, Shift, Space, Ctrl, mouse look, **V = Garry's
   Mod noclip** (17 launches in test 21), E activates Skyrim objects, Esc/~/J/M/F9 reach Skyrim.
@@ -144,8 +144,14 @@ multisampling; hook 0.001 ms per frame; no crash.
   Mod's own binds (HOLOHUD's weapon menu shows), Q = spawn menu with a cursor driven from Skyrim.
   **3a works (tests 53-54).** **Step 3b works (test 55):** Skyrim's nearby actors reach Garry's Mod
   (protocol v10, log only); distances agree exactly in both logs. **3c-1 works (test 56):**
-  people have 19 per-bone capsules, wolves 22, following the animation. **3c-2 built, not tested
-  in game:** stand-ins in Garry's Mod with Skyrim's hitboxes (protocol v11).
+  people have 19 per-bone capsules, wolves 22, following the animation. **3c-2 works (tests 57-58):**
+  stand-ins in Garry's Mod with Skyrim's hitboxes; bullets, crowbar and explosions hit the body
+  parts; flat hull for bumping. **NPCs shove the player; 3c-3 works (test 59):**
+  the copy matches Skyrim's parts on 99.3-100% of rays. **3d-1 works (test 60):** hits hurt
+  Skyrim's NPCs through Skyrim's own hit function (× 3, head × 2; protocol v13). Not working
+  (for later, DESIGN.md "Found in test 60"): grenades, rockets, AR2 balls, explosions and the
+  physgun beam are invisible; grenades and AR2 balls fall through and don't hurt; physgun can't
+  grab NPCs.
   Future (user): stamina / magicka bars and quest markers, locations, enemies in HOLOHUD.
 
 ## Evidence (tests 33-37)
