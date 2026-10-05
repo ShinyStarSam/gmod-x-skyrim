@@ -22,6 +22,9 @@ S.damageScale = S.damageScale or CreateConVar("gmsky_damage_scale", "3", FCVAR_A
 	"Skyrim damage = Garry's Mod damage x this (hits on Skyrim's NPCs)")
 S.headScale = S.headScale or CreateConVar("gmsky_headshot_scale", "2", FCVAR_ARCHIVE,
 	"Extra damage multiplier for head shots on Skyrim's NPCs")
+-- Step 3d-2 (after test 63): Skyrim's ragdolls are pushed with Garry's Mod's own damage force.
+S.ragdollForce = S.ragdollForce or CreateConVar("gmsky_ragdoll_force", "3", FCVAR_ARCHIVE,
+	"Push on Skyrim's corpses = Garry's Mod's damage force x this (1 = as Garry's Mod pushes its own ragdolls; 3 chosen by the user, test 64)")
 S.stats = S.stats or { rays = 0, boxes = 0, hits = 0, ms = 0 }
 
 local GROUPS = { [0] = "generic", "head", "chest", "stomach", "left arm", "right arm", "left leg", "right leg", [10] = "gear" }
@@ -124,7 +127,7 @@ if SERVER then
 			local l = d:Length()
 			dir = l > 0.001 and d * (1 / l) or Vector(1, 0, 0)
 		end
-		local sent = gmsky.SendHit(id, sdmg, gdmg, pos.x, pos.y, pos.z, dir.x, dir.y, dir.z, fl, dmg:GetDamageType(),
+		local sent = gmsky.SendHit(id, sdmg, gdmg, pos.x, pos.y, pos.z, dir.x, dir.y, dir.z, fl * S.ragdollForce:GetFloat(), dmg:GetDamageType(),
 			group or 0, bone or 255, kind)
 		S.sent = (S.sent or 0) + (sent and 1 or 0)
 		local a = gmsky.actors and gmsky.actors.byId[id]

@@ -108,7 +108,8 @@ function C.Open()
 	if C.open then return end
 	C.open, C.seen, C.since = true, false, RealTime()
 	gmsky.Log("console: F1 from Skyrim: " .. gmsky.ConsoleWindow(true))
-	RunConsoleCommand("showconsole")
+	-- (Test 63: RunConsoleCommand("showconsole") is refused from Lua; Garry's Mod's own key works.)
+	if not gui.IsConsoleVisible() then gmsky.Log("console: " .. gmsky.ConsoleKey()) end
 end
 
 -- Every frame (Think, and DrawOverlay in case Think stops while the console pauses the game).

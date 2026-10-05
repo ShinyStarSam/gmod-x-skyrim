@@ -475,11 +475,11 @@ fn main() {
             expect!(cstep(0, 0, 5, "HARNESS_ACTIVE = nil"), "-attack|", "physgun released");
             // F1 (after test 62): Garry's Mod's console; closes when it is closed or the window loses the front.
             lua.run(lc, "HARNESS_RT, HARNESS_FOCUS, HARNESS_CONSOLE = 0, true, false RealTime = function() return HARNESS_RT end                 system = { HasFocus = function() return HARNESS_FOCUS end } gui.IsConsoleVisible = function() return HARNESS_CONSOLE end                 HARNESS_REAL_RCC = RunConsoleCommand RunConsoleCommand = function(c) HARNESS_CMDS[#HARNESS_CMDS + 1] = 'run:' .. c end").unwrap();
-            expect!(cstep(IN_CONSOLE, 0, 5, ""), "run:showconsole|", "F1 = Garry's Mod's console");
+            expect!(cstep(IN_CONSOLE, 0, 5, ""), "|", "F1 = Garry's Mod's console (its key, posted by the module)");
             expect!(cstep(IN_CONSOLE, 0, 5, "HARNESS_CONSOLE = true"), "|", "F1 held: once only; console showing");
             expect!(cstep(0, 0, 5, "HARNESS_CONSOLE = false"), "|", "console closed in Garry's Mod");
             check(lua.run(lc, "return tostring(gmsky.console.open)") == Ok(Some("false".into())), "console: closed when Garry's Mod's console closes");
-            expect!(cstep(IN_CONSOLE, 0, 5, "HARNESS_CONSOLE = false"), "run:showconsole|", "F1 again");
+            expect!(cstep(IN_CONSOLE, 0, 5, "HARNESS_CONSOLE = false"), "|", "F1 again");
             expect!(cstep(0, 0, 5, "HARNESS_CONSOLE = true HARNESS_RT = 2 HARNESS_FOCUS = false"), "run:hideconsole|", "clicked back into Skyrim: console hidden");
             check(lua.run(lc, "return tostring(gmsky.console.open)") == Ok(Some("false".into())), "console: closed when Garry's Mod's window loses the front");
             lua.run(lc, "HARNESS_CONSOLE = false RunConsoleCommand = HARNESS_REAL_RCC").unwrap();
@@ -1110,7 +1110,7 @@ fn main() {
             && server_log.contains("HURT by ? 00000123: 4.0 Skyrim -> 4.0 Garry's Mod damage, magic, health 88 -> 84, armour 0 (attacker unknown)"),
           "gmod_server.log: each hurt from Skyrim logged");
     let client_log = std::fs::read_to_string(log_dir.join("gmod_client.log")).unwrap_or_default();
-    check(client_log.contains("console: F1 from Skyrim: no Garry's Mod window found") && client_log.contains("console: closed (the console was closed)")
+    check(client_log.contains("console: F1 from Skyrim: no Garry's Mod window found") && client_log.contains("console: no Garry's Mod window found") && client_log.contains("console: closed (the console was closed)")
             && client_log.contains("console: closed (Garry's Mod's window lost the front)"),
           "gmod_client.log: console opened and closed both ways");
     check(server_log.contains("respawn: a fight started; calm spot kept from 1.0 s ago") && server_log.contains("DIED (killed by ?)")

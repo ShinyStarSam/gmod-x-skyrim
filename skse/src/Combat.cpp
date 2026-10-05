@@ -6,7 +6,8 @@
 // ResolveHitPipeline / StandInWeapon / HitNode / ApplyHit): through Skyrim's own melee hit
 // function, so the NPC reacts, bleeds, gets angry and it counts as a crime like a Skyrim hit; a
 // vanilla weapon stands in for the impact effect and sound; explosions use plain damage and
-// Skyrim's explosion knock-back. Corpses: step 3d-2 (logged only here).
+// Skyrim's explosion knock-back. Step 3d-2: hits on corpses push the ragdoll (SkyCraft's
+// FlingRagdoll / UpdateFlings, MIT); a blast that kills throws the body.
 //
 // Step 3e (DESIGN.md "3e in detail"): Skyrim's NPCs hurting the player. Garry's Mod's health
 // decides, so while the puppet drives the Skyrim player is essential and topped back to full every
@@ -332,6 +333,141 @@ namespace gmsky::Combat
 			return root;
 		}
 
+		// ---- step 3d-2: pushing ragdolls the way Garry's Mod pushes its own (after test 63) ----
+		// The push is Garry's Mod's own damage force (kg x inch/s, times gmsky_ragdoll_force), as
+		// Havok kg x m/s. Bullets / melee: on the part hit, at the point hit (it spins as well as
+		// moves). Blasts: shared by mass, each body out from the blast from where it is (the limbs
+		// fly apart). SkyCraft's FlingRagdoll / UpdateFlings (MIT) for the body walk and the wait.
+		constexpr float kInchToMetre = 0.0254f;
+		constexpr float kMaxBodySpeed = 30.0f;  // m/s on any one body
+
+		struct Push
+		{
+			uint8_t bone{ 255 };     // part hit (the index in Hitboxes.cpp's walk); 255 = a blast: all bodies
+			RE::NiPoint3 point;      // Skyrim units: where the shot landed, or the blast's centre
+			RE::NiPoint3 dir;        // unit direction of the shot (not used for blasts)
+			float impulse{ 0.0f };   // Havok kg x m/s from Garry's Mod's force; 0 = none sent
+			float fallback{ 0.0f };  // m/s when there's no force
+		};
+
+		struct Pushed
+		{
+			int bodies{ 0 };
+			float mass{ 0.0f };   // kg
+			float speed{ 0.0f };  // m/s given (average for a blast)
+		};
+
+		float BulletPush(const GmskyHitEvent& a_ev) { return std::clamp(a_ev.gmod_damage * 0.25f, 1.5f, 15.0f); }
+		float BlastPush(const GmskyHitEvent& a_ev) { return std::clamp(a_ev.gmod_damage * 0.1f, 3.0f, 15.0f); }
+
+		Push PushFor(const GmskyHitEvent& a_ev, const RE::NiPoint3& a_point, const RE::NiPoint3& a_dir)
+		{
+			const bool blast = a_ev.kind == GMSKY_HITK_EXPLOSION;
+			return Push{ blast ? uint8_t(255) : a_ev.bone, a_point, a_dir, a_ev.force * kInchToMetre, blast ? BlastPush(a_ev) : BulletPush(a_ev) };
+		}
+
+		RE::NiPoint3 ToPoint(const RE::hkVector4& a_v)
+		{
+			alignas(16) float f[4];
+			_mm_store_ps(f, a_v.quad);
+			return { f[0], f[1], f[2] };
+		}
+
+		bool Dynamic(RE::hkpRigidBody* a_body)
+		{
+			using Motion = RE::hkpMotion::MotionType;
+			const auto type = a_body->motion.type.get();
+			return type != Motion::kFixed && type != Motion::kKeyframed && type != Motion::kCharacter && type != Motion::kInvalid;
+		}
+
+		Pushed PushRagdoll(RE::Actor* a_actor, const Push& a_push)
+		{
+			Pushed out;
+			auto* root = a_actor->Get3D();
+			auto* cell = a_actor->GetParentCell();
+			auto* world = cell ? cell->GetbhkWorld() : nullptr;
+			if (!root || !world) {
+				return out;
+			}
+			const float scale = RE::bhkWorld::GetWorldScale();  // Skyrim units -> Havok metres
+			std::vector<RE::hkpRigidBody*> bodies;
+			uint32_t i = 0;
+			RE::BSWriteLockGuard lock(world->worldLock);
+			RE::BSVisit::TraverseScenegraphCollision(root, [&](RE::bhkNiCollisionObject* a_collision) {
+				auto* rigid = a_collision && a_collision->body ? netimmerse_cast<RE::bhkRigidBody*>(a_collision->body.get()) : nullptr;
+				auto* body = rigid ? rigid->GetRigidBody() : nullptr;
+				if (!body) {
+					return RE::BSVisit::BSVisitControl::kContinue;
+				}
+				const bool mine = a_push.bone == 255 || i == a_push.bone;
+				++i;
+				if (mine && Dynamic(body)) {
+					bodies.push_back(body);
+				}
+				return a_push.bone == 255 || !mine ? RE::BSVisit::BSVisitControl::kContinue : RE::BSVisit::BSVisitControl::kStop;
+			});
+			for (auto* b : bodies) {
+				out.mass += b->motion.GetMass();
+			}
+			if (bodies.empty() || out.mass <= 0.0f) {
+				return out;
+			}
+			out.bodies = int(bodies.size());
+			const RE::NiPoint3 at{ a_push.point.x * scale, a_push.point.y * scale, a_push.point.z * scale };
+			if (a_push.bone != 255) {
+				auto* b = bodies.front();
+				const float speed = std::min(a_push.impulse > 0.0f ? a_push.impulse / out.mass : a_push.fallback, kMaxBodySpeed);
+				const float j = speed * out.mass;
+				b->ApplyLinearImpulse(RE::hkVector4(0.0f));  // wakes it (hkpEntity::Activate is protected here)
+				b->motion.ApplyPointImpulse(RE::hkVector4(a_push.dir.x * j, a_push.dir.y * j, a_push.dir.z * j, 0.0f), RE::hkVector4(at));
+				out.speed = speed;
+				return out;
+			}
+			const float speed = std::min(a_push.impulse > 0.0f ? a_push.impulse / out.mass : a_push.fallback, kMaxBodySpeed);
+			for (auto* b : bodies) {
+				RE::NiPoint3 d = ToPoint(b->motion.motionState.sweptTransform.centerOfMass1) - at;
+				const float len = d.Length();
+				d.z += 0.3f * len + 0.05f;  // a little up
+				const float l2 = d.Length();
+				d = l2 > 1e-4f ? d / l2 : RE::NiPoint3{ 0.0f, 0.0f, 1.0f };
+				const float j = speed * b->motion.GetMass();
+				b->ApplyLinearImpulse(RE::hkVector4(d.x * j, d.y * j, d.z * j, 0.0f));  // wakes it too
+			}
+			out.speed = speed;
+			return out;
+		}
+
+		// A hit that kills (a blast that catches someone, or a killing shot): the push waits until
+		// Skyrim has made the ragdoll (a moment after the death).
+		struct PendingPush
+		{
+			RE::ActorHandle actor;
+			Push push;
+			float timeLeft;
+			const char* why;
+		};
+		std::vector<PendingPush> g_pending;
+		uint32_t g_flung = 0, g_corpseLines = 0;
+
+		void UpdatePending(float a_delta)
+		{
+			for (auto it = g_pending.begin(); it != g_pending.end();) {
+				auto actor = it->actor.get();
+				it->timeLeft -= a_delta;
+				bool done = !actor || it->timeLeft <= 0.0f;
+				if (actor && actor->IsDead()) {
+					const auto r = PushRagdoll(actor.get(), it->push);
+					if (r.bodies > 0) {
+						logger::info("COMBAT {} threw the body of {} ({:08X}): {:.1f} kg m/s -> {:.1f} m/s on {} bodies ({:.0f} kg)", it->why,
+							actor->GetDisplayFullName(), actor->GetFormID(), it->push.impulse, r.speed, r.bodies, r.mass);
+						++g_flung;
+						done = true;
+					}
+				}
+				it = done ? g_pending.erase(it) : it + 1;
+			}
+		}
+
 		const char* KindName(uint8_t a_kind)
 		{
 			switch (a_kind) {
@@ -353,14 +489,31 @@ namespace gmsky::Combat
 				++g_sec.otherOrigin;
 				return;
 			}
-			if (actor->IsDead()) {
-				++g_sec.corpses;  // step 3d-2: push the ragdoll
-				return;
-			}
 			const double g[3] = { a_ev.pos[0], a_ev.pos[1], a_ev.pos[2] };
 			const auto s = GmodToSkyrim(g, kNoAnchor, a_origin.skyrim_origin);
 			RE::NiPoint3 hitPos{ float(s.x), float(s.y), float(s.z) };
 			RE::NiPoint3 dir{ a_ev.dir[0], a_ev.dir[1], a_ev.dir[2] };  // both games: Z up, same axes
+			if (actor->IsDead()) {
+				// Step 3d-2: no damage; the ragdoll is pushed (the part hit, or all of it by a blast).
+				++g_sec.corpses;
+				const bool blast = a_ev.kind == GMSKY_HITK_EXPLOSION;
+				const auto push = PushFor(a_ev, hitPos, dir);
+				const auto r = PushRagdoll(actor, push);
+				auto* node = blast ? nullptr : HitNode(actor, a_ev.bone);
+				auto* weapon = blast ? nullptr : StandInWeapon(a_ev);
+				if (auto* impacts = RE::BGSImpactManager::GetSingleton(); impacts && weapon && weapon->impactDataSet && node) {
+					RE::NiPoint3 pick = dir;
+					impacts->PlayImpactEffect(actor, weapon->impactDataSet, node->name.c_str(), pick, 128.0f, false, false);
+				}
+				if (g_corpseLines < 20) {
+					++g_corpseLines;
+					logger::info("COMBAT corpse {} ({:08X}): {} on {} ({:.1f} Garry's Mod damage, force {:.0f} -> {:.1f} kg m/s{}) -> {:.1f} m/s on {} bodies ({:.0f} kg){}",
+						actor->GetDisplayFullName(), a_ev.form_id, KindName(a_ev.kind), node ? node->name.c_str() : (blast ? "the whole body" : "?"),
+						a_ev.gmod_damage, a_ev.force, push.impulse, push.impulse > 0.0f ? "" : ", none: damage-based speed", r.speed, r.bodies, r.mass,
+						r.bodies == 0 ? " (nothing moved: no dynamic body)" : "");
+				}
+				return;
+			}
 			const float damage = a_ev.damage;
 			auto* av = actor->AsActorValueOwner();
 			const float before = av->GetActorValue(RE::ActorValue::kHealth);
@@ -372,6 +525,7 @@ namespace gmsky::Combat
 				if (auto* process = actor->GetActorRuntimeData().currentProcess; process && !actor->IsDead()) {
 					process->KnockExplosion(actor, hitPos, std::clamp(a_ev.gmod_damage * 0.25f, 5.0f, 40.0f));
 				}
+				g_pending.push_back({ actor->GetHandle(), PushFor(a_ev, hitPos, dir), 2.0f, "blast" });  // step 3d-2: if it dies, the body flies
 				weapon = nullptr;  // no blood spray from a stand-in weapon for a blast
 				path = "explosion (plain damage + Skyrim's knock-back)";
 				++g_sec.explosions;
@@ -419,6 +573,10 @@ namespace gmsky::Combat
 			// kill is this hit taking the health from above 0 to 0 or below.
 			const bool killed = before > 0.0f && after <= 0.0f;
 			g_sec.kills += killed ? 1 : 0;
+			if (killed && a_ev.kind != GMSKY_HITK_EXPLOSION) {
+				// Step 3d-2: the killing shot pushes the body once Skyrim has made the ragdoll.
+				g_pending.push_back({ actor->GetHandle(), PushFor(a_ev, RE::NiPoint3{ float(s.x), float(s.y), float(s.z) }, dir), 1.0f, "killing shot" });
+			}
 			g_sec.damage += damage;
 			if (g_lines < 20) {
 				++g_lines;
@@ -464,6 +622,7 @@ namespace gmsky::Combat
 			g_healthPrimed = false;
 			g_dot = PendingHurt{};
 		}
+		UpdatePending(a_delta);
 		auto& ring = link.Shared().hit_events;
 		const uint32_t head = reinterpret_cast<std::atomic<uint32_t>*>(&ring.head)->load(std::memory_order_acquire);
 		if (!g_haveTail || head < g_tail) {
@@ -495,13 +654,15 @@ namespace gmsky::Combat
 	void LogSecond()
 	{
 		auto& s = g_sec;
-		if (s.events > 0 || s.lost > 0) {
+		if (s.events > 0 || s.lost > 0 || g_flung > 0) {
 			logger::info("COMBAT second: {} hits from Garry's Mod ({:.0f} Skyrim damage): {} through Skyrim's hit function, {} plain, {} explosions, "
-						 "{} kills | not applied: {} on corpses (3d-2), {} NPC not loaded, {} other origin, {} while not driving, {} lost",
-				s.events, s.damage, s.pipeline, s.plain, s.explosions, s.kills, s.corpses, s.missing, s.otherOrigin, s.notDriving, s.lost);
+						 "{} kills, {} on corpses (pushed), {} bodies thrown by blasts | not applied: {} NPC not loaded, {} other origin, {} while not driving, {} lost",
+				s.events, s.damage, s.pipeline, s.plain, s.explosions, s.kills, s.corpses, g_flung, s.missing, s.otherOrigin, s.notDriving, s.lost);
 		}
 		s = Second{};
 		g_lines = 0;
+		g_corpseLines = 0;
+		g_flung = 0;
 		auto& h = g_hurt;
 		if (h.hitEvents > 0 || h.toppedUp > 0.0f || h.sent > 0) {
 			logger::info("COMBAT player second: {} hit events on the player, {:.1f} health topped up, {} hurts sent to Garry's Mod ({:.1f} Skyrim damage), essential {}",

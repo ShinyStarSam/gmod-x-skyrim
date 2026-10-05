@@ -1156,6 +1156,36 @@ traces is enough for bullets and the crowbar, the same way the ground is answere
   - **3d-2, corpses:** a hit on a dead NPC pushes its ragdoll: an impulse along the shot on the
     body part hit (bullets, melee) or on all its bodies away from the blast (explosions), as
     SkyCraft's `FlingRagdoll`. Strength from Garry's Mod's damage force; tuned in game.
+    **In detail (planned 2026-10-05, after test 62):** Garry's Mod already sends hits on corpses
+    (test 60: 5 counted, not applied); only Skyrim changes (`Combat.cpp`, SkyCraft's
+    `FlingRagdoll` / `UpdateFlings`, MIT). Bullet / melee: the body part hit (same index as the
+    hitbox copy; corpses' parts are dynamic bodies in Skyrim's physics world, test 59) gets a
+    push along the shot of 0.25 m/s per Garry's Mod damage, 1.5-15 m/s (pistol 5 → 1.5, .357 40
+    → 10, crowbar 10 → 2.5), plus blood and the impact sound as on the living. Explosion: every
+    body of the ragdoll is thrown out and up from the blast at 0.1 m/s per Garry's Mod damage,
+    3-15 m/s. A living NPC caught by an explosion is remembered for 2 s: if it dies in that time
+    (Skyrim turns it into a ragdoll a moment later), its body is thrown the same way. Damage
+    isn't applied to corpses. Numbers are a first guess, tuned in game. Logs: `COMBAT corpse
+    <name>: <kind> on <part> -> <speed> m/s on <n> bodies` and the flings of the newly dead.
+    **Test 63 (the user):** shots too tame (logs: 1.5 m/s, the minimum, on every pistol / SMG
+    hit); an RPG moves the whole body without changing its pose until it hits something; the
+    user prefers Garry's Mod's ragdolls and asked whether Skyrim's could be matched to them.
+    *Answer:* Garry's Mod's own ragdoll can't be used: it would be a Garry's Mod physics object
+    on Skyrim's ground, which Garry's Mod's physics can't see yet (DESIGN "Found in test 60",
+    tests 12-17), and it would need a Garry's Mod model with Skyrim's skeleton. Instead Skyrim's
+    ragdoll is **pushed the way Garry's Mod pushes its own**:
+    - The push is Garry's Mod's real damage force (its bullets: Source's `BULLET_IMPULSE` per
+      ammo type, x3.5; melee and blasts: Source's damage-force formulas), sent with the hit
+      (already in the event) times `gmsky_ragdoll_force` (default 1), converted from kg·inch/s
+      to Havok's kg·m/s (x 0.0254).
+    - Bullet / melee: applied **at the point hit** on that body part (Garry's Mod's
+      `ApplyForceOffset`), so the part spins as well as moves; at most 30 m/s on that part.
+    - Blast: shared over the ragdoll's bodies by mass, each body pushed **out from the blast
+      from its own position** (plus a little up), so the limbs fly apart instead of the body
+      moving in one piece; at most 30 m/s.
+    - A shot that kills: its push is kept for up to 1 s and applied when Skyrim has made the
+      ragdoll (as the blast already was).
+    - No force from Garry's Mod (0): the old damage-based speeds.
   - Logs: Garry's Mod: every hit sent (NPC, part, Garry's Mod damage, Skyrim damage); Skyrim: every
     hit applied (path used, health before → after, killed or not), events lost.
   - Test (3d-1): shoot a hostile (bandit, wolf): it reacts, bleeds, fights back, dies; head shots
@@ -1244,6 +1274,9 @@ traces is enough for bullets and the crowbar, the same way the ground is answere
   and runs `showconsole`. When the console closes (~ or Esc in Garry's Mod) or the window loses the
   front (click back into Skyrim), the console is hidden, the window goes back off-screen and
   Skyrim's window is brought to the front. In single-player the game pauses while it is open.
+  *Test 63:* `showconsole` from Lua is refused by Garry's Mod (the user opened it with ~); the
+  window part worked. *Fix:* the module posts Garry's Mod's own console key (~, `toggleconsole` by
+  default) to its window (a Windows key message to that one window), once, after it is in front.
 
 **Hitboxes: how bullets hit Skyrim's NPCs (planned 2026-10-05, the user asked for this plan before 3c).**
 

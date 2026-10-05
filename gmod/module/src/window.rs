@@ -30,6 +30,7 @@ extern "system" {
     fn GetClassNameW(hwnd: Hwnd, name: *mut u16, len: i32) -> i32;
     fn SetForegroundWindow(hwnd: Hwnd) -> i32;
     fn GetForegroundWindow() -> Hwnd;
+    fn PostMessageW(hwnd: Hwnd, msg: u32, wparam: usize, lparam: isize) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -176,6 +177,22 @@ pub fn console_front(front: bool, skyrim_pid: u32) -> String {
         format!("Garry's Mod's window {} off-screen (x = {}); Skyrim's window {} to the front: {}",
             if moved { "moved" } else { "could NOT be moved" }, right_edge + MARGIN, if sky.is_some() { "brought" } else { "NOT found, not brought" }, fore)
     }
+}
+
+/// After test 63 (`showconsole` from Lua is refused): presses Garry's Mod's console key (~, scan code
+/// 0x29, `toggleconsole` by default) by posting the key's down and up messages to its window only.
+/// A line for the log.
+pub fn press_console_key() -> String {
+    const WM_KEYDOWN: u32 = 0x100;
+    const WM_KEYUP: u32 = 0x101;
+    const VK_OEM_3: usize = 0xC0;
+    let Some(h) = game_window() else {
+        return format!("no Garry's Mod window found (no visible {GAME_CLASS} window in this process)");
+    };
+    let lp = 1isize | (0x29isize << 16);
+    let down = unsafe { PostMessageW(h, WM_KEYDOWN, VK_OEM_3, lp) } != 0;
+    let up = unsafe { PostMessageW(h, WM_KEYUP, VK_OEM_3, lp | (1 << 30) | (1 << 31)) } != 0;
+    format!("console key (~) posted to Garry's Mod's window: down {down}, up {up}")
 }
 
 /// gmsky.OverlayWindow(off_screen) -> line for the log.

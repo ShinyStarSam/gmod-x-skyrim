@@ -104,6 +104,11 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
 - **Dying and respawning** (Phase 3, tested in game 2026-10-05, test 62): you die in Garry's Mod
   and click to respawn, all from Skyrim's window; you come back at full health at the last spot
   where nobody was fighting you. No Skyrim save reload.
+- **Shooting corpses** (Phase 3, test 64): Skyrim's ragdolls are pushed with Garry's Mod's own
+  damage force × 3 (`gmsky_ragdoll_force`), at the spot hit; explosions throw the limbs apart;
+  killing shots and blasts throw the body as it falls.
+- **F1 opens Garry's Mod's console** (test 64) in Garry's Mod's own window over Skyrim's; close it
+  with ~ or Esc (or click back into Skyrim).
 
 ## What doesn't work yet
 
@@ -111,8 +116,9 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   explosions, tracers, the physgun beam): only the hands, weapon and HUD are drawn.
 - Grenades and AR2 balls fall through Skyrim's world and don't hurt NPCs; the physgun can't grab
   NPCs or corpses (Garry's Mod's physics doesn't see Skyrim's world or NPCs).
-- Shooting corpses doesn't move them yet. Skyrim potions and healing don't heal Garry's Mod's player.
-- F1 (Garry's Mod's console in its own window): built, not tested in game yet.
+- Skyrim potions and healing don't heal Garry's Mod's player. Skyrim's ragdolls are still
+  Skyrim's (stiffer than Garry's Mod's); Garry's Mod's own ragdolls need its physics to see
+  Skyrim's world first.
 
 - Quest markers and locations: Skyrim's compass is hidden while the overlay is on, and HOLOHUD's
   compass and minimap don't show Skyrim's markers yet (planned). No stamina / magicka display.

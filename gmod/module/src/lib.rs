@@ -181,7 +181,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 41] = [
+    let funcs: [(&str, lua::CFn); 42] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -223,6 +223,7 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("ReadHurts", l_read_hurts),
         ("SkyrimFlags", l_skyrim_flags),
         ("ConsoleWindow", l_console_window),
+        ("ConsoleKey", l_console_key),
     ];
     for (name, f) in funcs {
         (a.pushnumber)(l, side as f64); // upvalue 1 = side
@@ -1156,6 +1157,14 @@ unsafe extern "C" fn l_console_window(l: *mut State) -> c_int {
     guarded(l, |a, _| {
         let pid = mapping().map(|m| m.shared().header.skyrim_pid.load(std::sync::atomic::Ordering::Acquire)).unwrap_or(0);
         lua::push_str(a, l, &window::console_front((a.toboolean)(l, 1) != 0, pid));
+        1
+    })
+}
+
+/// gmsky.ConsoleKey() -> line for the log: presses Garry's Mod's console key (~) in its own window.
+unsafe extern "C" fn l_console_key(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        lua::push_str(a, l, &window::press_console_key());
         1
     })
 }

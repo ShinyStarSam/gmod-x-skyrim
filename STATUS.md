@@ -155,7 +155,9 @@ multisampling; hook 0.001 ms per frame; no crash.
   player (protocol v14; Skyrim player essential and topped up while Garry's Mod drives).
   **3f works (test 62):** dying respawns you at the last calm spot (the user's
   choice), no save reload; input stays with Garry's Mod while dead. F1 = Garry's Mod's console in
-  its own window (built, not tested in game).
+  its own window (works, test 64).
+  **3d-2 works (tests 63-64):** shooting corpses pushes the ragdoll with Garry's Mod's force × 3;
+  blasts throw limbs apart. F1 console works (test 64). **Phase 3 is done.**
   Future (user): stamina / magicka bars and quest markers, locations, enemies in HOLOHUD.
 
 ## Evidence (tests 33-37)
