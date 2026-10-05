@@ -8,6 +8,7 @@
 #include "Collision.h"
 #include "Input.h"
 #include "Link.h"
+#include "Overlay.h"
 #include "Puppet.h"
 #include "Terrain.h"
 
@@ -211,6 +212,7 @@ namespace gmsky::Probe
 		Camera::AfterPlayerUpdate();
 		Terrain::PerFrame(a_player, g_origin, g_frame);
 		Collision::PerFrame(a_player, g_origin);
+		Overlay::PerFrame();
 
 		g_logTimer += a_delta;
 		if (g_logTimer >= 1.0f) {
@@ -221,6 +223,7 @@ namespace gmsky::Probe
 			Terrain::LogSecond(a_player);
 			Collision::LogSecond();
 			Body::LogSecond();
+			Overlay::LogSecond();
 			g_logTimer = 0.0f;
 		}
 	}

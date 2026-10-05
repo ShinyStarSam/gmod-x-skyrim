@@ -13,11 +13,16 @@
 # Tried and dropped (2026-10-04): +lua_run on this command line does nothing (the map isn't loaded
 # yet); sending it later with -hijack reaches the game but passes only one word to lua_run.
 #
-# Usage: powershell -ExecutionPolicy Bypass -File tools\launch_gmod.ps1 [-GmodDir <path>] [-Map <name>] [-Menu]
+# -Width / -Height: Garry's Mod's window size (default 1280 x 720). Step 2b-4: match Skyrim's back
+# buffer size (logs\skyrim.log "overlay: Skyrim's back buffer is WxH"), so the picture fits exactly.
+#
+# Usage: powershell -ExecutionPolicy Bypass -File tools\launch_gmod.ps1 [-GmodDir <path>] [-Map <name>] [-Menu] [-Width <w> -Height <h>]
 param(
     [string]$GmodDir = "B:\SteamLibrary\steamapps\common\GarrysMod",
     [string]$Map = "gm_flatmap",
-    [switch]$Menu
+    [switch]$Menu,
+    [int]$Width = 1280,
+    [int]$Height = 720
 )
 $ErrorActionPreference = "Stop"
 $exe = Join-Path $GmodDir "gmod_win64.exe"
@@ -32,7 +37,7 @@ if ((Test-Path $client) -and (-not (Test-Path $marker) -or (Get-Item $client).La
 }
 # +fps_max_nofocus 300: Garry's Mod caps itself at 20 fps while Skyrim's window is in front, which
 # makes the view choppy (in-game test 4). This 64-bit build has no engine_no_focus_sleep.
-$gameArgs = @("-insecure", "-windowed", "-w", "1280", "-h", "720", "-console", "+fps_max_nofocus", "300")
+$gameArgs = @("-insecure", "-windowed", "-w", "$Width", "-h", "$Height", "-console", "+fps_max_nofocus", "300")
 if (-not $Menu) {
     $bsp = Join-Path $GmodDir "garrysmod\maps\$Map.bsp"
     if (Test-Path $bsp) {

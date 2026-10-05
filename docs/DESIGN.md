@@ -935,6 +935,10 @@ hook can't point at freed code.
   screen size). Garry's Mod logs both sizes and whether they match. Making Garry's Mod draw at that
   size automatically is left to 2d (it means changing Garry's Mod's window size); until then the
   user sets Garry's Mod's resolution to Skyrim's, and 2c scales if they differ.
+  Built 2026-10-05 (`skse/src/Overlay.cpp`): the size comes from the swap chain's description
+  (what the 2c `Present` hook will see), and Skyrim also logs Garry's Mod's newest picture (frame,
+  age) without taking it, to show the two processes share the block before anything is drawn.
+  `tools\launch_gmod.ps1 -Width W -Height H` sets Garry's Mod's size.
 
 **Unknowns, measured in 2b-1 / 2b-3:** the back buffer's format (if it is `X8R8G8B8`, there is no
 alpha in it and the copy would have to come from Source's own render target instead); whether

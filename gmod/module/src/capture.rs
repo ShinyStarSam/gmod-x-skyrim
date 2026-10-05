@@ -363,6 +363,31 @@ pub fn enabled() -> bool {
     ENABLED.load(Acquire)
 }
 
+/// Step 2b-4: Skyrim's back buffer size (written by Skyrim every frame) against ours.
+fn size_line(b: &OverlayMapping, w: u32, h: u32) -> String {
+    let (sw, sh) = b.skyrim_size();
+    if sw == 0 {
+        return "Skyrim's size not known yet".into();
+    }
+    let at = b.ctl().skyrim_size_qpc.load(Acquire) as i64;
+    let mut f = 0i64;
+    unsafe { QueryPerformanceFrequency(&mut f) };
+    let age_s = (gmsky_protocol::shm::now_qpc() - at) as f64 / f.max(1) as f64;
+    let fresh = if age_s > 2.0 { format!(" (written {age_s:.0} s ago: Skyrim not running?)") } else { String::new() };
+    if w == 0 {
+        format!("Skyrim's size {sw}x{sh}{fresh}")
+    } else if (sw, sh) == (w, h) {
+        format!("Skyrim's size {sw}x{sh} = ours{fresh}")
+    } else {
+        format!("Skyrim's size {sw}x{sh} DIFFERS from ours {w}x{h} (set Garry's Mod's resolution to {sw}x{sh}){fresh}")
+    }
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn QueryPerformanceFrequency(freq: *mut i64) -> i32;
+}
+
 /// Numbers since the last call, one line.
 pub fn status(ms: impl Fn(u64) -> f64) -> String {
     let take = |a: &AtomicU64| a.swap(0, Relaxed);
@@ -373,8 +398,8 @@ pub fn status(ms: impl Fn(u64) -> f64) -> String {
     let cap = CAP.lock().unwrap_or_else(|e| e.into_inner());
     let block = cap.block.as_ref().map(|b| {
         let c = b.ctl();
-        format!("block: {} published in all, {} taken by Skyrim, Skyrim's size {:?}, slots {:#x}",
-            c.frames_published.load(Relaxed), c.frames_taken.load(Relaxed), b.skyrim_size(), b.state())
+        format!("block: {} published in all, {} taken by Skyrim, slots {:#x}; {}",
+            c.frames_published.load(Relaxed), c.frames_taken.load(Relaxed), b.state(), size_line(b, cap.w, cap.h))
     }).unwrap_or_else(|| "block not open".into());
     let err = std::mem::take(&mut *LAST_ERROR.lock().unwrap_or_else(|e| e.into_inner()));
     format!(
@@ -393,6 +418,23 @@ pub fn status(ms: impl Fn(u64) -> f64) -> String {
 mod tests {
     use super::*;
     use crate::d3d::tests::{with_test_device_sized, GLOBAL_STATE};
+
+    /// Step 2b-4: Skyrim's size (as Skyrim writes it) against ours.
+    #[test]
+    fn compares_skyrim_size() {
+        let name = format!(r"Local\GmodSkyrim_overlay_test_{}_size", std::process::id());
+        let b = OverlayMapping::open_named(&name).unwrap();
+        assert_eq!(size_line(&b, 1280, 720), "Skyrim's size not known yet");
+        b.set_skyrim_size(1920, 1080);
+        assert_eq!(size_line(&b, 1920, 1080), "Skyrim's size 1920x1080 = ours");
+        assert_eq!(size_line(&b, 1280, 720),
+            "Skyrim's size 1920x1080 DIFFERS from ours 1280x720 (set Garry's Mod's resolution to 1920x1080)");
+        // Skyrim stopped writing 5 s ago.
+        let mut f = 0i64;
+        unsafe { QueryPerformanceFrequency(&mut f) };
+        b.ctl().skyrim_size_qpc.store((gmsky_protocol::shm::now_qpc() - 5 * f) as u64, Release);
+        assert!(size_line(&b, 1920, 1080).ends_with("(written 5 s ago: Skyrim not running?)"), "{}", size_line(&b, 1920, 1080));
+    }
 
     /// On a real hidden device with an A8R8G8B8 back buffer (like Garry's Mod's), plain and Ex:
     /// the back buffer, filled with a known half-transparent colour, arrives whole in the block

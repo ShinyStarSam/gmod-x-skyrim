@@ -122,9 +122,11 @@ multisampling; hook 0.001 ms per frame; no crash.
 - **2b-3 works (test 42):** `gmsky_overlay 1` prepares every frame and the `Present` hook copies
   it into the block (`gmod/module/src/capture.rs`): every frame published, 0 failures, ~1.1 ms per
   frame; picture right (hands solid, HOLOHUD plates 94, world gone).
-- **Next:** 2b-4
-  (Skyrim's window size); plan in `docs/DESIGN.md` "Step 2b in detail". Then 2c (Skyrim draws
-  it), then blur behind the plates done in Skyrim from a plate mask.
+- **2b-4 works (test 43, both games):** Skyrim writes its back buffer size (1280×720, = Garry's
+  Mod's) into the block and sees Garry's Mod's newest picture, 6-9 ms old, ~180 per second
+  (`skse/src/Overlay.cpp`). **Step 2b is done.**
+- **Next:** step 2c (Skyrim draws the picture), then blur behind the plates done in
+  Skyrim from a plate mask. Plans: `docs/DESIGN.md` "Step 2b in detail" and Phase 2 steps.
 ## Evidence (tests 33-37)
 
 Pictures and logs: `build/logs-ingame-test-33/` … `-37/` (`overlay/`). Reports:
