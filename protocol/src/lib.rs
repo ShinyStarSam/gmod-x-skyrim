@@ -15,7 +15,7 @@ pub const RING_BYTES: usize = 16 << 20;
 pub const MAP_SIZE: usize = RING_OFFSET + RING_BYTES;
 pub const MAGIC: u32 = 0x594B_534D;
 pub const MAGIC_INIT: u32 = 0x5449_4E49;
-pub const VERSION: u32 = 8; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain; 8: collision ring
+pub const VERSION: u32 = 9; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain; 8: collision ring; 9: view punch
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
 
 pub const PF_ON_GROUND: u32 = 0x1;
@@ -142,6 +142,9 @@ pub struct PlayerState {
     /// Tick length in ms.
     pub tick_ms: f32,
     pub reserved1: u32,
+    /// View punch (pitch, yaw, roll degrees), added to the camera only.
+    pub punch_deg: [f32; 3],
+    pub reserved2: u32,
 }
 
 #[repr(C)]
@@ -251,7 +254,8 @@ const _: () = {
     assert!(size_of::<SkyrimState>() == 56);
     assert!(offset_of!(SkyrimState, heading_rad) == 32);
     assert!(offset_of!(SkyrimState, cell_form_id) == 44);
-    assert!(size_of::<PlayerState>() == 144);
+    assert!(size_of::<PlayerState>() == 160);
+    assert!(offset_of!(PlayerState, punch_deg) == 144);
     assert!(offset_of!(PlayerState, anchor) == 16);
     assert!(offset_of!(PlayerState, pos) == 40);
     assert!(offset_of!(PlayerState, eye_height) == 64);
@@ -269,13 +273,13 @@ const _: () = {
     assert!(offset_of!(Shared, origin) == 40);
     assert!(offset_of!(Shared, skyrim_state) == 80);
     assert!(offset_of!(Shared, player_state) == 144);
-    assert!(offset_of!(Shared, input) == 296);
+    assert!(offset_of!(Shared, input) == 312);
     assert!(size_of::<Terrain>() == 16952);
     assert!(offset_of!(Terrain, center) == 16);
     assert!(offset_of!(Terrain, skyrim_frame) == 40);
     assert!(offset_of!(Terrain, height) == 48);
-    assert!(offset_of!(Shared, terrain) == 344);
-    assert!(size_of::<Shared>() == 17304);
+    assert!(offset_of!(Shared, terrain) == 360);
+    assert!(size_of::<Shared>() == 17320);
     assert!(size_of::<Shared>() <= SLOTS_SIZE);
     assert!(size_of::<ColMsgHeader>() == 8);
     assert!(size_of::<ColClear>() == 8);

@@ -22,6 +22,20 @@ namespace gmsky::Puppet
 	// allows turning Skyrim's camera directly (gmsky_camera).
 	bool ViewNow(double& a_headingRad, double& a_pitchRad, bool& a_driveCamera);
 
+	// Step 4, the camera: ViewNow's view plus Garry's Mod's view punch, where its eye is (the
+	// puppet's feet on the latest frame + Garry's Mod's eye height, both blended between ticks;
+	// Skyrim units) and its FOV. False while the puppet is off.
+	struct CameraView
+	{
+		double headingRad = 0.0, pitchRad = 0.0, rollRad = 0.0;
+		RE::NiPoint3 eye{};
+		float eyeGmod = 0.0f;   // eye height, Garry's Mod units
+		float fovDeg = 0.0f;    // horizontal FOV of a 4:3 view (Source and Skyrim alike); 0 = unknown
+		float punchDeg[3]{};    // pitch, yaw, roll
+		bool drive = false;     // gmsky_camera 1
+	};
+	bool CameraNow(CameraView& a_out);
+
 	// Stop puppeting until conditions are met again (game load, new origin).
 	void Reset(const char* a_reason);
 

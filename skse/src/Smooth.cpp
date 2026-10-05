@@ -15,6 +15,7 @@ namespace gmsky::Smooth
 		struct Tick
 		{
 			std::array<double, 3> pos;  // relative to the tick's anchor
+			double eye;                 // eye height (step 4: the camera), Garry's Mod units
 			uint64_t tick;  // Garry's Mod tick number
 			int64_t at;     // when it happened (QPC), on the locked rhythm
 		};
@@ -33,6 +34,7 @@ namespace gmsky::Smooth
 		std::size_t g_tickDueNext = 0;
 		bool g_tickDueInit = false;
 		std::array<double, 3> g_lastDrawn{};
+		double g_drawnEye = 64.0;  // the eye height that goes with the last drawn position
 		bool g_haveLastDrawn = false;
 
 		// Per second.
@@ -60,7 +62,7 @@ namespace gmsky::Smooth
 			if (!g_ticks.empty() && a_g.tick < g_ticks.back().tick) {
 				g_ticks.clear();  // Garry's Mod restarted or changed map
 			}
-			Tick t{ Relative(a_g), a_g.tick, a_g.tick_qpc };
+			Tick t{ Relative(a_g), a_g.eye_height, a_g.tick, a_g.tick_qpc };
 			if (!g_ticks.empty()) {
 				const auto& last = g_ticks.back();
 				const int64_t n = int64_t(a_g.tick - last.tick);
@@ -123,6 +125,7 @@ namespace gmsky::Smooth
 			++g_offFrames;
 			g_lastFrameQpc = 0;
 			g_ticks.clear();
+			g_drawnEye = a_g.eye_height;
 			CountStep(newest, a_g);
 			return newest;
 		}
@@ -154,6 +157,7 @@ namespace gmsky::Smooth
 		}
 		const Tick& a = g_ticks[i];
 		std::array<double, 3> drawn = a.pos;
+		g_drawnEye = a.eye;
 		if (i + 1 < g_ticks.size()) {
 			const Tick& b = g_ticks[i + 1];
 			const double span = double(b.at - a.at);
@@ -161,11 +165,17 @@ namespace gmsky::Smooth
 			for (int c = 0; c < 3; ++c) {
 				drawn[c] = a.pos[c] + (b.pos[c] - a.pos[c]) * u;
 			}
+			g_drawnEye = a.eye + (b.eye - a.eye) * u;
 		} else if (drawAt > a.at) {
 			++g_lateFrames;  // the next tick hasn't arrived: the player holds still this frame
 		}
 		CountStep(drawn, a_g);
 		return drawn;
+	}
+
+	double EyeHeight()
+	{
+		return g_drawnEye;
 	}
 
 	void Reset()

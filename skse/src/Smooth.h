@@ -9,6 +9,10 @@ namespace gmsky::Smooth
 	// a small delay", or the newest tick as is when Garry's Mod turned smoothing off.
 	std::array<double, 3> Position(const GmskyPlayerState& a_g);
 
+	// The eye height (Garry's Mod units) blended the same way, for the frame Position last drew
+	// (step 4: the camera follows crouching smoothly).
+	double EyeHeight();
+
 	// Forget the tick history (game load, new origin, Garry's Mod restarted).
 	void Reset();
 

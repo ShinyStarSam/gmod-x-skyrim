@@ -217,7 +217,7 @@ Each phase ends with something you can test, and each step inside a phase is one
 | 2 | **Overlay** | Garry's Mod hands, weapon and HUD drawn inside Skyrim; Garry's Mod window hidden |
 | 3 | **Combat** | Proxies, HitActor, PlayerHurt, death. You can fight a bandit camp with a crowbar |
 | 4 | **Full world** | Real Havok shapes, interiors, load doors, floating origin across the whole map |
-| 5 | **Polish** | Auto-launch Garry's Mod from Skyrim, time/weather sync, save/load consistency |
+| 5 | **Polish** | Auto-launch Garry's Mod from Skyrim, save/load consistency (Garry's Mod has no time of day or weather, so there is nothing to sync there; Skyrim's own sky and weather simply stay) |
 
 ### Phase 0 steps
 
@@ -400,7 +400,40 @@ Goal: play from the Skyrim window with Garry's Mod movement on Skyrim's real gro
        (checked on 1.7.104: the land-height call in the actor movement update).
      Logs per second: contacts dropped, rescues skipped. Test: as 3e; `max-drift` near 0 in
      noclip inside a hill; no "Skyrim moved the player" while flying under ground.
-4. **Camera.** Skyrim's camera from Garry's Mod's eye (crouch height, view bob) and FOV.
+4. **Camera** (planned 2026-10-04). Skyrim's camera from Garry's Mod's eye and FOV.
+   **Read in SkyCraft first** (`skse/src/Game.cpp`: `PinCameraAndSky`, `ApplyMcFov` /
+   `RestoreFov`, the eye height blended between ticks, the walk bob): every frame the camera root
+   (and the sky) are put at feet + eye height, after Skyrim's camera update and again after the
+   player update, together with the rotation (our step 1c already turns it there); Skyrim's FOV is
+   saved, set from the other game's, and restored when it stops driving.
+   - **Eye position:** the puppet's feet this frame (already blended, step 2) plus Garry's Mod's
+     eye height (`EyePos().z - GetPos().z`: 64 standing, 28 crouched, with Source's smooth duck
+     transition), blended between ticks the same way, converted to Skyrim units (64 ↔ 120.5,
+     Skyrim's own standing eye). Placed in the same two spots as the rotation, only while we turn
+     the camera (first person, no Skyrim menu, `gmsky_camera 1`).
+   - **No walk bob:** unlike Minecraft, Garry's Mod (Sandbox) doesn't bob the camera, only the
+     weapon model (Phase 2). What it does have is **view punch** (`GetViewPunchAngles`: the kick
+     from a hard landing, later weapon recoil); it is sent and added to the camera's pitch, yaw
+     and roll (newest tick, not blended: it is small and decays by itself).
+   - **FOV:** Garry's Mod's `GetFOV()` (its `fov_desired` when 0) is, like Skyrim's
+     `worldFOV`, the horizontal field of view of a 4:3 view, so it is copied as is. Skyrim's own
+     value is saved first and restored when the puppet stops.
+   - **Protocol 9:** `GmskyPlayerState` gets `punch_deg[3]` (pitch, yaw, roll).
+   - **Not here:** hiding Skyrim's first-person arms is Phase 2.
+   **4b. Crouch = Skyrim's sneak** (planned 2026-10-04, user request; adapted from SkyCraft's
+   `SyncSneak`, MIT). Garry's Mod's crouch (`GMSKY_PF_CROUCHING`, already sent every tick) makes
+   Skyrim's player sneak, so NPC detection, the stealth eye, sneak attacks and the Sneak skill all
+   follow it. Skyrim sneaks through the same action its Sneak key uses
+   (`PlayerControls::DoAction(ActionSneak)`, `REL::ID(42350)` on 1.7.104 as SkyCraft found); it
+   toggles, so it is sent whenever the two games disagree, at most every 0.3 s (if Skyrim's
+   animation didn't take it, e.g. mid-jump, it is tried again). Not while dead, mounted or
+   swimming. Logged: each toggle (taken / refused) for the first 20, and per second the state of
+   both games. Test: crouch near an NPC: the stealth eye shows; stand: it goes.
+   - **Logs** (each second): eye height Garry's Mod / Skyrim units, camera placed counts, the
+     camera's height above the feet after placing (must equal the eye height), largest view punch,
+     FOV in use and the saved one.
+   Test: stand, crouch, jump, land from a height (punch), change `fov_desired`; the log's camera
+   height follows Garry's Mod's eye height.
 5. **Floating origin re-centre** (§5): move the origin when the player is far from it.
 
 ### Phase 1 re-plan after test 17 (proposed 2026-10-04, waiting for the user's go-ahead)

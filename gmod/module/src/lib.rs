@@ -594,7 +594,8 @@ unsafe extern "C" fn l_reload(l: *mut State) -> c_int {
 }
 
 /// gmsky.WritePlayerState(tick, x, y, z, pitch, yaw, roll, eye_height, vx, vy, vz, flags, fov,
-///                        deg_per_count, tick_ms) -> origin epoch in use (0 = no origin yet)
+///                        deg_per_count, tick_ms, punch_pitch, punch_yaw, punch_roll)
+///                        -> origin epoch in use (0 = no origin yet)
 /// Stamps the tick with the PC's precise clock, so Skyrim can blend between ticks.
 /// Also reports the Skyrim input already applied (from gmsky.ReadInput), so Skyrim can draw the
 /// rest of the mouse movement ahead of Garry's Mod. deg_per_count 0 (or nil) = don't predict.
@@ -639,6 +640,8 @@ unsafe extern "C" fn l_write_player_state(l: *mut State) -> c_int {
             tick_qpc: now_qpc(),
             tick_ms: n(15) as f32,
             reserved1: 0,
+            punch_deg: [n(16) as f32, n(17) as f32, n(18) as f32],
+            reserved2: 0,
         });
         link.writes += 1;
         (a.pushnumber)(l, link.epoch as f64);

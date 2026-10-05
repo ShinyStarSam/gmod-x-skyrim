@@ -160,6 +160,8 @@ function ply:GetMoveType() return HARNESS_MOVETYPE or MOVETYPE_WALK end
 function ply:SetMoveType(m) HARNESS_MOVETYPE = m end
 function ply:EyePos() return vec(100 + t, 50, -12700 + 64) end
 function ply:GetFOV() return 75 end
+function ply:GetViewPunchAngles() return { p = 2.5, y = -1, r = 0.5 } end
+function ply:GetInfoNum(name, default) return default end
 function ply:SendLua(s) HARNESS_SENT_LUA = s end
 function ply:SetPos(p) HARNESS_SETPOS = p if HARNESS_POS then HARNESS_POS = Vector(p.x, p.y, p.z) end end
 function ply:SetVelocity() end
@@ -310,6 +312,7 @@ fn main() {
                 check(p.flags == 0x65, "flags = on ground + alive + drive camera + smooth");
                 check(p.tick_qpc > 0 && (p.tick_ms - 15.0).abs() < 1e-4, &format!("tick stamp {} and length {} ms", p.tick_qpc, p.tick_ms));
                 check(p.vel == [66.0, 0.0, 0.0], "velocity");
+                check(p.punch_deg == [2.5, -1.0, 0.5], &format!("view punch {:?}", p.punch_deg));
             }
             None => check(false, "Skyrim received a player state"),
         }

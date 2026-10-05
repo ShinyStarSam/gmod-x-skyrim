@@ -1,7 +1,7 @@
 # STATUS
 
-Written 2026-10-04 after in-game test 23. Phase 1 steps 3d–3f and re-plan steps A–D are done
-and committed. "Verified" means checked with logged numbers
+Written 2026-10-04 after in-game test 24. **Phase 1 is complete** (steps 4 and 4b and the
+launcher change tested in test 24). Next: Phase 2 (the overlay). "Verified" means checked with logged numbers
 from a real run; "not tested" means not checked in game. Full history with numbers: `MODLOG.md`.
 Design and plan: `docs/DESIGN.md` §12 ("Phase 1 re-plan after test 17").
 
@@ -27,8 +27,10 @@ Single-player and offline only.
   Rust 1.99.0 stable (MSVC); Python 3.12.10; Git 2.51. No mod manager; no other SKSE plugins.
   No debugger installed.
 - **Settings:** Skyrim `bAlwaysActive=1`. Garry's Mod started by `tools/launch_gmod.ps1`
-  (`-insecure -windowed +fps_max_nofocus 300`), stops at the main menu; the user picks
-  **gm_flatmap** (Workshop item 3669476334), Single Player. Then the user starts Skyrim (SKSE)
+  (`-insecure -windowed +fps_max_nofocus 300`) loads **gm_flatmap** straight into single-player
+  when `garrysmod\maps\gm_flatmap.bsp` exists (the user is moving it there from the Workshop
+  addon, item 3669476334); otherwise it stops at the main menu and the user picks gm_flatmap,
+  Single Player. `-Menu` always stops at the menu; `-Map <name>` loads another map. Then the user starts Skyrim (SKSE)
   and loads a save; Skyrim publishes the origin and the first ground grid.
 - **Where things are:**
   - Project `B:\Gmod x Skyrim`; Garry's Mod `B:\SteamLibrary\steamapps\common\GarrysMod`;
@@ -50,7 +52,7 @@ Single-player and offline only.
 ## How to build and test
 
 - Rust (module, stub, harness, protocol): `cargo build --release`, then
-  `target\release\gmod_harness.exe` → `HARNESS PASSED` (97 checks); `cargo test --release` (ring and sweep unit tests). It runs our Lua in Garry's
+  `target\release\gmod_harness.exe` → `HARNESS PASSED` (98 checks); `cargo test --release` (ring and sweep unit tests). It runs our Lua in Garry's
   Mod's real `lua_shared.dll` with fake game objects (incl. the collision math and the ground
   entity's `TestCollision`); it does not run Garry's Mod's movement.
 - C++ layout test: `cmake --build build/protocol --config Release`, then
@@ -62,7 +64,7 @@ Single-player and offline only.
 
 ## What works (verified in game, numbers in MODLOG.md)
 
-- **The link** (shared memory `Local\GmodSkyrim_v2`, protocol version 8: grids relative to the anchor, 16 MB collision ring), disconnect detection, coordinate
+- **The link** (shared memory `Local\GmodSkyrim_v2`, protocol version 9: grids relative to the anchor, 16 MB collision ring, view punch), disconnect detection, coordinate
   conventions, scale 64 / 120.5 = 0.5311.
 - **Playing from the Skyrim window:** W/A/S/D, Shift, Space, Ctrl, mouse look, **V = Garry's
   Mod noclip** (17 launches in test 21), E activates Skyrim objects, Esc/~/J/M/F9 reach Skyrim.
@@ -94,7 +96,7 @@ Single-player and offline only.
 - (By choice, not a bug) ending noclip under Skyrim's ground: you fall "under the earth" like in
   Source until Skyrim moves you back up; the user likes it, keep it.
 - Garry's Mod physics props/ragdolls fall through Skyrim's ground (traces only).
-- Not started: camera height / view bob / FOV (step 4), Garry's Mod's hands/weapon/HUD in Skyrim,
+- Not started: Garry's Mod's hands/weapon/HUD in Skyrim (Phase 2),
   combat, save/load consistency.
 
 ## Which game owns the player
@@ -115,8 +117,7 @@ shapes as soon as possible, triple-checked against SkyCraft):
   near window switches, not at re-centres (MODLOG test 22). `gmod_server.log` now logs
   `JUMP tick …` lines (and `jumps N` in the status line) to find out; read them after the next test.
 - **Step D: Skyrim's real collision shapes: done (test 23, "perfect and superior to grid").**
-  Next in the plan: Phase 1 step 4 (camera height, crouch, view bob, FOV from Garry's Mod), then
-  Phase 2 (Garry's Mod's hands, weapon and HUD drawn in Skyrim).
+- **Phase 1 step 4 (camera) and 4b (crouch = sneak): done (test 24).**
 
 ## Evidence (latest test, 22)
 

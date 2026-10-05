@@ -594,3 +594,32 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 **Result (logs: `build/logs-ingame-test-23/`):** user: shapes are "perfect and superior to grid". Skyrim: 9 × `COLLISION streaming starts` (loads, doors, origin changes), **0 faults** and **0 dropped** in every second; slowest harvesting frame 35.9 ms (a one-frame hitch; the budget is 2.5/5 ms per frame plus gathering bodies, worth watching in cities). Garry's Mod: up to 1,199 regions / 90,116 triangles stored, slowest Rust sweep 99 µs, no Lua errors, 5 short `waiting for Skyrim's collision` holds.
 **Noclip under the ground (decided):** the user likes it as it is: you fall "under the earth" like in Source, and Skyrim eventually moves the player back up (seen as "Skyrim moved the player" → new origin). Not to be changed.
 
+## 2026-10-04 Phase 1 step 4: the camera (eye height, crouch, view punch, FOV) (not tested in game)
+
+**Plan:** `docs/DESIGN.md` Phase 1 step 4 (written first). **Read in SkyCraft first:** `Game.cpp` `PinCameraAndSky`, `ApplyMcFov`/`RestoreFov`, eye height blended between ticks, walk bob. Taken: camera root + camera position + sky put at the eye in the same two spots as the rotation; FOV saved, set, restored. Not taken: the walk bob (Garry's Mod/Sandbox doesn't bob the camera, only the weapon model; Garry's Mod's **view punch** is sent instead). Also fixed in the design doc: Phase 5 no longer mentions "time/weather sync" (Garry's Mod has neither; pointed out by the user).
+**Changed:**
+- **Protocol 9:** `GmskyPlayerState.punch_deg[3]` (size 144 → 160; slots after it moved, both layout checks updated).
+- Garry's Mod (`server.lua`, module): sends `GetViewPunchAngles()`; FOV = `GetFOV()`, or the player's `fov_desired` when that is 0.
+- Skyrim: `Smooth.cpp` blends the eye height together with the position (`Smooth::EyeHeight`); `Puppet.cpp` `CameraNow`: view + punch (pitch, yaw, roll), eye = this frame's feet + eye height / scale (64 → 120.5, 28 crouched → 52.7), FOV; `Camera.cpp` `Drive`: rotation (with roll), camera root / camera / sky at the eye, `worldFOV` = Garry's Mod's FOV (Skyrim's own saved and restored when the puppet is off or `gmsky_camera 0`). Log each second: `CAMERA eye (step 4): …` (placed count, eye height in both units, how far we moved Skyrim's own camera, view punch max, FOV in use and Skyrim's own).
+**Tested how:** `cargo build --release`; `gmod_harness.exe` → HARNESS PASSED (98: new check, the view punch reaches the player state); `cargo test --release` passes; `protocol_test.exe` PASSED; Skyrim plugin built (no warnings) and copied.
+**Not tested in game.** Not sure: the sign of the view punch's roll (small; the log shows it); whether `GetFOV()` on the server returns 0 or the real FOV in this Garry's Mod build (either way the log shows the FOV in use).
+**Next:** in-game test 24 (STATUS.md).
+
+## 2026-10-04 Phase 1 step 4b: crouch = Skyrim's sneak (not tested in game)
+
+**Plan:** `docs/DESIGN.md` Phase 1 step 4b (user request). **Adapted from SkyCraft** (`Game.cpp` `SyncSneak`, MIT).
+**Changed:** `skse/src/Puppet.cpp`: while the puppet is on, Garry's Mod's crouch (`GMSKY_PF_CROUCHING`, not in noclip) makes Skyrim's player sneak through Skyrim's own sneak action (`PlayerControls::DoAction(ActionSneak)`, `REL::ID(42350)`), whenever the two disagree, at most every 0.3 s; not while dead, mounted or swimming. Logs: `SNEAK … toggled (taken/refused)` for the first 20 toggles, `SNEAK Garry's Mod crouching/standing, Skyrim sneaking/not sneaking; toggles …` each second.
+**Tested how:** Skyrim plugin built (no warnings) and copied. No Garry's Mod change (the crouch flag was already sent; the harness checks it).
+**Not tested in game.** Not sure: that ID 42350 is right for our exact game build (it is SkyCraft's, same 1.7.104; not checked before calling, unlike the land-rescue patch).
+
+## 2026-10-04 Launcher loads gm_flatmap directly again (not tested)
+
+**Changed:** `tools/launch_gmod.ps1`: default `-Map gm_flatmap`; it loads the map straight into single-player (`+maxplayers 1 +map gm_flatmap`) when `garrysmod\maps\gm_flatmap.bsp` exists, otherwise it says so and stops at the main menu as before; new `-Menu` switch.
+**Why:** the user is moving gm_flatmap from a Workshop addon to a plain map file, which (unlike Workshop maps) can be loaded from the command line, as gm_flatgrass can.
+**Tested how:** the script parses (PowerShell parser). Not run: the file isn't in `garrysmod\maps` yet (checked, read-only).
+**Not tested.**
+
+## 2026-10-04 In-game test 24 (camera, sneak, map autoload): "perfect, all tests done"
+
+**Result (logs: `build/logs-ingame-test-24/`):** camera 120.5 Skyrim units above the feet standing, 52.7 crouched, values between during the duck transition (e.g. 63.3, 80.7); view punch up to 7.97°; `CAMERA FOV: Skyrim's 80.0 -> Garry's Mod's 100.0`. Sneak: 20 logged toggles, all `taken`, 0 refused. The launcher loaded gm_flatmap directly (`map gm_flatmap room`), gmsky loaded by itself.
+**Not exercised:** `gmsky_camera 0` (no `FOV back to Skyrim's own` line), a second FOV value.

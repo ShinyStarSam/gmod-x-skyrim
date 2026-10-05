@@ -19,7 +19,7 @@
 #define GMSKY_MAP_SIZE (GMSKY_RING_OFFSET + GMSKY_RING_BYTES)
 #define GMSKY_MAGIC 0x594B534Du      // "MSKY": layout initialized and ready
 #define GMSKY_MAGIC_INIT 0x54494E49u // "INIT": one side is initializing right now
-#define GMSKY_VERSION 8u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain; 8: collision ring
+#define GMSKY_VERSION 9u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain; 8: collision ring; 9: view punch
 #define GMSKY_HEARTBEAT_TIMEOUT_MS 2000u
 
 // GmskyPlayerState.flags
@@ -101,6 +101,10 @@ typedef struct GmskyPlayerState {
     int64_t tick_qpc;          // 0 = unknown
     float tick_ms;             // engine.TickInterval() in ms
     uint32_t reserved1;
+    // View punch (Source's GetViewPunchAngles: hard landings, later weapon recoil), degrees, added
+    // to the camera only (DESIGN.md, Phase 1 step 4). Same signs as pitch/yaw/roll above.
+    float punch_deg[3];        // pitch, yaw, roll
+    uint32_t reserved2;
 } GmskyPlayerState;
 
 // Skyrim -> Garry's Mod. Input typed into Skyrim's window while Garry's Mod drives the player.
@@ -222,7 +226,8 @@ GMSKY_ASSERT(offsetof(GmskyOrigin, skyrim_origin) == 8);
 GMSKY_ASSERT(sizeof(GmskySkyrimState) == 56);
 GMSKY_ASSERT(offsetof(GmskySkyrimState, heading_rad) == 32);
 GMSKY_ASSERT(offsetof(GmskySkyrimState, cell_form_id) == 44);
-GMSKY_ASSERT(sizeof(GmskyPlayerState) == 144);
+GMSKY_ASSERT(sizeof(GmskyPlayerState) == 160);
+GMSKY_ASSERT(offsetof(GmskyPlayerState, punch_deg) == 144);
 GMSKY_ASSERT(offsetof(GmskyPlayerState, anchor) == 16);
 GMSKY_ASSERT(offsetof(GmskyPlayerState, pos) == 40);
 GMSKY_ASSERT(offsetof(GmskyPlayerState, eye_height) == 64);
@@ -240,13 +245,13 @@ GMSKY_ASSERT(offsetof(GmskyOriginSlot, data) == 8);
 GMSKY_ASSERT(offsetof(GmskyShared, origin) == 40);
 GMSKY_ASSERT(offsetof(GmskyShared, skyrim_state) == 80);
 GMSKY_ASSERT(offsetof(GmskyShared, player_state) == 144);
-GMSKY_ASSERT(offsetof(GmskyShared, input) == 296);
+GMSKY_ASSERT(offsetof(GmskyShared, input) == 312);
 GMSKY_ASSERT(sizeof(GmskyTerrain) == 16952);
 GMSKY_ASSERT(offsetof(GmskyTerrain, center) == 16);
 GMSKY_ASSERT(offsetof(GmskyTerrain, skyrim_frame) == 40);
 GMSKY_ASSERT(offsetof(GmskyTerrain, height) == 48);
-GMSKY_ASSERT(offsetof(GmskyShared, terrain) == 344);
-GMSKY_ASSERT(sizeof(GmskyShared) == 17304);
+GMSKY_ASSERT(offsetof(GmskyShared, terrain) == 360);
+GMSKY_ASSERT(sizeof(GmskyShared) == 17320);
 GMSKY_ASSERT(sizeof(GmskyShared) <= GMSKY_SLOTS_SIZE);
 GMSKY_ASSERT(sizeof(GmskyColMsgHeader) == 8);
 GMSKY_ASSERT(sizeof(GmskyColClear) == 8);

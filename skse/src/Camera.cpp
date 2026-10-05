@@ -6,6 +6,11 @@
 // camera update, and again after the player update, we set the camera root's rotation ourselves.
 // Skyrim's axis order for the camera root is learned at run time first; nothing is overridden
 // until it is certain.
+//
+// Phase 1 step 4 (adapted from SkyCraft's PinCameraAndSky / ApplyMcFov, MIT): in the same two
+// spots the camera (and the sky) are also put at Garry's Mod's eye (feet + eye height: crouching
+// lowers it), Garry's Mod's view punch is added (pitch, yaw, roll), and Skyrim's FOV is set to
+// Garry's Mod's; Skyrim's own FOV comes back when we stop driving the camera.
 #include "Camera.h"
 
 #include "Input.h"
@@ -30,6 +35,14 @@ namespace gmsky::Camera
 		// Per second.
 		uint32_t g_cameraCalls = 0, g_turnedAfterCamera = 0, g_turnedAfterPlayer = 0, g_devCount = 0;
 		float g_devSum = 0.0f, g_devMax = 0.0f;
+		// Step 4, per second: how far we moved Skyrim's own camera, our camera's height above the
+		// feet, the eye height, the biggest view punch.
+		uint32_t g_placed = 0;
+		float g_moveSum = 0.0f, g_moveMax = 0.0f, g_heightMin = 1e9f, g_heightMax = -1e9f;
+		float g_eyeMin = 1e9f, g_eyeMax = -1e9f, g_punchMax = 0.0f;
+		// Skyrim's FOV, saved while Garry's Mod's is in use.
+		bool g_fovSaved = false;
+		float g_savedWorldFov = 0.0f, g_fovInUse = 0.0f;
 		std::string g_why = "not started";
 
 		RE::NiPoint3 Col(const RE::NiMatrix3& a_m, int a_c)
@@ -58,16 +71,44 @@ namespace gmsky::Camera
 			return { f, f * -1.0f, u, u * -1.0f, r, r * -1.0f };
 		}
 
-		// Whether we turn the camera now, and to where. Sets g_why when not.
-		bool Wanted(RE::PlayerCamera* a_camera, double& a_heading, double& a_pitch)
+		void RestoreFov(RE::PlayerCamera* a_camera)
 		{
-			bool drive = false;
+			if (g_fovSaved && a_camera) {
+				a_camera->GetRuntimeData2().worldFOV = g_savedWorldFov;
+				logger::info("CAMERA FOV back to Skyrim's own {:.1f}", g_savedWorldFov);
+			}
+			g_fovSaved = false;
+			g_fovInUse = 0.0f;
+		}
+
+		// Both games' FOV is the horizontal field of view of a 4:3 view, so it is copied as is.
+		void ApplyFov(RE::PlayerCamera* a_camera, float a_fov)
+		{
+			if (a_fov < 10.0f || a_fov > 170.0f) {
+				return;
+			}
+			auto& data = a_camera->GetRuntimeData2();
+			if (!g_fovSaved) {
+				g_savedWorldFov = data.worldFOV;
+				g_fovSaved = true;
+				logger::info("CAMERA FOV: Skyrim's {:.1f} -> Garry's Mod's {:.1f}", g_savedWorldFov, a_fov);
+			}
+			data.worldFOV = a_fov;
+			g_fovInUse = a_fov;
+		}
+
+		// Whether we drive the camera now, and how. Sets g_why when not (and gives Skyrim its FOV
+		// back when we stop driving for good: puppet off, gmsky_camera 0).
+		bool Wanted(RE::PlayerCamera* a_camera, Puppet::CameraView& a_view)
+		{
 			if (!a_camera || !a_camera->cameraRoot) {
 				g_why = "no camera";
-			} else if (!Puppet::ViewNow(a_heading, a_pitch, drive)) {
+			} else if (!Puppet::CameraNow(a_view)) {
 				g_why = "puppet off";
-			} else if (!drive) {
+				RestoreFov(a_camera);
+			} else if (!a_view.drive) {
 				g_why = "off (gmsky_camera 0)";
+				RestoreFov(a_camera);
 			} else if (!a_camera->IsInFirstPerson()) {
 				g_why = "not in first person";
 			} else if (Input::SkyrimMenuOpen()) {
@@ -78,9 +119,20 @@ namespace gmsky::Camera
 			return false;
 		}
 
-		void Turn(RE::NiNode* a_root, double a_heading, double a_pitch)
+		// Turns the camera root to the view (with the view punch's roll: right and up turned
+		// around forward) and puts it, and the sky, at the eye.
+		void Drive(RE::PlayerCamera* a_camera, const Puppet::CameraView& a_view)
 		{
-			const auto axes = Axes(a_heading, a_pitch);
+			auto* root = a_camera->cameraRoot.get();
+			auto axes = Axes(a_view.headingRad, a_view.pitchRad);
+			if (a_view.rollRad != 0.0) {
+				const float c = float(std::cos(a_view.rollRad)), s = float(std::sin(a_view.rollRad));
+				const RE::NiPoint3 r = axes[4], u = axes[2];
+				axes[4] = r * c + u * s;
+				axes[5] = axes[4] * -1.0f;
+				axes[2] = u * c - r * s;
+				axes[3] = axes[2] * -1.0f;
+			}
 			RE::NiMatrix3 m;
 			for (int c = 0; c < 3; ++c) {
 				const auto& v = axes[g_axisMap[c]];
@@ -88,11 +140,40 @@ namespace gmsky::Camera
 				m.entry[1][c] = v.y;
 				m.entry[2][c] = v.z;
 			}
-			a_root->local.rotate = m;
-			a_root->world.rotate = m;
-			// Pass the new rotation down to the render camera under the root.
+			root->local.rotate = m;
+			root->world.rotate = m;
+			// Position (as SkyCraft's PinCameraAndSky): the root's own translate only when its
+			// parent adds nothing, the camera's position, and the sky (it is drawn around the camera).
+			const bool identityParent = !root->parent || root->parent->world.translate.Length() < 0.001f;
+			if (identityParent) {
+				root->local.translate = a_view.eye;
+			}
+			root->world.translate = a_view.eye;
+			a_camera->GetRuntimeData2().pos = a_view.eye;
+			if (auto* sky = RE::Sky::GetSingleton(); sky && sky->root) {
+				sky->root->local.translate = a_view.eye;
+				sky->root->world.translate = a_view.eye;
+			}
+			ApplyFov(a_camera, a_view.fovDeg);
+			// Pass the new rotation and position down to the render camera under the root.
 			RE::NiUpdateData update{};
-			a_root->UpdateDownwardPass(update, 0);
+			root->UpdateDownwardPass(update, 0);
+		}
+
+		void CountPlace(const RE::NiPoint3& a_skyrimCamera, const Puppet::CameraView& a_view)
+		{
+			const float move = a_skyrimCamera.GetDistance(a_view.eye);
+			const float height = float(a_view.eyeGmod / kGmodPerSkyrim);
+			++g_placed;
+			g_moveSum += move;
+			g_moveMax = std::max(g_moveMax, move);
+			g_heightMin = std::min(g_heightMin, height);
+			g_heightMax = std::max(g_heightMax, height);
+			g_eyeMin = std::min(g_eyeMin, a_view.eyeGmod);
+			g_eyeMax = std::max(g_eyeMax, a_view.eyeGmod);
+			for (float p : a_view.punchDeg) {
+				g_punchMax = std::max(g_punchMax, std::fabs(p));
+			}
 		}
 
 		// Learns the axis order from Skyrim's own camera while it agrees with the player's angles.
@@ -136,11 +217,12 @@ namespace gmsky::Camera
 		void AfterCameraUpdate(RE::PlayerCamera* a_camera)
 		{
 			++g_cameraCalls;
-			double heading = 0.0, pitch = 0.0;
+			Puppet::CameraView view;
 			auto* player = RE::PlayerCharacter::GetSingleton();
-			if (!player || !Wanted(a_camera, heading, pitch) || g_rejected) {
+			if (!player || !Wanted(a_camera, view) || g_rejected) {
 				return;
 			}
+			const double heading = view.headingRad, pitch = view.pitchRad;
 			auto* root = a_camera->cameraRoot.get();
 			const auto skyrim = root->world.rotate;
 			if (!g_learned) {
@@ -157,7 +239,9 @@ namespace gmsky::Camera
 			g_devSum += dev;
 			g_devMax = std::max(g_devMax, dev);
 			++g_devCount;
-			Turn(root, heading, pitch);
+			const auto skyrimCamera = root->world.translate;  // where Skyrim's own update put it
+			Drive(a_camera, view);
+			CountPlace(skyrimCamera, view);
 			++g_turnedAfterCamera;
 			g_why.clear();
 		}
@@ -206,11 +290,11 @@ namespace gmsky::Camera
 	void AfterPlayerUpdate()
 	{
 		auto* camera = RE::PlayerCamera::GetSingleton();
-		double heading = 0.0, pitch = 0.0;
-		if (!g_learned || !Wanted(camera, heading, pitch)) {
+		Puppet::CameraView view;
+		if (!g_learned || !Wanted(camera, view)) {
 			return;
 		}
-		Turn(camera->cameraRoot.get(), heading, pitch);
+		Drive(camera, view);
 		++g_turnedAfterPlayer;
 	}
 
@@ -220,7 +304,14 @@ namespace gmsky::Camera
 		logger::info("CAMERA updates={} turned by us after camera update={} after player update={} | Skyrim's own camera off our view avg={:.2f} max={:.2f} deg{}{}",
 			g_cameraCalls, g_turnedAfterCamera, g_turnedAfterPlayer, g_devCount ? g_devSum / g_devCount : 0.0f, g_devMax, learning,
 			g_why.empty() ? "" : " | not turning: " + g_why);
-		g_cameraCalls = g_turnedAfterCamera = g_turnedAfterPlayer = g_devCount = 0;
-		g_devSum = g_devMax = 0.0f;
+		if (g_placed) {
+			logger::info("CAMERA eye (step 4): placed {} times; Garry's Mod eye height {:.1f}..{:.1f} -> camera {:.1f}..{:.1f} Skyrim units above the feet; moved Skyrim's own camera by {:.1f} avg {:.1f} max; view punch max {:.2f} deg; FOV {:.1f} (Skyrim's own {:.1f})",
+				g_placed, g_eyeMin, g_eyeMax, g_heightMin, g_heightMax, g_moveSum / g_placed, g_moveMax, g_punchMax, g_fovInUse,
+				g_fovSaved ? g_savedWorldFov : 0.0f);
+		}
+		g_cameraCalls = g_turnedAfterCamera = g_turnedAfterPlayer = g_devCount = g_placed = 0;
+		g_devSum = g_devMax = g_moveSum = g_moveMax = g_punchMax = 0.0f;
+		g_heightMin = g_eyeMin = 1e9f;
+		g_heightMax = g_eyeMax = -1e9f;
 	}
 }

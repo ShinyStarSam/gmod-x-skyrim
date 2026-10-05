@@ -82,9 +82,14 @@ hook.Add("Tick", "gmsky_player_state", function()
 	-- Degrees per Skyrim mouse count, so Skyrim can draw the mouse movement still on its way here.
 	local degPerCount = predict:GetBool() and 0.022 * sensitivity:GetFloat() or 0
 	CheckJump(ply, pos, vel, engine.TickCount())
+	-- Camera (step 4): view punch (hard landings, later recoil) goes to Skyrim's camera; the FOV
+	-- is 0 until something sets it, then the player's own fov_desired is the one in use.
+	local punch = ply:GetViewPunchAngles()
+	local fov = ply:GetFOV()
+	if not fov or fov <= 0 then fov = ply:GetInfoNum("fov_desired", 75) end
 	anchored = gmsky.WritePlayerState(engine.TickCount(), pos.x, pos.y, pos.z, ang.p, ang.y, ang.r,
-		ply:EyePos().z - pos.z, vel.x, vel.y, vel.z, flags, ply:GetFOV(), degPerCount,
-		engine.TickInterval() * 1000) or 0
+		ply:EyePos().z - pos.z, vel.x, vel.y, vel.z, flags, fov, degPerCount,
+		engine.TickInterval() * 1000, punch.p, punch.y, punch.r) or 0
 	if T then T.UpdateGround(ply, anchored, (gmsky.Status())) end
 end)
 

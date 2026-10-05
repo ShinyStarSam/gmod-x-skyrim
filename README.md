@@ -66,7 +66,15 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   trees, fences, rocks. Streamed from Skyrim around you as you move (adapted from SkyCraft);
   `gmsky_ground grid` switches back to the older ray-grid ground.
 
+- **Camera from Garry's Mod's eye** (tested in game 2026-10-04, test 24): crouching lowers the
+  view smoothly, hard landings kick it (view punch), Skyrim uses Garry's Mod's FOV.
+- **Crouch = Skyrim's sneak** (test 24): the stealth eye, NPC detection and sneak attacks follow
+  Garry's Mod's crouch.
+- `tools/launch_gmod.ps1` loads gm_flatmap directly (test 24), with `gm_flatmap.bsp` in
+  `garrysmod/maps`.
+
 ## What doesn't work yet
+
 
 
 - Walking around objects (posts, rocks, carts) is bumpy: the ground is measured with rays 48

@@ -32,6 +32,57 @@ namespace gmsky::Puppet
 		// Garry's Mod's feet minus Skyrim's ground under them (step 3d check), only where the ray hit.
 		float g_aboveMin = 0.0f, g_aboveMax = 0.0f;
 		uint32_t g_aboveSamples = 0;
+		// Step 4b: crouch = Skyrim's sneak (adapted from SkyCraft's SyncSneak, MIT).
+		double g_sneakRetryAt = 0.0;  // NowS() before which we don't toggle again
+		uint32_t g_sneakToggles = 0, g_sneakRefused = 0, g_sneakLogged = 0;
+		bool g_gmodCrouching = false, g_skyrimSneaking = false;
+
+		double NowS()
+		{
+			static const double perS = [] {
+				LARGE_INTEGER f;
+				QueryPerformanceFrequency(&f);
+				return double(f.QuadPart);
+			}();
+			LARGE_INTEGER c;
+			QueryPerformanceCounter(&c);
+			return double(c.QuadPart) / perS;
+		}
+
+		// Garry's Mod's crouch is Skyrim's sneak, so NPCs' detection, the stealth eye, sneak attacks
+		// and the Sneak skill all follow it. Skyrim sneaks through its ActionSneak action, exactly
+		// what its Sneak key does (PlayerControls::DoAction(kActionSneak, kTry), 1.7.104 ID 42350,
+		// as SkyCraft found); it toggles, so it is sent whenever the two disagree, and again after
+		// 0.3 s if the animation graph didn't take it (mid-jump, say).
+		void SyncSneak(RE::PlayerCharacter* a_player, bool a_crouching)
+		{
+			const auto* state = a_player->AsActorState();
+			const bool sneaking = state->actorState1.sneaking;
+			g_gmodCrouching = a_crouching;
+			g_skyrimSneaking = sneaking;
+			const double now = NowS();
+			if (sneaking == a_crouching || now < g_sneakRetryAt || a_player->IsDead() || a_player->IsOnMount() || state->IsSwimming()) {
+				return;
+			}
+			auto* controls = RE::PlayerControls::GetSingleton();
+			if (!controls) {
+				return;
+			}
+			using DoActionFn = bool (*)(RE::PlayerControls*, RE::DEFAULT_OBJECT, std::int32_t);
+			static const auto doAction = reinterpret_cast<DoActionFn>(REL::ID(42350).address());
+			const bool ok = doAction(controls, RE::DEFAULT_OBJECT::kActionSneak, 2);
+			g_sneakRetryAt = now + 0.3;
+			++g_sneakToggles;
+			g_sneakRefused += ok ? 0 : 1;
+			if (g_sneakLogged < 20) {
+				++g_sneakLogged;
+				logger::info("SNEAK Garry's Mod {} crouching, Skyrim {} sneaking: toggled ({})", a_crouching ? "is" : "isn't",
+					sneaking ? "was" : "wasn't", ok ? "taken" : "refused");
+			}
+		}
+
+		RE::NiPoint3 g_eye{};     // step 4: camera position for the latest frame (Skyrim units)
+		float g_eyeGmod = 64.0f;
 		bool g_noclip = false;     // Garry's Mod's player is in noclip (GMSKY_PF_NOCLIP)
 		uint32_t g_noclipFrames = 0;
 		RE::NiPoint3 g_lastTargetRaw{};
@@ -242,9 +293,14 @@ namespace gmsky::Puppet
 			body = proxy && proxy->shapePhantom ? &proxy->shapePhantom->collidable : nullptr;
 		}
 		Body::Set(body, pos, noclip);
+		SyncSneak(a_player, (g.flags & GMSKY_PF_CROUCHING) != 0 && !noclip);
 
 		g_lastSet = pos;
 		g_haveLastSet = true;
+		// Step 4: the eye that goes with this frame's feet (Smooth blended the eye height with them).
+		g_eyeGmod = float(Smooth::EyeHeight());
+		g_eye = pos;
+		g_eye.z += float(g_eyeGmod / kGmodPerSkyrim);
 		g_lastHeadingDeg = heading * kRadToDeg;
 		g_lastPitchDeg = pitch * kRadToDeg;
 		++g_sets;
@@ -268,6 +324,31 @@ namespace gmsky::Puppet
 		return true;
 	}
 
+	bool CameraNow(CameraView& a_out)
+	{
+		if (!g_active || !g_haveLastSet) {
+			return false;
+		}
+		GmskyPlayerState g{};
+		if (!SlotRead(Link::Get().Shared().player_state, g)) {
+			return false;
+		}
+		double yaw = 0.0, pitch = 0.0;
+		PredictView(g, 0, yaw, pitch, false);
+		// View punch on top, in Garry's Mod's own terms (pitch down, yaw left), as Source adds it.
+		a_out.headingRad = GmodYawToSkyrimHeading(yaw + g.punch_deg[1]);
+		a_out.pitchRad = GmodPitchToSkyrimPitch(pitch + g.punch_deg[0]);
+		a_out.rollRad = g.punch_deg[2] / kRadToDeg;
+		for (int i = 0; i < 3; ++i) {
+			a_out.punchDeg[i] = g.punch_deg[i];
+		}
+		a_out.eye = g_eye;
+		a_out.eyeGmod = g_eyeGmod;
+		a_out.fovDeg = g.fov_deg;
+		a_out.drive = (g.flags & GMSKY_PF_DRIVE_CAMERA) != 0;
+		return true;
+	}
+
 	void LogSecond()
 	{
 		if (!g_active) {
@@ -280,6 +361,9 @@ namespace gmsky::Puppet
 				g_groundRay, g_groundLand, g_groundKeep,
 				g_aboveSamples ? fmt::format("min={:.1f} max={:.1f}", g_aboveMin, g_aboveMax) : std::string("- (no ray hit)"));
 			Smooth::LogSecond();
+			logger::info("SNEAK Garry's Mod {}, Skyrim {}; toggles this second {} (refused {})", g_gmodCrouching ? "crouching" : "standing",
+				g_skyrimSneaking ? "sneaking" : "not sneaking", g_sneakToggles, g_sneakRefused);
+			g_sneakToggles = g_sneakRefused = 0;
 			if (g_lagSamples) {
 				logger::info("VIEW lag (Skyrim frames, 1 = newest) avg={:.2f} max={} | prediction {}: frames={} ahead max={:.2f} deg, last frame {:.2f} deg",
 					double(g_lagSum) / g_lagSamples, g_lagMax, g_degPerCount > 0.0f ? "on" : "off (gmsky_predict 0)",
