@@ -8,6 +8,7 @@
 #include "Camera.h"
 #include "Collision.h"
 #include "Draw.h"
+#include "Hud.h"
 #include "Input.h"
 #include "Link.h"
 #include "Overlay.h"
@@ -217,6 +218,7 @@ namespace gmsky::Probe
 		Collision::PerFrame(a_player, g_origin);
 		Overlay::PerFrame();
 		Arms::PerFrame(a_player);
+		Hud::PerFrame(a_player, Arms::Live());
 
 		g_logTimer += a_delta;
 		if (g_logTimer >= 1.0f) {
@@ -230,6 +232,7 @@ namespace gmsky::Probe
 			Overlay::LogSecond();
 			Draw::LogSecond();
 			Arms::LogSecond();
+			Hud::LogSecond();
 			g_logTimer = 0.0f;
 		}
 	}

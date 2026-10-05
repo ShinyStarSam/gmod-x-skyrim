@@ -8,6 +8,7 @@ mod capture;
 mod d3d;
 mod lua;
 mod present;
+mod window;
 mod shapes;
 
 use gmsky_protocol::shm::{now_ms, now_qpc, Mapping, Side};
@@ -168,7 +169,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 27] = [
+    let funcs: [(&str, lua::CFn); 28] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -196,6 +197,7 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("OverlayPrepared", l_overlay_prepared),
         ("OverlayShot", l_overlay_shot),
         ("OverlayBlur", l_overlay_blur),
+        ("OverlayWindow", l_overlay_window),
     ];
     for (name, f) in funcs {
         (a.pushnumber)(l, side as f64); // upvalue 1 = side
@@ -734,6 +736,15 @@ unsafe extern "C" fn l_overlay_blur(l: *mut State) -> c_int {
     guarded(l, |a, _| {
         capture::set_blur((a.toboolean)(l, 1) != 0);
         0
+    })
+}
+
+/// gmsky.OverlayWindow(off_screen) -> line for the log: step 2d-2, moves Garry's Mod's window just past
+/// the screens (true) or back where it was (false) (window.rs).
+unsafe extern "C" fn l_overlay_window(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        lua::push_str(a, l, &window::set_off_screen((a.toboolean)(l, 1) != 0));
+        1
     })
 }
 

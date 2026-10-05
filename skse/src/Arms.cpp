@@ -97,6 +97,8 @@ namespace gmsky::Arms
 		}
 	}
 
+	bool Live() { return g_hiding; }
+
 	void Reset(const char* a_reason)
 	{
 		g_notLiveFrames = 0;

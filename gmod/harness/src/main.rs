@@ -87,7 +87,8 @@ FCVAR_ARCHIVE = 128
 FCVAR_REPLICATED = 8192
 -- HARNESS_CVARS[name] overrides a convar's value. The step B ground tests run on the ray grid;
 -- the step D tests switch gmsky_ground to shapes.
-HARNESS_CVARS = { gmsky_ground = "grid" }
+-- gmsky_overlay_hidewindow 0: the harness never asks to move a window (step 2d-2).
+HARNESS_CVARS = { gmsky_ground = "grid", gmsky_overlay_hidewindow = "0" }
 function CreateConVar(name, default)
 	local function v() local o = HARNESS_CVARS[name] if o ~= nil then return o end return default end
 	return { GetFloat = function() return tonumber(v()) end, GetBool = function() return tonumber(v()) ~= 0 end,
@@ -682,6 +683,10 @@ fn main() {
                 match i { Some(i) => { let j = s[i..].find(')').map(|j| i + j).unwrap_or(i); format!("{}X{}", &s[..i], &s[j..]) } None => s }
             });
             check(got.as_deref() == Some(want), &format!("halo keeps the overlay's alpha (on), untouched with halofix 0 / overlay off: {r:?}"));
+            // Step 2d-2: only Source's own window (class Valve001) is ever moved; the harness has none.
+            let r = lua.run(lc, "return gmsky.OverlayWindow(true) .. ' / ' .. gmsky.OverlayWindow(false)");
+            check(r == Ok(Some("no Garry's Mod window found (no visible Valve001 window in this process) / Garry's Mod's window wasn't moved".into())),
+                  &format!("OverlayWindow without a Garry's Mod window: {r:?}"));
             // Step 2c-1: a snapshot request without an open picture block says what to do.
             let r = lua.run(lc, "return gmsky.OverlayShot()");
             check(r == Ok(Some("no overlay block open: switch gmsky_overlay 1 on first".into())), &format!("OverlayShot without a block: {r:?}"));

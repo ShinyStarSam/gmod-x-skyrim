@@ -763,6 +763,32 @@ planned would not be enough.
   minimized, so it is moved behind Skyrim / off screen instead), and which HUD each game shows
   (Skyrim's compass, health bars and crosshair vs Garry's Mod's), decided with the user.
 
+**Step 2d in detail (decided with the user 2026-10-05, after the blur):**
+- **Skyrim's HUD while the overlay is live: hide** the crosshair (the sneak eye still shows while
+  sneaking, as SkyCraft), the health / magicka / stamina bars, the compass, the enchantment charge
+  meters and the arrow count. Kept: the activation prompt ("E Open"), enemy health bars,
+  notifications and subtitles. Everything hidden comes back when the overlay stops.
+- **Future (user, 2026-10-05): Garry's Mod's HUD takes over what Skyrim's showed:** stamina and
+  magicka bars in HOLOHUD, and quest markers, locations and enemies on HOLOHUD's compass and
+  minimap (Skyrim sends them through the link). Until then quest markers are not visible while
+  the overlay is live.
+- **The Garry's Mod window: moved off-screen** while the overlay is on (just past the right edge
+  of all screens; a minimized Source game stops drawing), and put back where it was when the
+  overlay switches off. Unknown: whether Source keeps drawing a window that is off-screen; the
+  5 s status line (frames presented and published) measures it.
+- **2d-1, Skyrim's HUD** (new `skse/src/Hud.cpp`, adapted from SkyCraft's `HideHud` /
+  `HideCrosshair`, MIT): on the game thread, every frame while the overlay is live (Skyrim's HUD
+  shows the crosshair again whenever it updates it), sets `_visible` (and the crosshair's
+  `_alpha`) of the HUD movie's elements; once, logs which element paths exist in this Skyrim
+  (paths are guesses for the compass: `CompassShoutMeterHolder`, which also holds the shout meter).
+  "Live" is the same test as the arms (2c-2). Logs: hidden / shown changes, paths found.
+- **2d-2, the window** (module, `capture.rs` neighbour `window.rs`): when `gmsky_overlay` switches
+  on, Garry's Mod's main window (this process's visible top-level window) is moved with
+  `SetWindowPos` (no resize, no activation, no Z-order change); its old position is kept and
+  restored when the overlay switches off. `gmsky_overlay_hidewindow 0` leaves it alone. Logs: old
+  and new position. Typing into Garry's Mod's console still works by switching to its window
+  (Alt+Tab): it keeps the focus while off-screen, and its picture is shown in Skyrim's window.
+
 **HUD decision after test 32 (2026-10-05, the user): a downloaded HUD, HOLOHUD 2.** (A "full Lua
 UI" of our own was started and cancelled the same day; nothing of it is kept.) The user installed
 **HOLOHUD 2** (D/GL4, "Customizable Holographic HUD", Workshop 3459525275), which has a compass and

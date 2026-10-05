@@ -102,6 +102,18 @@ concommand.Add("gmsky_overlay_probe", function()
 	print("[gmsky] " .. line)
 end)
 
+-- Step 2d-2: Garry's Mod's window moved just past the screens while the overlay is on (a minimized
+-- Source game stops drawing), and put back when it switches off (the user's choice).
+L.hidewindow = L.hidewindow or CreateConVar("gmsky_overlay_hidewindow", "1", FCVAR_ARCHIVE,
+	"1 = move Garry's Mod's window off-screen while the overlay is on (back when it switches off)")
+
+local function Window(off)
+	-- (At start-up nothing was moved: no restore, no log line.)
+	if off == (L.windowOff or false) or not gmsky.OverlayWindow then return end
+	L.windowOff = off
+	gmsky.Log("live overlay: " .. gmsky.OverlayWindow(off))
+end
+
 -- On / off, checked once per frame before drawing.
 local function Apply(on)
 	if on == L.on then return end
@@ -115,6 +127,7 @@ local function Apply(on)
 		WrapHalo()
 	else
 		if gmsky.OverlayEnable then gmsky.OverlayEnable(false) end
+		if L.windowOff then Window(false) end
 		-- (Not logged at start-up, when it was never on.)
 		if was ~= nil then gmsky.Log("live overlay OFF") end
 	end
@@ -136,6 +149,8 @@ local function ClearOnce(where)
 end
 
 hook.Add("PreRender", "gmsky_liveoverlay", function()
+	-- The window follows the overlay and gmsky_overlay_hidewindow (both can change any time).
+	if L.on ~= nil then Window(L.on and L.hidewindow:GetBool()) end
 	local blur = L.blur:GetBool()
 	if blur ~= L.blurSent and gmsky.OverlayBlur then
 		gmsky.OverlayBlur(blur)

@@ -11,4 +11,6 @@ namespace gmsky::Arms
 	void Reset(const char* a_reason);
 	// Once a second: how many meshes are hidden, and changes.
 	void LogSecond();
+	// The overlay counts as live (the same decision that hides the arms; step 2d-1 uses it too).
+	bool Live();
 }

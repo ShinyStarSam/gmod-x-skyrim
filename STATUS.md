@@ -54,7 +54,7 @@ Single-player and offline only.
 ## How to build and test
 
 - Rust (module, stub, harness, protocol): `cargo build --release`, then
-  `target\release\gmod_harness.exe` → `HARNESS PASSED` (111 checks); `cargo test --release` (ring and sweep unit tests). It runs our Lua in Garry's
+  `target\release\gmod_harness.exe` → `HARNESS PASSED` (112 checks); `cargo test --release` (ring and sweep unit tests). It runs our Lua in Garry's
   Mod's real `lua_shared.dll` with fake game objects (incl. the collision math and the ground
   entity's `TestCollision`); it does not run Garry's Mod's movement.
 - C++ layout test: `cmake --build build/protocol --config Release`, then
@@ -135,7 +135,11 @@ multisampling; hook 0.001 ms per frame; no crash.
   live; single-frame flashes around Skyrim menus fixed (0 in test 48). **Step 2c is done.**
   **Blur behind HOLOHUD's plates works (test 49):** done in Skyrim (`skse/src/Draw.cpp`), weight
   from the picture's alpha, every drawn frame, 0.007 ms CPU; `gmsky_overlay_blur 0/1`.
-  Next: step 2d (Garry's Mod window out of the way; which HUD each game shows).
+  **Step 2d works (test 50)** (user's choices): Skyrim's crosshair, bars, compass, charge meters
+  and arrows hidden while the overlay is live (`skse/src/Hud.cpp`); Garry's Mod's window moved
+  off-screen and back (`gmod/module/src/window.rs`, `gmsky_overlay_hidewindow`); Source keeps
+  drawing off-screen. **Phase 2's planned steps are done.**
+  Future (user): stamina / magicka bars and quest markers, locations, enemies in HOLOHUD.
 
 ## Evidence (tests 33-37)
 
