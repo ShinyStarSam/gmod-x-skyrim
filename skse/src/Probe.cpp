@@ -207,6 +207,7 @@ namespace gmsky::Probe
 		s.pitch_rad = a_player->data.angle.x;
 		s.height = a_player->GetHeight();
 		s.cell_form_id = cell ? cell->GetFormID() : 0;
+		s.flags = Combat::PlayerInCombat() ? GMSKY_SF_IN_COMBAT : 0u;
 		SlotWrite(link.Shared().skyrim_state, s);
 
 		if (g_needOrigin && cell) {
@@ -224,7 +225,7 @@ namespace gmsky::Probe
 		Hud::PerFrame(a_player, Arms::Live());
 		Actors::PerFrame(a_player, g_origin, g_frame);
 		Hitboxes::PerFrame(a_player, g_origin, g_frame);
-		Combat::PerFrame(a_player, g_origin, Puppet::IsActive());
+		Combat::PerFrame(a_player, g_origin, Puppet::IsActive(), a_delta);
 
 		g_logTimer += a_delta;
 		if (g_logTimer >= 1.0f) {

@@ -181,7 +181,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 38] = [
+    let funcs: [(&str, lua::CFn); 41] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -220,6 +220,9 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("HitTestStart", l_hit_test_start),
         ("HitTestReport", l_hit_test_report),
         ("SendHit", l_send_hit),
+        ("ReadHurts", l_read_hurts),
+        ("SkyrimFlags", l_skyrim_flags),
+        ("ConsoleWindow", l_console_window),
     ];
     for (name, f) in funcs {
         (a.pushnumber)(l, side as f64); // upvalue 1 = side
@@ -774,6 +777,60 @@ unsafe extern "C" fn l_send_hit(l: *mut State) -> c_int {
     })
 }
 
+/// Phase 3 step 3e: the server's read position in Skyrim's hurt ring (None = not read yet).
+static HURT_TAIL: Mutex<Option<u32>> = Mutex::new(None);
+
+/// gmsky.ReadHurts() -> list, lost: the hurt events Skyrim wrote since the last call (Skyrim's NPCs
+/// hurting the player), oldest first: { attacker, damage, source, kind, flags }; lost = events
+/// that were overwritten before this read. Nothing without a link. The first call only takes
+/// Skyrim's current position (old hurts never land). Server side only (one read position).
+unsafe extern "C" fn l_read_hurts(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let Ok(m) = mapping() else { return 0 };
+        let ring = &m.shared().hurt_events;
+        let head = ring.head.load(std::sync::atomic::Ordering::Acquire);
+        let mut tail = HURT_TAIL.lock().unwrap_or_else(|e| e.into_inner());
+        let mut from = match *tail {
+            Some(t) if t <= head => t,
+            _ => head, // first read, or a new block (head went back)
+        };
+        let mut lost = 0u32;
+        if head - from > gmsky_protocol::HURT_MAX as u32 {
+            lost = head - from - gmsky_protocol::HURT_MAX as u32;
+            from = head - gmsky_protocol::HURT_MAX as u32;
+        }
+        *tail = Some(head);
+        (a.createtable)(l, (head - from) as c_int, 0);
+        for (k, i) in (from..head).enumerate() {
+            let e = ring.get(i);
+            (a.createtable)(l, 0, 5);
+            let num = |key: &str, v: f64| {
+                (a.pushnumber)(l, v);
+                lua::set_field(a, l, -2, key);
+            };
+            num("attacker", e.attacker as f64);
+            num("damage", e.damage as f64);
+            num("source", e.source as f64);
+            num("kind", e.kind as f64);
+            num("flags", e.flags as f64);
+            (a.rawseti)(l, -2, k as c_int + 1);
+        }
+        (a.pushnumber)(l, lost as f64);
+        2
+    })
+}
+
+/// gmsky.SkyrimFlags() -> flags, frame: Skyrim's GMSKY_SF_* bits (1 = someone fights the player,
+/// step 3f) and its frame; nothing before Skyrim has written its state.
+unsafe extern "C" fn l_skyrim_flags(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let Some((k, _)) = mapping().ok().and_then(|m| m.shared().skyrim_state.read()) else { return 0 };
+        (a.pushnumber)(l, k.flags as f64);
+        (a.pushnumber)(l, k.frame as f64);
+        2
+    })
+}
+
 /// QueryPerformanceCounter ticks to milliseconds.
 fn qpc_ms(ticks: i64) -> f64 {
     #[link(name = "kernel32")]
@@ -1089,6 +1146,16 @@ unsafe extern "C" fn l_overlay_blur(l: *mut State) -> c_int {
 unsafe extern "C" fn l_overlay_window(l: *mut State) -> c_int {
     guarded(l, |a, _| {
         lua::push_str(a, l, &window::set_off_screen((a.toboolean)(l, 1) != 0));
+        1
+    })
+}
+
+/// gmsky.ConsoleWindow(front) -> line for the log: Garry's Mod's window over Skyrim's and in front
+/// (true), or back off-screen with Skyrim in front (false); for Garry's Mod's console (F1).
+unsafe extern "C" fn l_console_window(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let pid = mapping().map(|m| m.shared().header.skyrim_pid.load(std::sync::atomic::Ordering::Acquire)).unwrap_or(0);
+        lua::push_str(a, l, &window::console_front((a.toboolean)(l, 1) != 0, pid));
         1
     })
 }

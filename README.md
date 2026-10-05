@@ -98,6 +98,12 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   rays, `gmsky_hitbox_test`), and the hits go through Skyrim's own hit system: NPCs bleed, react,
   fight back and die. Damage × 3, head shots × 2 more (`gmsky_damage_scale`,
   `gmsky_headshot_scale`). You bump into NPCs like Garry's Mod's own; they shove you aside.
+- **Skyrim's NPCs hurt you** (Phase 3, tested in game 2026-10-05, test 61): their hits take
+  Garry's Mod's health (HOLOHUD's bar), 1:1 (`gmsky_hurt_scale`); Skyrim's own health stays full and
+  Skyrim can't kill you. Falling hurts once (Garry's Mod's own fall damage).
+- **Dying and respawning** (Phase 3, tested in game 2026-10-05, test 62): you die in Garry's Mod
+  and click to respawn, all from Skyrim's window; you come back at full health at the last spot
+  where nobody was fighting you. No Skyrim save reload.
 
 ## What doesn't work yet
 
@@ -105,7 +111,8 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   explosions, tracers, the physgun beam): only the hands, weapon and HUD are drawn.
 - Grenades and AR2 balls fall through Skyrim's world and don't hurt NPCs; the physgun can't grab
   NPCs or corpses (Garry's Mod's physics doesn't see Skyrim's world or NPCs).
-- Skyrim's NPCs can't hurt you yet; shooting corpses doesn't move them yet.
+- Shooting corpses doesn't move them yet. Skyrim potions and healing don't heal Garry's Mod's player.
+- F1 (Garry's Mod's console in its own window): built, not tested in game yet.
 
 - Quest markers and locations: Skyrim's compass is hidden while the overlay is on, and HOLOHUD's
   compass and minimap don't show Skyrim's markers yet (planned). No stamina / magicka display.

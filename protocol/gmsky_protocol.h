@@ -19,7 +19,7 @@
 #define GMSKY_MAP_SIZE (GMSKY_RING_OFFSET + GMSKY_RING_BYTES)
 #define GMSKY_MAGIC 0x594B534Du      // "MSKY": layout initialized and ready
 #define GMSKY_MAGIC_INIT 0x54494E49u // "INIT": one side is initializing right now
-#define GMSKY_VERSION 13u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain; 8: collision ring; 9: view punch; 10: GmskyActors; 11: GmskyHitboxes; 12: hit test; 13: hit events
+#define GMSKY_VERSION 14u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain; 8: collision ring; 9: view punch; 10: GmskyActors; 11: GmskyHitboxes; 12: hit test; 13: hit events; 14: hurt events
 #define GMSKY_HEARTBEAT_TIMEOUT_MS 2000u
 
 // GmskyPlayerState.flags
@@ -46,6 +46,7 @@
 #define GMSKY_IN_ATTACK2 0x200u
 #define GMSKY_IN_RELOAD 0x400u
 #define GMSKY_IN_MENU 0x800u        // Q: Sandbox's spawn menu, +menu while held (step 3a)
+#define GMSKY_IN_CONSOLE 0x1000u    // F1 held: open Garry's Mod's console in its own window (after test 62)
 #define GMSKY_IN_SLOT_SHIFT 16u     // bits 16-19: weapon slot key held, 1-6 (0 = none) (step 3a)
 #define GMSKY_IN_SLOT_MASK 0xF0000u
 
@@ -76,9 +77,10 @@ typedef struct GmskySkyrimState {
     float pitch_rad;    // Skyrim angle.x
     float height;       // player capsule / bound height, Skyrim units
     uint32_t cell_form_id;
-    uint32_t flags;
+    uint32_t flags;     // GMSKY_SF_*
     uint32_t reserved0;
 } GmskySkyrimState;
+#define GMSKY_SF_IN_COMBAT 0x1u  // someone is fighting the player (step 3f: no calm spot now)
 
 // Garry's Mod -> Skyrim. The authoritative player, in Garry's Mod local units.
 typedef struct GmskyPlayerState {
@@ -308,6 +310,32 @@ typedef struct GmskyHitEvents {
     GmskyHitEvent ev[GMSKY_EV_MAX];
 } GmskyHitEvents;
 
+// ---- Hurt events (Skyrim -> Garry's Mod; Phase 3 step 3e) ----
+// Skyrim's NPCs hurting the player. A ring like GmskyHitEvents, the other way: Skyrim writes
+// ev[head % GMSKY_HURT_MAX], then adds 1 to head (release); Garry's Mod keeps its own read
+// position (starting at head, so old hurts never land).
+#define GMSKY_HURT_MAX 32
+#define GMSKY_HURTK_MELEE 0u
+#define GMSKY_HURTK_PROJECTILE 1u
+#define GMSKY_HURTK_MAGIC 2u
+#define GMSKY_HURTK_OTHER 3u
+#define GMSKY_HURTF_BLOCKED 0x1u  // blocked in Skyrim (the damage is already reduced)
+#define GMSKY_HURTF_POWER 0x2u    // a power attack
+typedef struct GmskyHurtEvent {
+    uint32_t attacker;  // FormID of the actor who did it, 0 = none / unknown
+    float damage;       // Skyrim damage (the health Skyrim took off; armour already applied)
+    uint32_t source;    // FormID of the weapon / spell, 0 = unknown
+    uint8_t kind;       // GMSKY_HURTK_*
+    uint8_t flags;      // GMSKY_HURTF_*
+    uint16_t reserved;
+} GmskyHurtEvent;
+
+typedef struct GmskyHurtEvents {
+    uint32_t head;      // events written so far (Skyrim); atomic
+    uint32_t session;   // process id of the Skyrim that wrote last (for logs)
+    GmskyHurtEvent ev[GMSKY_HURT_MAX];
+} GmskyHurtEvents;
+
 GMSKY_DEFINE_SLOT(GmskyOriginSlot, GmskyOrigin);
 GMSKY_DEFINE_SLOT(GmskySkyrimStateSlot, GmskySkyrimState);
 GMSKY_DEFINE_SLOT(GmskyPlayerStateSlot, GmskyPlayerState);
@@ -330,6 +358,7 @@ typedef struct GmskyShared {
     GmskyHitTestRequestSlot hit_test_request;  // written by Garry's Mod (v12)
     GmskyHitTestResultSlot hit_test_result;    // written by Skyrim (v12)
     GmskyHitEvents hit_events;                 // written by Garry's Mod, read by Skyrim (v13)
+    GmskyHurtEvents hurt_events;               // written by Skyrim, read by Garry's Mod (v14)
 } GmskyShared;
 
 // ---- Collision ring (Skyrim -> Garry's Mod; DESIGN.md re-plan step D; adapted from SkyCraft, MIT) ----
@@ -512,7 +541,10 @@ GMSKY_ASSERT(sizeof(GmskyHitEvent) == 52);
 GMSKY_ASSERT(offsetof(GmskyHitEvent, dmg_type) == 40);
 GMSKY_ASSERT(sizeof(GmskyHitEvents) == 8 + 52 * GMSKY_EV_MAX);
 GMSKY_ASSERT(offsetof(GmskyShared, hit_events) == 54704);
-GMSKY_ASSERT(sizeof(GmskyShared) == 54704 + 3336);
+GMSKY_ASSERT(sizeof(GmskyHurtEvent) == 16);
+GMSKY_ASSERT(sizeof(GmskyHurtEvents) == 8 + 16 * GMSKY_HURT_MAX);
+GMSKY_ASSERT(offsetof(GmskyShared, hurt_events) == 54704 + 3336);
+GMSKY_ASSERT(sizeof(GmskyShared) == 54704 + 3336 + 520);
 GMSKY_ASSERT(sizeof(GmskyShared) <= GMSKY_SLOTS_SIZE);
 GMSKY_ASSERT(sizeof(GmskyColMsgHeader) == 8);
 GMSKY_ASSERT(sizeof(GmskyColClear) == 8);

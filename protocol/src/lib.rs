@@ -16,7 +16,7 @@ pub const RING_BYTES: usize = 16 << 20;
 pub const MAP_SIZE: usize = RING_OFFSET + RING_BYTES;
 pub const MAGIC: u32 = 0x594B_534D;
 pub const MAGIC_INIT: u32 = 0x5449_4E49;
-pub const VERSION: u32 = 13; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain; 8: collision ring; 9: view punch; 10: Actors; 11: Hitboxes; 12: hit test; 13: hit events
+pub const VERSION: u32 = 14; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain; 8: collision ring; 9: view punch; 10: Actors; 11: Hitboxes; 12: hit test; 13: hit events; 14: hurt events
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
 
 pub const PF_ON_GROUND: u32 = 0x1;
@@ -85,6 +85,7 @@ pub const IN_ATTACK: u32 = 0x100;
 pub const IN_ATTACK2: u32 = 0x200;
 pub const IN_RELOAD: u32 = 0x400;
 pub const IN_MENU: u32 = 0x800;
+pub const IN_CONSOLE: u32 = 0x1000;
 pub const IN_SLOT_SHIFT: u32 = 16;
 pub const IN_SLOT_MASK: u32 = 0xF0000;
 
@@ -401,6 +402,55 @@ impl HitEvents {
     }
 }
 
+/// SkyrimState.flags: someone is fighting the player (Phase 3 step 3f).
+pub const SF_IN_COMBAT: u32 = 0x1;
+
+/// Skyrim's NPCs hurting the player (Phase 3 step 3e): a ring of events, see gmsky_protocol.h.
+pub const HURT_MAX: usize = 32;
+pub const HURTK_MELEE: u8 = 0;
+pub const HURTK_PROJECTILE: u8 = 1;
+pub const HURTK_MAGIC: u8 = 2;
+pub const HURTK_OTHER: u8 = 3;
+pub const HURTF_BLOCKED: u8 = 0x1;
+pub const HURTF_POWER: u8 = 0x2;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct HurtEvent {
+    pub attacker: u32,
+    pub damage: f32,
+    pub source: u32,
+    pub kind: u8,
+    pub flags: u8,
+    pub reserved: u16,
+}
+
+#[repr(C)]
+pub struct HurtEvents {
+    pub head: AtomicU32,
+    pub session: AtomicU32,
+    ev: UnsafeCell<[HurtEvent; HURT_MAX]>,
+}
+
+// Safety: one writer (Skyrim) by protocol; readers only read slots behind `head`.
+unsafe impl Sync for HurtEvents {}
+
+impl HurtEvents {
+    /// Writer (Skyrim's side; here for tests): appends an event; returns the new head.
+    pub fn push(&self, e: &HurtEvent) -> u32 {
+        self.session.store(std::process::id(), Ordering::Relaxed);
+        let h = self.head.load(Ordering::Relaxed);
+        unsafe { std::ptr::write_volatile((self.ev.get() as *mut HurtEvent).add(h as usize % HURT_MAX), *e) };
+        fence(Ordering::Release);
+        self.head.store(h.wrapping_add(1), Ordering::Release);
+        h.wrapping_add(1)
+    }
+    /// Reader (Garry's Mod): event number i (0-based); read only behind `head`.
+    pub fn get(&self, i: u32) -> HurtEvent {
+        unsafe { std::ptr::read_volatile((self.ev.get() as *const HurtEvent).add(i as usize % HURT_MAX)) }
+    }
+}
+
 /// A latest-value slot guarded by a seqlock. `seq == 0` means never written.
 #[repr(C)]
 pub struct Slot<T> {
@@ -461,6 +511,7 @@ pub struct Shared {
     pub hit_test_request: Slot<HitTestRequest>,
     pub hit_test_result: Slot<HitTestResult>,
     pub hit_events: HitEvents,
+    pub hurt_events: HurtEvents,
 }
 
 // ---- Layout checks: the same numbers as gmsky_protocol.h ----
@@ -523,7 +574,10 @@ const _: () = {
     assert!(offset_of!(HitEvent, dmg_type) == 40);
     assert!(size_of::<HitEvents>() == 8 + 52 * EV_MAX);
     assert!(offset_of!(Shared, hit_events) == 54704);
-    assert!(size_of::<Shared>() == 54704 + 3336);
+    assert!(size_of::<HurtEvent>() == 16);
+    assert!(size_of::<HurtEvents>() == 8 + 16 * HURT_MAX);
+    assert!(offset_of!(Shared, hurt_events) == 54704 + 3336);
+    assert!(size_of::<Shared>() == 54704 + 3336 + 520);
     assert!(size_of::<Shared>() <= SLOTS_SIZE);
     assert!(size_of::<ColMsgHeader>() == 8);
     assert!(size_of::<ColClear>() == 8);

@@ -5,6 +5,9 @@
 -- While a menu cursor is up (spawn menu, any menu with a mouse), Skyrim's mouse moves and clicks
 -- that cursor instead (gui.Internal*, as VRMod drives menus); a cursor arrow is drawn into the
 -- overlay, since the real Windows cursor isn't in the picture. DESIGN.md "Phase 3 steps", 3a.
+-- F1 in Skyrim (after test 62): Garry's Mod's own console, in Garry's Mod's own window brought over
+-- Skyrim's (so typing works as normal); when it closes, or you click back into Skyrim, the window
+-- goes back off-screen and Skyrim is in front again.
 
 local gmsky = gmsky
 
@@ -12,7 +15,7 @@ local cursorSpeed = CreateConVar("gmsky_cursor_speed", "1", FCVAR_ARCHIVE,
 	"Garry's Mod menu cursor: pixels per Skyrim mouse count")
 
 -- GMSKY_IN_* bits in GmskyInput.buttons (protocol/gmsky_protocol.h)
-local SKY_ATTACK, SKY_ATTACK2, SKY_MENU = 0x100, 0x200, 0x800
+local SKY_ATTACK, SKY_ATTACK2, SKY_MENU, SKY_CONSOLE = 0x100, 0x200, 0x800, 0x1000
 local SLOT_MASK, SLOT_SHIFT = 0xF0000, 16
 
 -- Garry's Mod's key codes (the BUTTON_CODE enums), passed to PlayerBindPress like the engine does.
@@ -91,6 +94,42 @@ local function MenuMouse(code, pressed, released)
 	end
 end
 
+-- ---- F1: Garry's Mod's console ----------------------------------------------------------------
+local C = gmsky.console or { open = false }
+gmsky.console = C
+
+local function CloseConsole(why)
+	C.open = false
+	if gui.IsConsoleVisible() then RunConsoleCommand("hideconsole") end
+	gmsky.Log("console: closed (" .. why .. "): " .. gmsky.ConsoleWindow(false))
+end
+
+function C.Open()
+	if C.open then return end
+	C.open, C.seen, C.since = true, false, RealTime()
+	gmsky.Log("console: F1 from Skyrim: " .. gmsky.ConsoleWindow(true))
+	RunConsoleCommand("showconsole")
+end
+
+-- Every frame (Think, and DrawOverlay in case Think stops while the console pauses the game).
+function C.Check()
+	if not C.open then return end
+	local visible = gui.IsConsoleVisible()
+	if visible and not C.seen then
+		C.seen = true
+		gmsky.Log(string.format("console: visible after %.2f s", RealTime() - C.since))
+	end
+	local age = RealTime() - C.since
+	if C.seen and not visible then
+		CloseConsole("the console was closed")
+	elseif age > 1 and not system.HasFocus() then
+		CloseConsole("Garry's Mod's window lost the front")
+	elseif not C.seen and age > 3 then
+		CloseConsole("the console never showed")
+	end
+end
+hook.Add("Think", "gmsky_console", C.Check)
+
 hook.Add("Think", "gmsky_binds", function()
 	local active, buttons, dx, dy, dw = gmsky.ReadInput()
 	if not active then
@@ -107,6 +146,8 @@ hook.Add("Think", "gmsky_binds", function()
 		B.on = true
 		gmsky.Log("binds: input from Skyrim ON")
 	end
+
+	if Edge(buttons, SKY_CONSOLE) then C.Open() end
 
 	-- Q: Sandbox's spawn menu while held (works with or without a cursor up).
 	local qDown, qUp = Edge(buttons, SKY_MENU)
@@ -156,6 +197,7 @@ local function Shifted(poly, x, y)
 	return out
 end
 hook.Add("DrawOverlay", "gmsky_binds_cursor", function()
+	C.Check()
 	if not B.cursor or not B.on then return end
 	draw.NoTexture()
 	surface.SetDrawColor(0, 0, 0, 255)

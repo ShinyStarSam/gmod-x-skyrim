@@ -2,7 +2,8 @@
 // window is in front and no Skyrim menu has the input, keyboard and mouse go to Garry's Mod
 // (GmskyInput slot) instead of Skyrim's own player. Skyrim keeps Esc, ~, J, M, F9, and E for
 // activating doors, people and containers. V toggles Garry's Mod's noclip (step 3e). 1-6 and the
-// mouse wheel choose Garry's Mod's weapon, Q opens its spawn menu (Phase 3 step 3a). Approach and hooks adapted from SkyCraft (MIT).
+// mouse wheel choose Garry's Mod's weapon, Q opens its spawn menu (Phase 3 step 3a). F1 opens
+// Garry's Mod's console in its own window (after test 62). Approach and hooks adapted from SkyCraft (MIT).
 #include "Input.h"
 
 #include "Link.h"
@@ -20,6 +21,7 @@ namespace gmsky::Input
 		constexpr uint32_t kDikF9 = 0x43;       // quickload
 		constexpr uint32_t kDikE = 0x12;        // Skyrim activate
 		constexpr uint32_t kDikV = 0x2F;        // Garry's Mod noclip (its default key)
+		constexpr uint32_t kDikF1 = 0x3B;       // Garry's Mod's console
 
 		bool IsSkyrimMenuKey(uint32_t a_code)
 		{
@@ -40,6 +42,7 @@ namespace gmsky::Input
 			case 0x38: return GMSKY_IN_WALK;     // Left Alt
 			case 0x13: return GMSKY_IN_RELOAD;   // R
 			case 0x10: return GMSKY_IN_MENU;     // Q (Sandbox's spawn menu)
+			case kDikF1: return GMSKY_IN_CONSOLE;  // F1 (Garry's Mod's console)
 			default: return 0;
 			}
 		}
@@ -205,6 +208,11 @@ namespace gmsky::Input
 							}
 							changed = true;
 							continue;
+						}
+						if (code == kDikF1 && down) {
+							// Skyrim's window is in front: let Garry's Mod bring its window forward.
+							const bool allowed = AllowSetForegroundWindow(ASFW_ANY) != 0;
+							logger::info("F1: Garry's Mod's console asked for (Garry's Mod may take the front: {})", allowed);
 						}
 						action = ActionForKey(code);
 					} else if (b->GetDevice() == RE::INPUT_DEVICE::kMouse) {

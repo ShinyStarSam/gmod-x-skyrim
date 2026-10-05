@@ -7,6 +7,12 @@
 // function, so the NPC reacts, bleeds, gets angry and it counts as a crime like a Skyrim hit; a
 // vanilla weapon stands in for the impact effect and sound; explosions use plain damage and
 // Skyrim's explosion knock-back. Corpses: step 3d-2 (logged only here).
+//
+// Step 3e (DESIGN.md "3e in detail"): Skyrim's NPCs hurting the player. Garry's Mod's health
+// decides, so while the puppet drives the Skyrim player is essential and topped back to full every
+// frame; what was topped up goes to Garry's Mod as a hurt event, with the attacker and kind from
+// Skyrim's hit event and a HandleHealthDamage hook (SkyCraft, MIT, Combat.cpp HitSink /
+// HandleHealthDamageHook / BridgePlayerDamage / SetEssential).
 #include "Combat.h"
 
 #include "Link.h"
@@ -30,6 +36,226 @@ namespace gmsky::Combat
 
 		bool g_haveTail = false;
 		uint32_t g_tail = 0;
+
+		// ---- step 3e: what hurt the player (game thread) ----
+		constexpr float kHitMemorySeconds = 0.35f;  // how long a hit event can explain a health drop
+		constexpr float kDotFlushSeconds = 0.5f;    // spells / poison / unknown damage is batched
+
+		struct RecentHit
+		{
+			RE::FormID attacker{ 0 };
+			RE::FormID source{ 0 };
+			uint8_t kind{ GMSKY_HURTK_MELEE };
+			uint8_t flags{ 0 };
+			float age{ 99.0f };
+		};
+		RecentHit g_lastHit;             // from TESHitEvent
+		RE::FormID g_lastDamager{ 0 };   // from HandleHealthDamage
+		float g_lastDamagerAge{ 99.0f };
+
+		struct PendingHurt
+		{
+			RE::FormID attacker{ 0 };
+			uint8_t kind{ GMSKY_HURTK_OTHER };
+			float damage{ 0.0f };
+			float age{ 0.0f };
+		};
+		PendingHurt g_dot;  // spells, poison, unknown: added up, sent every kDotFlushSeconds
+
+		bool g_essentialSet = false;
+		bool g_healthPrimed = false;
+
+		// Step 3f: someone fighting the player (SkyCraft's AnyoneFighting, MIT).
+		bool g_inCombat = false;
+		float g_combatTimer = 0.0f;
+		bool AnyoneFighting(RE::PlayerCharacter* a_player)
+		{
+			auto* lists = RE::ProcessLists::GetSingleton();
+			if (!lists) {
+				return false;
+			}
+			const auto playerPos = a_player->GetPosition();
+			for (auto& handle : lists->highActorHandles) {
+				auto actor = handle.get();
+				if (actor && !actor->IsDead() && actor->IsInCombat() && actor->GetActorRuntimeData().currentCombatTarget.get().get() == a_player &&
+					actor->GetPosition().GetDistance(playerPos) < 6000.0f) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		struct HurtSecond
+		{
+			uint32_t hitEvents{ 0 }, sent{ 0 };
+			float toppedUp{ 0 }, sentDamage{ 0 };
+		} g_hurt;
+		uint32_t g_hurtLines = 0;
+
+		const char* HurtKindName(uint8_t a_kind)
+		{
+			switch (a_kind) {
+			case GMSKY_HURTK_MELEE: return "melee";
+			case GMSKY_HURTK_PROJECTILE: return "projectile";
+			case GMSKY_HURTK_MAGIC: return "magic";
+			default: return "other";
+			}
+		}
+
+		class HitSink final : public RE::BSTEventSink<RE::TESHitEvent>
+		{
+		public:
+			static HitSink* Get()
+			{
+				static HitSink sink;
+				return &sink;
+			}
+
+			RE::BSEventNotifyControl ProcessEvent(const RE::TESHitEvent* a_event, RE::BSTEventSource<RE::TESHitEvent>*) override
+			{
+				auto* player = RE::PlayerCharacter::GetSingleton();
+				if (!a_event || !player || a_event->target.get() != player || !g_essentialSet) {
+					return RE::BSEventNotifyControl::kContinue;
+				}
+				RecentHit hit;
+				hit.attacker = a_event->cause ? a_event->cause->GetFormID() : 0;
+				hit.source = a_event->source;
+				hit.age = 0.0f;
+				if (a_event->projectile != 0) {
+					hit.kind = GMSKY_HURTK_PROJECTILE;
+				} else if (auto* source = RE::TESForm::LookupByID(a_event->source)) {
+					switch (source->GetFormType()) {
+					case RE::FormType::Spell:
+					case RE::FormType::Enchantment:
+					case RE::FormType::Scroll:
+					case RE::FormType::Ingredient:
+					case RE::FormType::AlchemyItem:
+						hit.kind = GMSKY_HURTK_MAGIC;
+						break;
+					default:
+						hit.kind = GMSKY_HURTK_MELEE;
+						break;
+					}
+				}
+				if (a_event->flags.any(RE::TESHitEvent::Flag::kPowerAttack)) {
+					hit.flags |= GMSKY_HURTF_POWER;
+				}
+				if (a_event->flags.any(RE::TESHitEvent::Flag::kHitBlocked)) {
+					hit.flags |= GMSKY_HURTF_BLOCKED;
+				}
+				g_lastHit = hit;
+				++g_hurt.hitEvents;
+				return RE::BSEventNotifyControl::kContinue;
+			}
+		};
+
+		// Skyrim's damage path calls this on the victim with the attacker; we only need "who".
+		struct HandleHealthDamageHook
+		{
+			static void thunk(RE::Actor* a_this, RE::Actor* a_attacker, float a_damage)
+			{
+				func(a_this, a_attacker, a_damage);
+				if (a_attacker && a_attacker != a_this) {
+					g_lastDamager = a_attacker->GetFormID();
+					g_lastDamagerAge = 0.0f;
+				}
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		void SendHurt(uint8_t a_kind, float a_damage, RE::FormID a_attacker, RE::FormID a_source, uint8_t a_flags)
+		{
+			if (a_damage <= 0.01f) {
+				return;
+			}
+			auto& ring = Link::Get().Shared().hurt_events;
+			auto* head = reinterpret_cast<std::atomic<uint32_t>*>(&ring.head);
+			const uint32_t h = head->load(std::memory_order_relaxed);
+			GmskyHurtEvent ev{};
+			ev.attacker = a_attacker;
+			ev.damage = a_damage;
+			ev.source = a_source;
+			ev.kind = a_kind;
+			ev.flags = a_flags;
+			ring.session = GetCurrentProcessId();
+			ring.ev[h % GMSKY_HURT_MAX] = ev;
+			head->store(h + 1, std::memory_order_release);
+			++g_hurt.sent;
+			g_hurt.sentDamage += a_damage;
+			if (g_hurtLines < 20) {
+				++g_hurtLines;
+				auto* who = a_attacker ? RE::TESForm::LookupByID<RE::Actor>(a_attacker) : nullptr;
+				auto* src = a_source ? RE::TESForm::LookupByID(a_source) : nullptr;
+				logger::info("COMBAT player hurt by {} ({:08X}) with {} ({:08X}): {:.1f} Skyrim damage, {}{}{} -> Garry's Mod (event {})",
+					who ? who->GetDisplayFullName() : "nobody", a_attacker, src ? src->GetName() : "?", a_source, a_damage,
+					HurtKindName(a_kind), (a_flags & GMSKY_HURTF_POWER) ? ", power attack" : "",
+					(a_flags & GMSKY_HURTF_BLOCKED) ? ", blocked" : "", h + 1);
+			}
+		}
+
+		void SetEssential(RE::PlayerCharacter* a_player, bool a_on)
+		{
+			if (a_on == g_essentialSet) {
+				return;
+			}
+			auto& flags = a_player->GetActorRuntimeData().boolFlags;
+			if (a_on) {
+				flags.set(RE::Actor::BOOL_FLAGS::kEssential);
+			} else {
+				flags.reset(RE::Actor::BOOL_FLAGS::kEssential);
+			}
+			g_essentialSet = a_on;
+			logger::info("COMBAT Skyrim player essential {} (Garry's Mod {} the player's health)", a_on ? "on" : "off",
+				a_on ? "owns" : "no longer owns");
+		}
+
+		// Garry's Mod owns the player's health: Skyrim damage is topped back up here and sent.
+		void BridgePlayerDamage(RE::PlayerCharacter* a_player, float a_delta)
+		{
+			auto* av = a_player->AsActorValueOwner();
+			const float max = a_player->GetActorValueMax(RE::ActorValue::kHealth);
+			const float cur = av->GetActorValue(RE::ActorValue::kHealth);
+			const float deficit = max - cur;
+			g_lastHit.age += a_delta;
+			g_lastDamagerAge += a_delta;
+			if (!g_healthPrimed) {
+				// Whatever damage the save had before Garry's Mod took over isn't a new hit.
+				g_healthPrimed = true;
+				if (deficit > 0.0f) {
+					av->RestoreActorValue(RE::ActorValue::kHealth, deficit);
+					logger::info("COMBAT player health topped up from {:.0f} to {:.0f} as Garry's Mod takes over (not sent)", cur, max);
+				}
+				return;
+			}
+			if (deficit > 0.01f) {
+				av->RestoreActorValue(RE::ActorValue::kHealth, deficit);
+				g_hurt.toppedUp += deficit;
+				RE::FormID attacker = 0, source = 0;
+				uint8_t kind = GMSKY_HURTK_OTHER, flags = 0;
+				if (g_lastHit.age < kHitMemorySeconds) {
+					attacker = g_lastHit.attacker;
+					source = g_lastHit.source;
+					kind = g_lastHit.kind;
+					flags = g_lastHit.flags;
+					g_lastHit.age = 99.0f;  // one hit event explains one health drop
+				} else if (g_lastDamagerAge < kHitMemorySeconds) {
+					attacker = g_lastDamager;
+					kind = GMSKY_HURTK_MAGIC;  // damage over time from someone (spells, poison)
+				}
+				if (kind == GMSKY_HURTK_MELEE || kind == GMSKY_HURTK_PROJECTILE) {
+					SendHurt(kind, deficit, attacker, source, flags);
+				} else {
+					g_dot.attacker = attacker ? attacker : g_dot.attacker;
+					g_dot.kind = kind;
+					g_dot.damage += deficit;
+				}
+			}
+			g_dot.age += a_delta;
+			if (g_dot.age >= kDotFlushSeconds) {
+				SendHurt(g_dot.kind, g_dot.damage, g_dot.attacker, 0, 0);
+				g_dot = PendingHurt{};
+			}
+		}
 
 		struct Second
 		{
@@ -206,13 +432,37 @@ namespace gmsky::Combat
 	void Install()
 	{
 		ResolveHitPipeline();
+		REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
+		HandleHealthDamageHook::func = vtbl.write_vfunc(0x104, HandleHealthDamageHook::thunk);
+		if (auto* events = RE::ScriptEventSourceHolder::GetSingleton()) {
+			events->AddEventSink<RE::TESHitEvent>(HitSink::Get());
+		}
+		logger::info("COMBAT player hurt listeners installed (hit event, HandleHealthDamage)");
 	}
 
-	void PerFrame(RE::PlayerCharacter* a_player, const GmskyOrigin& a_origin, bool a_puppeting)
+	void PerFrame(RE::PlayerCharacter* a_player, const GmskyOrigin& a_origin, bool a_puppeting, float a_delta)
 	{
 		auto& link = Link::Get();
 		if (!link.IsOpen() || !a_player) {
 			return;
+		}
+		g_combatTimer -= a_delta;
+		if (g_combatTimer <= 0.0f) {
+			g_combatTimer = 0.25f;
+			const bool fighting = AnyoneFighting(a_player);
+			if (fighting != g_inCombat) {
+				logger::info("COMBAT player {}", fighting ? "IN A FIGHT (someone nearby targets the player)" : "calm (nobody nearby fights the player)");
+				g_inCombat = fighting;
+			}
+		}
+		// Step 3e: while Garry's Mod drives, it owns the player's health.
+		if (a_puppeting) {
+			SetEssential(a_player, true);
+			BridgePlayerDamage(a_player, a_delta);
+		} else {
+			SetEssential(a_player, false);
+			g_healthPrimed = false;
+			g_dot = PendingHurt{};
 		}
 		auto& ring = link.Shared().hit_events;
 		const uint32_t head = reinterpret_cast<std::atomic<uint32_t>*>(&ring.head)->load(std::memory_order_acquire);
@@ -237,6 +487,11 @@ namespace gmsky::Combat
 		}
 	}
 
+	bool PlayerInCombat()
+	{
+		return g_inCombat;
+	}
+
 	void LogSecond()
 	{
 		auto& s = g_sec;
@@ -247,5 +502,12 @@ namespace gmsky::Combat
 		}
 		s = Second{};
 		g_lines = 0;
+		auto& h = g_hurt;
+		if (h.hitEvents > 0 || h.toppedUp > 0.0f || h.sent > 0) {
+			logger::info("COMBAT player second: {} hit events on the player, {:.1f} health topped up, {} hurts sent to Garry's Mod ({:.1f} Skyrim damage), essential {}",
+				h.hitEvents, h.toppedUp, h.sent, h.sentDamage, g_essentialSet ? "on" : "off");
+		}
+		h = HurtSecond{};
+		g_hurtLines = 0;
 	}
 }

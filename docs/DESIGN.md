@@ -1175,9 +1175,75 @@ traces is enough for bullets and the crowbar, the same way the ground is answere
   Garry's Mod; Garry's Mod applies it as damage from the attacker's stand-in (so its damage
   direction indicator points at them), slash / bullet / burn by kind. Test: let a bandit hit you;
   HOLOHUD's health drops, Skyrim's stays full.
-- **3f. Death.** Garry's Mod's death kills the Skyrim player (SkyCraft's `KillPlayer`); Skyrim's
-  death and reload run; the new origin after the reload re-anchors Garry's Mod, and Garry's Mod's
-  respawn is held until then. Test: die to a bandit; Skyrim reloads; you play on.
+  **3e in detail (planned 2026-10-05, from SkyCraft's `Combat.cpp` `HitSink` /
+  `HandleHealthDamageHook` / `BridgePlayerDamage` / `SetEssential` and `SkyCombat.hurtPlayer`, MIT):**
+  - *Skyrim (Combat.cpp):* while the puppet drives, the Skyrim player is **essential** (Skyrim
+    can't kill them; a huge hit knocks them down for a moment at most) and their health is **topped
+    back to full every frame**; the amount topped up is the hit. Who and how come from two
+    listeners: Skyrim's hit event (`TESHitEvent`: attacker, weapon or spell, projectile or not,
+    power attack, blocked) and a hook on the player's `HandleHealthDamage` (the attacker of any
+    health damage, for spells and poison). A health drop within 0.35 s of a hit event is that hit
+    (melee / projectile, sent at once); anything else (spells, poison, falling, unknown) is added
+    up and sent every 0.5 s. When the puppet stops: not essential any more, nothing refunded.
+    Health the save already lacked when the puppet starts is topped up once and not sent.
+  - *Event queue Skyrim -> Garry's Mod* (protocol v14): a ring of 32 hurt events, written like the
+    hit ring but the other way. Event: attacker formId (0 = none), Skyrim damage, weapon / spell
+    formId, kind (melee / projectile / magic / other), flags (power attack, blocked in Skyrim).
+    The module keeps the server's read position; `gmsky.ReadHurts()` returns the new ones.
+  - *Garry's Mod (new `gmod/lua/gmsky/hurt.lua`, server):* each event becomes damage on the
+    player: Garry's Mod damage = Skyrim damage x `gmsky_hurt_scale` (**default 1**: both players
+    have 100 health, so Skyrim's fights stay as deadly as in Skyrim; Skyrim's armour already
+    reduced it), attacker and inflictor = the attacker's stand-in (else the world), damage
+    position = the attacker (from the actors table), type by kind: melee `DMG_SLASH`, projectile
+    `DMG_BULLET`, magic `DMG_BURN`, other `DMG_GENERIC`. So Garry's Mod's own armour (suit
+    battery), god mode, pain sounds and HOLOHUD's damage indicator all work as for a Garry's Mod
+    hit. A power attack also shoves the player away from the attacker (300 units/s).
+  - Not covered: Skyrim potions and healing don't heal Garry's Mod's player; Garry's Mod's death
+    (3f). Falling: Garry's Mod has its own fall damage; if Skyrim also hurts the puppet when it
+    lands, it shows as "other" damage in both logs (then it gets filtered).
+  - Logs: Skyrim `COMBAT player hurt by <name> (<id>): <damage> <kind>...` per hit and a
+    per-second line (hurts sent, health topped up, essential on / off); Garry's Mod `HURT <name>:
+    <skyrim> Skyrim -> <gmod> Garry's Mod damage, health a -> b` per event.
+- **3f. Death.** *First plan (replaced 2026-10-05):* Garry's Mod's death kills the Skyrim player
+  (SkyCraft's `KillPlayer`) and Skyrim reloads a save. **The user after test 61:** dying should
+  work like Garry's Mod: you respawn, no save reload; and control must stay with Garry's Mod.
+  **3f in detail (planned 2026-10-05):**
+  - *Found in test 61:* on death Skyrim switched the puppet off ("Garry's Mod player is dead"),
+    which also handed the keyboard and mouse back to Skyrim, so the click to respawn never reached
+    Garry's Mod. After respawning (from Garry's Mod's own window), Garry's Mod put the player at
+    the map's spawn point, 16,000 units away; that re-centred the anchor and Skyrim made a new
+    origin elsewhere.
+  - *Decided (the user):* you come back at the **last calm spot**: where you last stood while no
+    one was fighting you.
+  - **Skyrim (`Puppet.cpp`):** a dead Garry's Mod player no longer switches the puppet off: Skyrim's
+    player stays where Garry's Mod's body is (still essential, still topped up), input keeps going
+    to Garry's Mod (so a click respawns), the camera follows Garry's Mod's dead view (eye low on
+    the ground). Logs the death and the respawn.
+  - **Skyrim -> Garry's Mod "in a fight" flag:** `GmskySkyrimState.flags` bit `GMSKY_SF_IN_COMBAT`
+    (no layout change, the field was unused): some living actor within 6,000 units is in combat
+    with the player as its target (SkyCraft's `AnyoneFighting`), checked 4 times a second.
+    Module: `gmsky.SkyrimFlags()`.
+  - **Garry's Mod (new `gmod/lua/gmsky/respawn.lua`, server):** twice a second, while alive, on the
+    ground, not in noclip, not held by the terrain hold, Skyrim connected and anchored, the flag
+    off and no hurt from Skyrim in the last 3 s: the position (relative to the anchor, with the
+    origin epoch) and view yaw are the calm spot. On death: logged (attacker, where, the calm
+    spot's age and distance). On the respawn after a death (`PlayerSpawn`): the player is put at
+    the calm spot (Garry's Mod's own respawn does the rest: full health, Sandbox's weapons);
+    without a calm spot for the current origin (e.g. died right after a load door), where they
+    died. The terrain hold catches a spot whose ground hasn't arrived. Skyrim's puppet moves its
+    player there like any other step.
+  - Not covered: Skyrim NPCs stay hostile and may come after you; nothing is lost on death.
+  - Test: let a bandit kill you; Garry's Mod's death screen shows in Skyrim's window; click: you're
+    back at full health where you stood before the fight, no save reload, no new origin in the logs.
+    **Works (test 62).**
+- **F1: Garry's Mod's console** (the user asked after test 62; key chosen by us: Skyrim doesn't use
+  F1). Typing from Skyrim's window into Garry's Mod isn't bridged, so the console opens in Garry's
+  Mod's **own window**: F1 sets `GMSKY_IN_CONSOLE` (0x1000) in the input buttons (no layout change)
+  and Skyrim allows another process to take the front (`AllowSetForegroundWindow`); Garry's Mod's
+  client moves its window from off-screen to the middle of Skyrim's window, brings it to the front
+  and runs `showconsole`. When the console closes (~ or Esc in Garry's Mod) or the window loses the
+  front (click back into Skyrim), the console is hidden, the window goes back off-screen and
+  Skyrim's window is brought to the front. In single-player the game pauses while it is open.
 
 **Hitboxes: how bullets hit Skyrim's NPCs (planned 2026-10-05, the user asked for this plan before 3c).**
 

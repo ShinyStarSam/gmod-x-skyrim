@@ -83,6 +83,7 @@ namespace gmsky::Puppet
 
 		RE::NiPoint3 g_eye{};     // step 4: camera position for the latest frame (Skyrim units)
 		float g_eyeGmod = 64.0f;
+		bool g_dead = false;       // Garry's Mod's player is dead (no GMSKY_PF_ALIVE), step 3f
 		bool g_noclip = false;     // Garry's Mod's player is in noclip (GMSKY_PF_NOCLIP)
 		uint32_t g_noclipFrames = 0;
 		RE::NiPoint3 g_lastTargetRaw{};
@@ -221,8 +222,13 @@ namespace gmsky::Puppet
 		if (a_origin.epoch == 0 || g.origin_epoch != a_origin.epoch) {
 			return Off(fmt::format("waiting for Garry's Mod to anchor to origin epoch {} (it has {})", a_origin.epoch, g.origin_epoch));
 		}
-		if (!(g.flags & GMSKY_PF_ALIVE)) {
-			return Off("Garry's Mod player is dead");
+		// Step 3f (after test 61): a dead Garry's Mod player keeps the puppet on, so input stays with
+		// Garry's Mod (a click respawns) and Skyrim's player stays at the body (essential, Combat.cpp).
+		const bool dead = !(g.flags & GMSKY_PF_ALIVE);
+		if (dead != g_dead) {
+			logger::info("PUPPET Garry's Mod player {}: Skyrim's player {}, input stays with Garry's Mod", dead ? "DIED" : "RESPAWNED",
+				dead ? "stays at the body" : "follows it again");
+			g_dead = dead;
 		}
 		if (!a_player->GetParentCell() || !a_player->Is3DLoaded()) {
 			return Off("Skyrim player not loaded");

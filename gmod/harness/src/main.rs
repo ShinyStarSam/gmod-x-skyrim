@@ -422,7 +422,7 @@ fn main() {
         // wheel, 1-6 and Q into Garry's Mod's own binds (PlayerBindPress first, then the console
         // command); a menu cursor takes the mouse; the server takes attack from the command.
         {
-            use gmsky_protocol::{IN_ATTACK, IN_MENU, IN_SLOT_SHIFT};
+            use gmsky_protocol::{IN_ATTACK, IN_CONSOLE, IN_MENU, IN_SLOT_SHIFT};
             lua.run(lc, r#"
                 HARNESS_CMDS, HARNESS_GUI, HARNESS_POLYS = {}, {}, 0
                 function HARNESS_PLY:ConCommand(c) HARNESS_CMDS[#HARNESS_CMDS + 1] = c end
@@ -473,6 +473,16 @@ fn main() {
             expect!(cstep(IN_ATTACK, 0, 3, ""), "+attack|", "physgun: +attack");
             expect!(cstep(IN_ATTACK, 0, 5, ""), "|", "physgun holding: the wheel isn't turned into weapon binds");
             expect!(cstep(0, 0, 5, "HARNESS_ACTIVE = nil"), "-attack|", "physgun released");
+            // F1 (after test 62): Garry's Mod's console; closes when it is closed or the window loses the front.
+            lua.run(lc, "HARNESS_RT, HARNESS_FOCUS, HARNESS_CONSOLE = 0, true, false RealTime = function() return HARNESS_RT end                 system = { HasFocus = function() return HARNESS_FOCUS end } gui.IsConsoleVisible = function() return HARNESS_CONSOLE end                 HARNESS_REAL_RCC = RunConsoleCommand RunConsoleCommand = function(c) HARNESS_CMDS[#HARNESS_CMDS + 1] = 'run:' .. c end").unwrap();
+            expect!(cstep(IN_CONSOLE, 0, 5, ""), "run:showconsole|", "F1 = Garry's Mod's console");
+            expect!(cstep(IN_CONSOLE, 0, 5, "HARNESS_CONSOLE = true"), "|", "F1 held: once only; console showing");
+            expect!(cstep(0, 0, 5, "HARNESS_CONSOLE = false"), "|", "console closed in Garry's Mod");
+            check(lua.run(lc, "return tostring(gmsky.console.open)") == Ok(Some("false".into())), "console: closed when Garry's Mod's console closes");
+            expect!(cstep(IN_CONSOLE, 0, 5, "HARNESS_CONSOLE = false"), "run:showconsole|", "F1 again");
+            expect!(cstep(0, 0, 5, "HARNESS_CONSOLE = true HARNESS_RT = 2 HARNESS_FOCUS = false"), "run:hideconsole|", "clicked back into Skyrim: console hidden");
+            check(lua.run(lc, "return tostring(gmsky.console.open)") == Ok(Some("false".into())), "console: closed when Garry's Mod's window loses the front");
+            lua.run(lc, "HARNESS_CONSOLE = false RunConsoleCommand = HARNESS_REAL_RCC").unwrap();
             // Server: attack from the player's own command while the client handles binds.
             let mut sframe = 40u64;
             let mut srv = |buttons: u32| {
@@ -640,6 +650,72 @@ fn main() {
             let r = lua.run(ls, "return gmsky.standins.Status(HARNESS_PLY)");
             check(r.as_ref().map_or(false, |v| v.as_deref().map_or(false, |v| v.contains("stand-ins 1 (+1 -0") && v.contains("damage taken 2 (sent to Skyrim 2)"))),
                 &format!("stand-ins: status line: {r:?}"));
+            // Step 3e: Skyrim's NPCs hurt the player. The harness plays Skyrim: two hurt events (the
+            // stand-in's power attack, then magic from an actor with no stand-in) become Garry's Mod
+            // damage on a fake player; a burst of 35 loses the 3 oldest.
+            {
+                use gmsky_protocol::{HurtEvent, HURTK_MELEE, HURTK_MAGIC, HURTF_POWER};
+                lua.run(ls, "gmsky.ReadHurts()").unwrap(); // take Skyrim's position
+                let ring = &sky.shared().hurt_events;
+                ring.push(&HurtEvent { attacker: 0xFF00ABCD, damage: 12.0, source: 0x12EB7, kind: HURTK_MELEE, flags: HURTF_POWER, reserved: 0 });
+                ring.push(&HurtEvent { attacker: 0x00000123, damage: 4.0, source: 0, kind: HURTK_MAGIC, flags: 0, reserved: 0 });
+                let r = lua.run(ls, "DamageInfo = function() local d = {} for _, k in ipairs({ 'Damage', 'DamageType', 'Attacker', 'Inflictor', \
+                        'DamagePosition', 'DamageForce' }) do d['Set' .. k] = function(self, v) self[k] = v end end return d end \
+                    local hp, got, vel = 100, {}, nil \
+                    local P = { Health = function() return hp end, Armor = function() return 0 end, Alive = function() return true end, \
+                        WorldSpaceCenter = function() return HARNESS_SI:GetPos() + Vector(100, 0, 0) end, \
+                        TakeDamageInfo = function(_, d) got[#got + 1] = d hp = hp - d.Damage end, SetVelocity = function(_, v) vel = v end } \
+                    gmsky.hurt.Update(P) \
+                    local a, b = got[1], got[2] \
+                    return string.format('%d %.1f %d %s %.0f %.1f %d %s %d', #got, a.Damage, a.DamageType, tostring(a.Attacker == HARNESS_SI), \
+                        vel and vel.x or -1, b.Damage, b.DamageType, tostring(b.Attacker), hp)");
+                check(r == Ok(Some("2 12.0 4 true 300 4.0 8 world 84".into())),
+                    &format!("hurt: Skyrim's hits become damage from the stand-in (slash, power attack shoves) and magic from the world: {r:?}"));
+                for i in 0..35 {
+                    ring.push(&HurtEvent { attacker: 0, damage: i as f32, source: 0, kind: 3, flags: 0, reserved: 0 });
+                }
+                let r = lua.run(ls, "local list, lost = gmsky.ReadHurts() return #list .. ' ' .. lost .. ' ' .. list[1].damage \
+                    .. ' ' .. #gmsky.ReadHurts()");
+                check(r == Ok(Some("32 3 3 0".into())), &format!("hurt: a burst of 35 keeps the newest 32, 3 lost, nothing twice: {r:?}"));
+                let r = lua.run(ls, "return gmsky.hurt.Status()");
+                check(r.as_ref().map_or(false, |v| v.as_deref().map_or(false, |v| v.contains("hurt 2 times (16.0 Skyrim -> 16.0 Garry's Mod damage)"))),
+                    &format!("hurt: status line: {r:?}"));
+            }
+            // Step 3f: the calm spot is kept while Skyrim says nobody fights the player and not
+            // during a fight; dying and respawning puts the player back on it.
+            {
+                let mut st = gmsky_protocol::SkyrimState::default();
+                st.frame = 5;
+                sky.shared().skyrim_state.write(&st);
+                let r = lua.run(ls, "Angle = Angle or function(p, y, r) return { p = p, y = y, r = r } end \
+                    local R = gmsky.respawn R.calm, R.nextAt, gmsky.hurt.lastHurt = nil, 0, nil HARNESS_TIME = 100 \
+                    local held = gmsky.terrain and gmsky.terrain.holding if gmsky.terrain then gmsky.terrain.holding = false end \
+                    local _, epoch = gmsky.Status() R.Update(HARNESS_PLY, epoch) \
+                    if gmsky.terrain then gmsky.terrain.holding = held end \
+                    local ax, ay, az = gmsky.Anchor() local p, c = HARNESS_PLY:GetPos(), R.calm \
+                    return c and string.format('%s %d', tostring(math.abs(c.rel.x - (p.x - ax)) < 1e-6 and math.abs(c.rel.z - (p.z - az)) < 1e-6), c.epoch) or 'none'");
+                check(r == Ok(Some("true 1".into())), &format!("respawn: calm spot taken while nobody fights the player: {r:?}"));
+                st.flags = gmsky_protocol::SF_IN_COMBAT;
+                st.frame = 6;
+                sky.shared().skyrim_state.write(&st);
+                let r = lua.run(ls, "local R = gmsky.respawn local before = R.calm.time HARNESS_TIME = 101 R.nextAt = 0 \
+                    local held = gmsky.terrain and gmsky.terrain.holding if gmsky.terrain then gmsky.terrain.holding = false end \
+                    local _, epoch = gmsky.Status() R.Update(HARNESS_PLY, epoch) \
+                    if gmsky.terrain then gmsky.terrain.holding = held end \
+                    return tostring(R.calm.time == before) .. ' ' .. tostring(R.fighting)");
+                check(r == Ok(Some("true true".into())), &format!("respawn: calm spot kept during a fight: {r:?}"));
+                let r = lua.run(ls, "local R = gmsky.respawn local ax, ay, az = gmsky.Anchor() HARNESS_TIME = 105 \
+                    local saved = HARNESS_POS HARNESS_POS = Vector(ax + 500, ay - 300, az + 20) \
+                    hook.Run('PlayerDeath', HARNESS_PLY, nil, nil) HARNESS_POS = Vector(-96, 96, -16259) \
+                    HARNESS_SETPOS = nil hook.Run('PlayerSpawn', HARNESS_PLY) \
+                    local t, c = HARNESS_SETPOS, R.calm HARNESS_POS = saved \
+                    return string.format('%s %.0f', tostring(t ~= nil and math.abs(t.x - (ax + c.rel.x)) < 1e-6 and math.abs(t.y - (ay + c.rel.y)) < 1e-6 \
+                        and math.abs(t.z - (az + c.rel.z)) < 1e-6), HARNESS_EYE.y)");
+                check(r == Ok(Some("true 45".into())), &format!("respawn: dying then respawning puts the player on the calm spot: {r:?}"));
+                st.flags = 0;
+                st.frame = 7;
+                sky.shared().skyrim_state.write(&st);
+            }
             // Step 3c-3: gmsky_hitbox_test round trip. The harness plays Skyrim: it answers every ray
             // as "missed", so the report must show Garry's Mod's hits as "only Garry's Mod".
             lua.run(ls, "local real = util.TraceLine util.TraceLine = function() return { Hit = true, Entity = HARNESS_SI, HitPos = Vector() } end \
@@ -1030,6 +1106,16 @@ fn main() {
           "gmod_server.log: a no-ground hold gives the speed back");
     check(server_log.contains("stand-in for ? FF00ABCD: 3 parts") && server_log.contains("STAND-IN HIT ? FF00ABCD: bullet head, 75.0 damage (type 2) -> 450.0 Skyrim damage sent"),
           "gmod_server.log: stand-in made and its damage logged with the body part");
+    check(server_log.contains("HURT by ? FF00ABCD: 12.0 Skyrim -> 12.0 Garry's Mod damage, melee, power attack, health 100 -> 88")
+            && server_log.contains("HURT by ? 00000123: 4.0 Skyrim -> 4.0 Garry's Mod damage, magic, health 88 -> 84, armour 0 (attacker unknown)"),
+          "gmod_server.log: each hurt from Skyrim logged");
+    let client_log = std::fs::read_to_string(log_dir.join("gmod_client.log")).unwrap_or_default();
+    check(client_log.contains("console: F1 from Skyrim: no Garry's Mod window found") && client_log.contains("console: closed (the console was closed)")
+            && client_log.contains("console: closed (Garry's Mod's window lost the front)"),
+          "gmod_client.log: console opened and closed both ways");
+    check(server_log.contains("respawn: a fight started; calm spot kept from 1.0 s ago") && server_log.contains("DIED (killed by ?)")
+            && server_log.contains("last calm spot 5.0 s ago") && server_log.contains("RESPAWN at the last calm spot (5.0 s before dying)"),
+          "gmod_server.log: fight, death and respawn logged");
     check(server_log.contains("actor near: Bandit 0001A2B3 lvl 9 (hostile fighting)") && server_log.contains("actors: table dropped (2 actors)"),
           "gmod_server.log: actors appearing and the dropped table logged");
     check(server_log.contains("attack from Garry's Mod's own binds") && server_log.contains("attack from Skyrim's buttons")

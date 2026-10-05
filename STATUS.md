@@ -151,7 +151,11 @@ multisampling; hook 0.001 ms per frame; no crash.
   Skyrim's NPCs through Skyrim's own hit function (× 3, head × 2; protocol v13). Not working
   (for later, DESIGN.md "Found in test 60"): grenades, rockets, AR2 balls, explosions and the
   physgun beam are invisible; grenades and AR2 balls fall through and don't hurt; physgun can't
-  grab NPCs.
+  grab NPCs. **3e works (test 61):** Skyrim's NPCs hurt the Garry's Mod
+  player (protocol v14; Skyrim player essential and topped up while Garry's Mod drives).
+  **3f works (test 62):** dying respawns you at the last calm spot (the user's
+  choice), no save reload; input stays with Garry's Mod while dead. F1 = Garry's Mod's console in
+  its own window (built, not tested in game).
   Future (user): stamina / magicka bars and quest markers, locations, enemies in HOLOHUD.
 
 ## Evidence (tests 33-37)

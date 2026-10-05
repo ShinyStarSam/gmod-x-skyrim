@@ -19,6 +19,10 @@ gmsky.Include("field")
 gmsky.Include("actors")
 -- Phase 3 step 3c-2: invisible stand-ins with Skyrim's hitboxes.
 gmsky.Include("standins")
+-- Phase 3 step 3e: Skyrim's NPCs hurt the player.
+gmsky.Include("hurt")
+-- Phase 3 step 3f: dying respawns you at the last calm spot.
+gmsky.Include("respawn")
 if GetPlayer() and T then T.home = T.MeasureRoom(GetPlayer():GetPos() + Vector(0, 0, 40)) end
 local anchored = 0 -- the origin epoch Garry's Mod is anchored to
 local inputOn = false -- input comes from Skyrim's window right now
@@ -100,6 +104,8 @@ hook.Add("Tick", "gmsky_player_state", function()
 	if T then T.UpdateGround(ply, anchored, (gmsky.Status())) end
 	if gmsky.actors then gmsky.actors.Update() end
 	if gmsky.standins then gmsky.standins.Update() end
+	if gmsky.hurt then gmsky.hurt.Update(ply) end
+	if gmsky.respawn then gmsky.respawn.Update(ply, anchored) end
 end)
 
 -- Input typed into Skyrim's window (Phase 1 step 1). While Skyrim routes input here, it replaces
@@ -263,6 +269,8 @@ timer.Create("gmsky_status", 1, 0, function()
 	if gmsky.field then terrain = terrain .. gmsky.field.Status(ply) end
 	if gmsky.actors then terrain = terrain .. gmsky.actors.Status(ply) end
 	if gmsky.standins then terrain = terrain .. gmsky.standins.Status(ply) end
+	if gmsky.hurt then terrain = terrain .. gmsky.hurt.Status() end
+	if gmsky.respawn then terrain = terrain .. gmsky.respawn.Status() end
 	gmsky.Log(string.format("tick=%d %s skyrim=%s epoch=%d skyrim_frame=%d writes/s=%d%s%s%s",
 		engine.TickCount(), where, connected and "CONNECTED" or "not connected", epoch, skyrimFrame,
 		writes - lastWrites, input, err and (" error=" .. err) or "", terrain) .. (jump.total > 0 and string.format(" | jumps %d", jump.total) or ""))

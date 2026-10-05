@@ -28,6 +28,8 @@ extern "system" {
     fn GetSystemMetrics(index: i32) -> i32;
     fn IsWindow(hwnd: Hwnd) -> i32;
     fn GetClassNameW(hwnd: Hwnd, name: *mut u16, len: i32) -> i32;
+    fn SetForegroundWindow(hwnd: Hwnd) -> i32;
+    fn GetForegroundWindow() -> Hwnd;
 }
 
 #[link(name = "kernel32")]
@@ -115,6 +117,65 @@ fn restore() -> String {
     }
     let ok = unsafe { SetWindowPos(hwnd, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) } != 0;
     format!("Garry's Mod's window {} ({}, {})", if ok { "put back at" } else { "could NOT be put back at" }, x, y)
+}
+
+/// The largest visible top-level window of process `pid` (Skyrim's game window).
+fn main_window_of(pid: u32) -> Option<Hwnd> {
+    unsafe extern "system" fn each(hwnd: Hwnd, param: isize) -> i32 {
+        let best = &mut *(param as *mut (u32, usize, i64));
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == best.0 && IsWindowVisible(hwnd) != 0 && GetWindow(hwnd, GW_OWNER).is_null() {
+            let mut r = Rect::default();
+            GetWindowRect(hwnd, &mut r);
+            let area = (r.right - r.left) as i64 * (r.bottom - r.top) as i64;
+            if area > best.2 {
+                *best = (best.0, hwnd as usize, area);
+            }
+        }
+        1
+    }
+    if pid == 0 {
+        return None;
+    }
+    let mut best = (pid, 0usize, 0i64);
+    unsafe { EnumWindows(each, &mut best as *mut (u32, usize, i64) as isize) };
+    (best.1 != 0).then_some(best.1 as Hwnd)
+}
+
+/// After test 62: Garry's Mod's console in its own window. `front`: the game window is put in the
+/// middle of Skyrim's window (process `skyrim_pid`) and brought to the front, so Garry's Mod's own
+/// console gets the keyboard; otherwise it goes back past the screens and Skyrim's window is
+/// brought to the front. Where it was before step 2d-2 moved it (for the overlay switching off)
+/// is kept. A line for the log.
+pub fn console_front(front: bool, skyrim_pid: u32) -> String {
+    let Some(h) = game_window() else {
+        return format!("no Garry's Mod window found (no visible {GAME_CLASS} window in this process)");
+    };
+    let r = rect(h);
+    let (w, ht) = (r.right - r.left, r.bottom - r.top);
+    let sky = main_window_of(skyrim_pid);
+    if front {
+        let (x, y) = match sky {
+            Some(s) => {
+                let sr = rect(s);
+                ((sr.left + sr.right - w) / 2, (sr.top + sr.bottom - ht) / 2)
+            }
+            None => (0, 0),
+        };
+        // HWND_TOP = null; activates it (no SWP_NOACTIVATE).
+        let moved = unsafe { SetWindowPos(h, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE) } != 0;
+        let fore = unsafe { SetForegroundWindow(h) } != 0;
+        let now_front = unsafe { GetForegroundWindow() } == h;
+        format!("Garry's Mod's window ({w}x{ht}) {} at ({x}, {y}) over Skyrim's window ({}), brought to the front: {} (in front now: {})",
+            if moved { "moved" } else { "could NOT be moved" }, if sky.is_some() { "found" } else { "NOT found" }, fore, now_front)
+    } else {
+        let right_edge = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+        let moved = unsafe { SetWindowPos(h, std::ptr::null_mut(), right_edge + MARGIN, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) } != 0;
+        let fore = sky.map_or(false, |s| unsafe { SetForegroundWindow(s) } != 0);
+        format!("Garry's Mod's window {} off-screen (x = {}); Skyrim's window {} to the front: {}",
+            if moved { "moved" } else { "could NOT be moved" }, right_edge + MARGIN, if sky.is_some() { "brought" } else { "NOT found, not brought" }, fore)
+    }
 }
 
 /// gmsky.OverlayWindow(off_screen) -> line for the log.
