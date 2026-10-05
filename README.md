@@ -86,6 +86,12 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   - Garry's Mod's window moves off-screen while the overlay is on and comes back afterwards
     (`gmsky_overlay_hidewindow 0` keeps it in place). Alt+Tab to it still works for its console.
 
+- **Weapons and the spawn menu from Skyrim's window** (Phase 3 step 3a, tested in game
+  2026-10-05, tests 53-54): the mouse wheel and 1-6 open Garry's Mod's own weapon menu (HOLOHUD's)
+  and a click picks; Q holds Sandbox's spawn menu open, with a cursor moved by the mouse (drawn in
+  the overlay) and no camera movement while it's out (`gmsky_cursor_speed`). The physics gun's
+  wheel pushes / pulls a held prop. Not done: typing in the spawn menu's search box, the C menu.
+
 ## What doesn't work yet
 
 - Quest markers and locations: Skyrim's compass is hidden while the overlay is on, and HOLOHUD's
@@ -96,7 +102,6 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   press V again.
 - Garry's Mod's physics props and ragdolls fall through Skyrim's ground (it is only answered to
   traces, not to Garry's Mod's physics engine).
-- The mouse wheel and weapon switching from Skyrim's window (not tested).
 - Everything else in [docs/DESIGN.md](docs/DESIGN.md) §12.
 
 ## Credits

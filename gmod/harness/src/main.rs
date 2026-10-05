@@ -109,6 +109,8 @@ function HARNESS_NEW_CMD()
 	function c:SetViewAngles(a) self.p, self.y = a.p, a.y end
 	-- the view the Garry's Mod window itself put in the command
 	function c:GetViewAngles() return HARNESS_OWN_VIEW or { p = 10, y = 45, r = 0 } end
+	function c:GetButtons() return HARNESS_OWN_BUTTONS or 0 end
+	function c:SetMouseWheel(n) self.wheel = n end
 	return c
 end
 function IsValid(x) return x ~= nil end
@@ -167,6 +169,13 @@ function ply:SendLua(s) HARNESS_SENT_LUA = s end
 function ply:SetPos(p) HARNESS_SETPOS = p if HARNESS_POS then HARNESS_POS = Vector(p.x, p.y, p.z) end end
 function ply:SetVelocity() end
 function ply:GetGroundEntity() return nil end
+-- Weapons (step 3a): HARNESS_WEAPONS = list made with HARNESS_WEAPON, HARNESS_ACTIVE = held one.
+function HARNESS_WEAPON(class, slot, pos)
+	return { GetClass = function() return class end, GetSlot = function() return slot end,
+		GetSlotPos = function() return pos end, GetOwner = function() return ply end }
+end
+function ply:GetWeapons() return HARNESS_WEAPONS or {} end
+function ply:GetActiveWeapon() return HARNESS_ACTIVE end
 player = { GetAll = function() return { ply } end }
 HARNESS_PLY = ply
 engine = { TickCount = function() return t end, TickInterval = function() return 0.015 end }
@@ -405,11 +414,152 @@ fn main() {
         sky.shared().input.write(&Input { frame: 11, active: 1, mouse_x_total: 1300, noclip_presses: 8, ..Default::default() });
         let r = run_cmd("return HARNESS_MOVETYPE");
         check(r == Ok(Some("2".into())), &format!("two presses in one tick: on and off again: {r:?}"));
-        sky.shared().input.write(&Input { frame: 12, active: 0, mouse_x_total: 1300, noclip_presses: 8, ..Default::default() });
+        // Phase 3 step 3a (rebuilt after the user's feedback): the client turns Skyrim's clicks,
+        // wheel, 1-6 and Q into Garry's Mod's own binds (PlayerBindPress first, then the console
+        // command); a menu cursor takes the mouse; the server takes attack from the command.
+        {
+            use gmsky_protocol::{IN_ATTACK, IN_MENU, IN_SLOT_SHIFT};
+            lua.run(lc, r#"
+                HARNESS_CMDS, HARNESS_GUI, HARNESS_POLYS = {}, {}, 0
+                function HARNESS_PLY:ConCommand(c) HARNESS_CMDS[#HARNESS_CMDS + 1] = c end
+                local function g(name) return function(a, b) HARNESS_GUI[#HARNESS_GUI + 1] = name .. tostring(a) .. (b and ("," .. b) or "") end end
+                gui = { InternalCursorMoved = g("move"), InternalMousePressed = g("down"), InternalMouseReleased = g("up"), InternalMouseWheeled = g("wheel") }
+                vgui = { CursorVisible = function() return HARNESS_CURSOR or false end }
+                draw = { NoTexture = function() end }
+                surface = { SetDrawColor = function() end, DrawPoly = function(p) HARNESS_POLYS = HARNESS_POLYS + 1 end }
+                hook.Add("PlayerBindPress", "harness", function(p, bind) if HARNESS_TAKE == bind then return true end end)
+            "#).unwrap();
+            let mut frame = 12u64;
+            let mut mx = 1300i64;
+            let mut cstep = |buttons: u32, dmx: i64, wheel: i32, pre: &str| {
+                frame += 1;
+                mx += dmx;
+                sky.shared().input.write(&Input { frame, active: 1, buttons, mouse_x_total: mx, wheel_total: wheel, noclip_presses: 8, ..Default::default() });
+                lua.run(lc, &format!("HARNESS_CMDS, HARNESS_GUI = {{}}, {{}} {pre} hook.Run('Think') \
+                    return table.concat(HARNESS_CMDS, ' ') .. '|' .. table.concat(HARNESS_GUI, ' ')"))
+            };
+            macro_rules! expect {
+                ($r:expr, $want:expr, $what:expr) => {{
+                    let r = $r;
+                    check(r == Ok(Some(String::from($want))), &format!("client binds: {}: {r:?}", $what));
+                }};
+            }
+            expect!(cstep(0, 0, 0, ""), "|", "first frame only sets the baseline");
+            expect!(cstep(0, 0, -1, ""), "invnext|", "wheel down = invnext");
+            expect!(cstep(0, 0, 1, ""), "invprev invprev|", "wheel up 2 notches = invprev twice");
+            expect!(cstep(1 << IN_SLOT_SHIFT, 0, 1, ""), "slot1|", "key 1 = slot1");
+            expect!(cstep(1 << IN_SLOT_SHIFT, 0, 1, ""), "|", "key 1 held: once only");
+            expect!(cstep(3 << IN_SLOT_SHIFT, 0, 1, ""), "slot3|", "key 3 = slot3");
+            expect!(cstep(IN_ATTACK, 0, 1, ""), "+attack|", "left button = +attack");
+            expect!(cstep(0, 0, 1, ""), "-attack|", "released = -attack");
+            expect!(cstep(IN_ATTACK, 0, 1, "HARNESS_TAKE = '+attack'"), "|", "a hook (weapon menu) takes +attack: no command");
+            expect!(cstep(0, 0, 1, "HARNESS_TAKE = nil"), "|", "and no -attack after it");
+            expect!(cstep(IN_MENU, 0, 1, ""), "+menu|", "Q = +menu (spawn menu)");
+            expect!(cstep(IN_MENU, 40, 1, "HARNESS_CURSOR = true"), "|move640,360 move680,360", "menu cursor up: starts in the middle, Skyrim's mouse moves it");
+            let r = lua.run(ls, "local f, c = gmsky.ClientInput() return tostring(f) .. ' ' .. tostring(c)");
+            check(r == Ok(Some("true true".into())), &format!("server hears: client handles binds, cursor up: {r:?}"));
+            expect!(cstep(IN_MENU | IN_ATTACK, 0, 3, ""), "|down107 wheel2", "click and wheel go to the menu, no +attack");
+            let r = lua.run(lc, "hook.Run('DrawOverlay') return HARNESS_POLYS");
+            check(r == Ok(Some("2".into())), &format!("cursor arrow drawn (outline + fill): {r:?}"));
+            expect!(cstep(IN_MENU, 0, 3, ""), "|up107", "button released in the menu");
+            expect!(cstep(0, 0, 3, "HARNESS_CURSOR = false"), "-menu|", "Q released = -menu, cursor gone");
+            lua.run(lc, "HARNESS_POLYS = 0 hook.Run('DrawOverlay')").unwrap();
+            check(lua.run(lc, "return HARNESS_POLYS") == Ok(Some("0".into())), "no cursor arrow without a menu cursor");
+            lua.run(lc, "HARNESS_ACTIVE = HARNESS_WEAPON('weapon_physgun', 0, 2)").unwrap();
+            expect!(cstep(IN_ATTACK, 0, 3, ""), "+attack|", "physgun: +attack");
+            expect!(cstep(IN_ATTACK, 0, 5, ""), "|", "physgun holding: the wheel isn't turned into weapon binds");
+            expect!(cstep(0, 0, 5, "HARNESS_ACTIVE = nil"), "-attack|", "physgun released");
+            // Server: attack from the player's own command while the client handles binds.
+            let mut sframe = 40u64;
+            let mut srv = |buttons: u32| {
+                sframe += 1;
+                sky.shared().input.write(&Input { frame: sframe, active: 1, buttons, mouse_x_total: 1300, noclip_presses: 8, ..Default::default() });
+                run_cmd("return tostring(HARNESS_CMD.buttons) .. ' ' .. tostring(HARNESS_CMD.wheel)")
+            };
+            lua.run(lc, "gmsky.SetClientInput(false)").unwrap();
+            lua.run(ls, "HARNESS_OWN_BUTTONS = 0").unwrap();
+            let r = srv(IN_ATTACK);
+            check(r == Ok(Some("0 nil".into())), &format!("server: Skyrim's button alone doesn't fire (the client's binds decide): {r:?}"));
+            lua.run(ls, "HARNESS_OWN_BUTTONS = 1").unwrap();
+            let r = srv(0);
+            check(r == Ok(Some("1 nil".into())), &format!("server: +attack in the command fires: {r:?}"));
+            lua.run(lc, "gmsky.SetClientInput(nil)").unwrap();
+            lua.run(ls, "HARNESS_OWN_BUTTONS = 0").unwrap();
+            let r = srv(IN_ATTACK);
+            check(r == Ok(Some("1 nil".into())), &format!("server: client silent: falls back to Skyrim's button: {r:?}"));
+            // Physgun wheel on the server, and no view turning while a menu cursor is up.
+            lua.run(ls, "HARNESS_ACTIVE = HARNESS_WEAPON('weapon_physgun', 0, 2)").unwrap();
+            sky.shared().input.write(&Input { frame: 50, active: 1, buttons: IN_ATTACK, mouse_x_total: 1300, wheel_total: 0, noclip_presses: 8, ..Default::default() });
+            run_cmd("").unwrap();
+            sky.shared().input.write(&Input { frame: 51, active: 1, buttons: IN_ATTACK, mouse_x_total: 1300, wheel_total: -2, noclip_presses: 8, ..Default::default() });
+            let r = run_cmd("return tostring(HARNESS_CMD.wheel)");
+            check(r == Ok(Some("-2".into())), &format!("server: physgun holding gets the wheel: {r:?}"));
+            lua.run(ls, "HARNESS_ACTIVE = nil").unwrap();
+            lua.run(lc, "gmsky.SetClientInput(true)").unwrap();
+            let before = run_cmd("return tostring(HARNESS_CMD.y)");
+            sky.shared().input.write(&Input { frame: 52, active: 1, mouse_x_total: 1800, wheel_total: -2, noclip_presses: 8, ..Default::default() });
+            let after = run_cmd("return tostring(HARNESS_CMD.y)");
+            check(before.is_ok() && before == after, &format!("server: menu cursor up: the view doesn't turn ({before:?} -> {after:?})"));
+            let cursor_flag = || {
+                lua.run(ls, "HARNESS_ADVANCE() hook.Run('Tick')").unwrap();
+                sky.shared().player_state.read().map(|(p, _)| p.flags & gmsky_protocol::PF_CURSOR != 0)
+            };
+            check(cursor_flag() == Some(true), "server: menu cursor up: Skyrim is told (no camera prediction)");
+            lua.run(lc, "gmsky.SetClientInput(false)").unwrap();
+            sky.shared().input.write(&Input { frame: 53, active: 1, mouse_x_total: 2300, wheel_total: -2, noclip_presses: 8, ..Default::default() });
+            let turned = run_cmd("return tostring(HARNESS_CMD.y)");
+            check(turned.is_ok() && turned != after, &format!("server: cursor gone: the same mouse move turns the view ({after:?} -> {turned:?})"));
+            check(cursor_flag() == Some(false), "server: cursor gone: Skyrim may predict again");
+            // Q held counts as a cursor from the first tick, before the client has seen the menu.
+            lua.run(lc, "gmsky.SetClientInput(nil)").unwrap();
+            sky.shared().input.write(&Input { frame: 54, active: 1, buttons: IN_MENU, mouse_x_total: 2800, wheel_total: -2, noclip_presses: 8, ..Default::default() });
+            let q = run_cmd("return tostring(HARNESS_CMD.y)");
+            check(q.is_ok() && q == turned, &format!("server: Q held, client not reporting yet: the view doesn't turn ({turned:?} -> {q:?})"));
+            check(cursor_flag() == Some(true), "server: Q held: Skyrim is told at once");
+            sky.shared().input.write(&Input { frame: 55, active: 1, mouse_x_total: 2800, wheel_total: -2, noclip_presses: 8, ..Default::default() });
+            run_cmd("").unwrap();
+            check(cursor_flag() == Some(false), "server: Q released: flag cleared");
+            lua.run(ls, "HARNESS_OWN_BUTTONS = nil").unwrap();
+        }
+        sky.shared().input.write(&Input { frame: 30, active: 0, mouse_x_total: 1300, noclip_presses: 8, ..Default::default() });
         run_cmd("").unwrap();
         let r = lua.run(lc, "return tostring(HARNESS_CONVARS)");
         check(r == Ok(Some("nil".into())), &format!("client runs no console commands: {r:?}"));
         lua.run(lc, "HARNESS_CONVARS = { fps_max_nofocus = '300' } timer.Run('gmsky_client_status')").unwrap();
+
+        // 8a. Skyrim's actors near the player (Phase 3 step 3b) reach Lua in Garry's Mod's world
+        //     units (the anchor added), nearest first; a table for another origin is refused.
+        {
+            use gmsky_protocol::{Actor, Actors, ACT_HOSTILE, ACT_IN_COMBAT};
+            let mut t = Box::new(Actors::default());
+            t.count = 2;
+            t.origin_epoch = 1;
+            t.skyrim_frame = 77;
+            let mut name = [0u8; 32];
+            name[..6].copy_from_slice(b"Bandit");
+            t.actors[0] = Actor { form_id: 0x0001A2B3, flags: ACT_HOSTILE | ACT_IN_COMBAT, pos: [100.0, 0.0, 0.0], yaw_deg: 90.0,
+                radius: 18.0, height: 70.0, health_frac: 0.5, level: 9, reserved0: 0, name };
+            let mut name2 = [0u8; 32];
+            name2[..5].copy_from_slice(b"Guard");
+            t.actors[1] = Actor { form_id: 0x000FF001, flags: 0, pos: [0.0, 300.0, 10.0], yaw_deg: -45.0,
+                radius: 18.0, height: 70.0, health_frac: 1.0, level: 20, reserved0: 0, name: name2 };
+            sky.shared().actors.write(&t);
+            lua.run(ls, "HARNESS_ADVANCE() hook.Run('Tick')").unwrap();
+            let r = lua.run(ls, "local A = gmsky.actors local ax, ay, az = gmsky.Anchor() local b = A.list[1] \
+                return string.format('%d %s %.1f %.1f %.1f %.0f %s %d %.2f %s', #A.list, b.name, b.x - ax, b.y - ay, b.z - az, b.yaw, \
+                A.FlagText(b.flags), b.level, b.hp, A.list[2].name)");
+            check(r == Ok(Some("2 Bandit 100.0 0.0 0.0 90 hostile fighting 9 0.50 Guard".into())), &format!("actors: table read, anchor added: {r:?}"));
+            let r = lua.run(ls, "local seq = gmsky.ReadActors(gmsky.actors.seq) return tostring(seq)");
+            check(r == Ok(Some("false".into())), &format!("actors: nothing new since the last read: {r:?}"));
+            let r = lua.run(ls, "return gmsky.actors.Status(HARNESS_PLY)");
+            check(r.as_ref().map_or(false, |v| v.as_deref().map_or(false, |v| v.contains("actors 2 (tables read 1, +2 -0): Bandit 0001A2B3 lvl 9 at "))),
+                &format!("actors: status line: {r:?}"));
+            t.origin_epoch = 2;
+            sky.shared().actors.write(&t);
+            lua.run(ls, "HARNESS_ADVANCE() hook.Run('Tick')").unwrap();
+            let r = lua.run(ls, "return #gmsky.actors.list");
+            check(r == Ok(Some("0".into())), &format!("actors: a table for another origin is refused: {r:?}"));
+        }
 
         // 8b. A ground grid from Skyrim reaches Lua (Phase 1 step 3b) and becomes the ground
         //     (re-plan step B: triangles in one gmsky_field entity, no physics objects).
@@ -766,6 +916,11 @@ fn main() {
     check(server_log.contains("terrain: hold released (noclip) after "), "gmod_server.log: noclip ends a hold");
     check(server_log.contains("terrain: hold released (no ground) after 1 ticks, speed (66, 0, 0) given back"),
           "gmod_server.log: a no-ground hold gives the speed back");
+    check(server_log.contains("actor near: Bandit 0001A2B3 lvl 9 (hostile fighting)") && server_log.contains("actors: table dropped (2 actors)"),
+          "gmod_server.log: actors appearing and the dropped table logged");
+    check(server_log.contains("attack from Garry's Mod's own binds") && server_log.contains("attack from Skyrim's buttons")
+            && server_log.contains("weapon now weapon_physgun (was nothing)"),
+          "gmod_server.log: attack source and weapon changes logged");
     check(server_log.contains("noclip ON (V in Skyrim) at (") && server_log.contains("noclip OFF (V in Skyrim) at ("),
           "gmod_server.log: noclip toggles logged");
     check(server_log.contains("terrain: HOLD at") && server_log.contains("terrain: ground ready under the player (grid 7): released at z"),

@@ -16,7 +16,7 @@ pub const RING_BYTES: usize = 16 << 20;
 pub const MAP_SIZE: usize = RING_OFFSET + RING_BYTES;
 pub const MAGIC: u32 = 0x594B_534D;
 pub const MAGIC_INIT: u32 = 0x5449_4E49;
-pub const VERSION: u32 = 9; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain; 8: collision ring; 9: view punch
+pub const VERSION: u32 = 10; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain; 8: collision ring; 9: view punch; 10: Actors
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
 
 pub const PF_ON_GROUND: u32 = 0x1;
@@ -27,6 +27,7 @@ pub const PF_INPUT_APPLIED: u32 = 0x10; // input_frame / mouse_*_applied are val
 pub const PF_DRIVE_CAMERA: u32 = 0x20; // Skyrim may turn its camera directly (gmsky_camera 1)
 pub const PF_SMOOTH: u32 = 0x40; // Skyrim may blend between ticks (gmsky_smooth 1)
 pub const PF_SHAPES: u32 = 0x80; // Garry's Mod wants Skyrim's collision shapes (the ring), not the ray grid
+pub const PF_CURSOR: u32 = 0x100; // a Garry's Mod menu cursor is up: Skyrim must not predict the view (step 3a)
 
 // ---- Collision ring (gmsky_protocol.h "Collision ring"; adapted from SkyCraft, MIT) ----
 pub const RING_HEAD_OFF: usize = 0x00;
@@ -83,6 +84,9 @@ pub const IN_WALK: u32 = 0x80;
 pub const IN_ATTACK: u32 = 0x100;
 pub const IN_ATTACK2: u32 = 0x200;
 pub const IN_RELOAD: u32 = 0x400;
+pub const IN_MENU: u32 = 0x800;
+pub const IN_SLOT_SHIFT: u32 = 16;
+pub const IN_SLOT_MASK: u32 = 0xF0000;
 
 #[repr(C)]
 pub struct Header {
@@ -186,6 +190,45 @@ impl Default for Terrain {
     }
 }
 
+/// Skyrim's actors near the player (Phase 3 step 3b), nearest first. See gmsky_protocol.h.
+pub const MAX_ACTORS: usize = 64;
+pub const ACT_HOSTILE: u32 = 0x1;
+pub const ACT_DEAD: u32 = 0x2;
+pub const ACT_ESSENTIAL: u32 = 0x4;
+pub const ACT_IN_COMBAT: u32 = 0x8;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct Actor {
+    pub form_id: u32,
+    pub flags: u32,
+    /// Feet, Garry's Mod units relative to the anchor.
+    pub pos: [f32; 3],
+    pub yaw_deg: f32,
+    pub radius: f32,
+    pub height: f32,
+    pub health_frac: f32,
+    pub level: u16,
+    pub reserved0: u16,
+    /// UTF-8, NUL-terminated.
+    pub name: [u8; 32],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Actors {
+    pub count: u32,
+    pub origin_epoch: u32,
+    pub skyrim_frame: u64,
+    pub actors: [Actor; MAX_ACTORS],
+}
+
+impl Default for Actors {
+    fn default() -> Self {
+        Actors { count: 0, origin_epoch: 0, skyrim_frame: 0, actors: [Actor::default(); MAX_ACTORS] }
+    }
+}
+
 /// A latest-value slot guarded by a seqlock. `seq == 0` means never written.
 #[repr(C)]
 pub struct Slot<T> {
@@ -241,6 +284,7 @@ pub struct Shared {
     pub player_state: Slot<PlayerState>,
     pub input: Slot<Input>,
     pub terrain: Slot<Terrain>,
+    pub actors: Slot<Actors>,
 }
 
 // ---- Layout checks: the same numbers as gmsky_protocol.h ----
@@ -280,7 +324,13 @@ const _: () = {
     assert!(offset_of!(Terrain, skyrim_frame) == 40);
     assert!(offset_of!(Terrain, height) == 48);
     assert!(offset_of!(Shared, terrain) == 360);
-    assert!(size_of::<Shared>() == 17320);
+    assert!(size_of::<Actor>() == 72);
+    assert!(offset_of!(Actor, yaw_deg) == 20);
+    assert!(offset_of!(Actor, level) == 36);
+    assert!(offset_of!(Actor, name) == 40);
+    assert!(size_of::<Actors>() == 16 + 72 * MAX_ACTORS);
+    assert!(offset_of!(Shared, actors) == 17320);
+    assert!(size_of::<Shared>() == 21952);
     assert!(size_of::<Shared>() <= SLOTS_SIZE);
     assert!(size_of::<ColMsgHeader>() == 8);
     assert!(size_of::<ColClear>() == 8);

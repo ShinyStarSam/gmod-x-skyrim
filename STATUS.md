@@ -67,7 +67,7 @@ Single-player and offline only.
 
 ## What works (verified in game, numbers in MODLOG.md)
 
-- **The link** (shared memory `Local\GmodSkyrim_v2`, protocol version 9: grids relative to the anchor, 16 MB collision ring, view punch), disconnect detection, coordinate
+- **The link** (shared memory `Local\GmodSkyrim_v2`, protocol version 10 (since step 3b: the actors table): grids relative to the anchor, 16 MB collision ring, view punch), disconnect detection, coordinate
   conventions, scale 64 / 120.5 = 0.5311.
 - **Playing from the Skyrim window:** W/A/S/D, Shift, Space, Ctrl, mouse look, **V = Garry's
   Mod noclip** (17 launches in test 21), E activates Skyrim objects, Esc/~/J/M/F9 reach Skyrim.
@@ -139,6 +139,11 @@ multisampling; hook 0.001 ms per frame; no crash.
   and arrows hidden while the overlay is live (`skse/src/Hud.cpp`); Garry's Mod's window moved
   off-screen and back (`gmod/module/src/window.rs`, `gmsky_overlay_hidewindow`); Source keeps
   drawing off-screen. **Phase 2's planned steps are done.**
+  **Phase 2 closed; Phase 3 (combat) planned** (`docs/DESIGN.md` "Phase 3 steps"). **Step 3a
+  rebuilt after the user's feedback, not tested in game:** wheel / 1-6 / clicks go through Garry's
+  Mod's own binds (HOLOHUD's weapon menu shows), Q = spawn menu with a cursor driven from Skyrim.
+  **3a works (tests 53-54).** **Step 3b built, not tested in game:** Skyrim's nearby actors reach
+  Garry's Mod (protocol v10, log only).
   Future (user): stamina / magicka bars and quest markers, locations, enemies in HOLOHUD.
 
 ## Evidence (tests 33-37)

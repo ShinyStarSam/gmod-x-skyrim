@@ -3,6 +3,7 @@
 // (Puppet.cpp). Once a second, log Skyrim's numbers next to Garry's Mod's.
 #include "Probe.h"
 
+#include "Actors.h"
 #include "Arms.h"
 #include "Body.h"
 #include "Camera.h"
@@ -219,6 +220,7 @@ namespace gmsky::Probe
 		Overlay::PerFrame();
 		Arms::PerFrame(a_player);
 		Hud::PerFrame(a_player, Arms::Live());
+		Actors::PerFrame(a_player, g_origin, g_frame);
 
 		g_logTimer += a_delta;
 		if (g_logTimer >= 1.0f) {
@@ -233,6 +235,7 @@ namespace gmsky::Probe
 			Draw::LogSecond();
 			Arms::LogSecond();
 			Hud::LogSecond();
+			Actors::LogSecond();
 			g_logTimer = 0.0f;
 		}
 	}

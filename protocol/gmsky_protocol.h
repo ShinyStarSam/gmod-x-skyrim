@@ -19,7 +19,7 @@
 #define GMSKY_MAP_SIZE (GMSKY_RING_OFFSET + GMSKY_RING_BYTES)
 #define GMSKY_MAGIC 0x594B534Du      // "MSKY": layout initialized and ready
 #define GMSKY_MAGIC_INIT 0x54494E49u // "INIT": one side is initializing right now
-#define GMSKY_VERSION 9u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain; 8: collision ring; 9: view punch
+#define GMSKY_VERSION 10u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain; 8: collision ring; 9: view punch; 10: GmskyActors
 #define GMSKY_HEARTBEAT_TIMEOUT_MS 2000u
 
 // GmskyPlayerState.flags
@@ -31,6 +31,7 @@
 #define GMSKY_PF_DRIVE_CAMERA 0x20u   // Skyrim may turn its camera directly (gmsky_camera 1)
 #define GMSKY_PF_SMOOTH 0x40u         // Skyrim may blend between ticks (gmsky_smooth 1)
 #define GMSKY_PF_SHAPES 0x80u         // Garry's Mod wants Skyrim's collision shapes (the ring), not the ray grid
+#define GMSKY_PF_CURSOR 0x100u        // a Garry's Mod menu cursor is up: the mouse doesn't turn the view, Skyrim must not predict (step 3a)
 
 // GmskyInput.buttons: actions held in Skyrim's window (not raw keys; the key choice is Skyrim-side)
 #define GMSKY_IN_FORWARD 0x1u
@@ -44,6 +45,9 @@
 #define GMSKY_IN_ATTACK 0x100u
 #define GMSKY_IN_ATTACK2 0x200u
 #define GMSKY_IN_RELOAD 0x400u
+#define GMSKY_IN_MENU 0x800u        // Q: Sandbox's spawn menu, +menu while held (step 3a)
+#define GMSKY_IN_SLOT_SHIFT 16u     // bits 16-19: weapon slot key held, 1-6 (0 = none) (step 3a)
+#define GMSKY_IN_SLOT_MASK 0xF0000u
 
 typedef struct GmskyHeader {
     uint32_t magic;            // GMSKY_MAGIC once initialized
@@ -151,11 +155,40 @@ typedef struct GmskyTerrain {
         T data;                    \
     } Name
 
+// Skyrim -> Garry's Mod (Phase 3 step 3b; adapted from SkyCraft's ActorTable, MIT). Skyrim's
+// actors near the player, nearest first, written every Skyrim frame. Positions in Garry's Mod units
+// *relative to the anchor* for origin_epoch, like GmskyTerrain (Garry's Mod adds its anchor).
+#define GMSKY_MAX_ACTORS 64
+#define GMSKY_ACT_HOSTILE 0x1u    // hostile to the player right now
+#define GMSKY_ACT_DEAD 0x2u
+#define GMSKY_ACT_ESSENTIAL 0x4u  // can't be killed (Skyrim knocks them down instead)
+#define GMSKY_ACT_IN_COMBAT 0x8u
+typedef struct GmskyActor {
+    uint32_t form_id;      // Skyrim's FormID of the actor (reference)
+    uint32_t flags;        // GMSKY_ACT_*
+    float pos[3];          // feet, Garry's Mod units relative to the anchor
+    float yaw_deg;         // Source convention (0 = +X, counter-clockwise)
+    float radius;          // Garry's Mod units (Skyrim's bound radius, scaled)
+    float height;          // Garry's Mod units
+    float health_frac;     // 0..1
+    uint16_t level;
+    uint16_t reserved0;
+    char name[32];         // display name, UTF-8, NUL-terminated (truncated)
+} GmskyActor;
+
+typedef struct GmskyActors {
+    uint32_t count;         // valid entries in actors[]
+    uint32_t origin_epoch;  // the GmskyOrigin.epoch these positions belong to (0 = none)
+    uint64_t skyrim_frame;
+    GmskyActor actors[GMSKY_MAX_ACTORS];
+} GmskyActors;
+
 GMSKY_DEFINE_SLOT(GmskyOriginSlot, GmskyOrigin);
 GMSKY_DEFINE_SLOT(GmskySkyrimStateSlot, GmskySkyrimState);
 GMSKY_DEFINE_SLOT(GmskyPlayerStateSlot, GmskyPlayerState);
 GMSKY_DEFINE_SLOT(GmskyInputSlot, GmskyInput);
 GMSKY_DEFINE_SLOT(GmskyTerrainSlot, GmskyTerrain);
+GMSKY_DEFINE_SLOT(GmskyActorsSlot, GmskyActors);
 
 typedef struct GmskyShared {
     GmskyHeader header;
@@ -164,6 +197,7 @@ typedef struct GmskyShared {
     GmskyPlayerStateSlot player_state; // written by Garry's Mod
     GmskyInputSlot input;              // written by Skyrim
     GmskyTerrainSlot terrain;          // written by Skyrim
+    GmskyActorsSlot actors;            // written by Skyrim (v10)
 } GmskyShared;
 
 // ---- Collision ring (Skyrim -> Garry's Mod; DESIGN.md re-plan step D; adapted from SkyCraft, MIT) ----
@@ -322,7 +356,13 @@ GMSKY_ASSERT(offsetof(GmskyTerrain, center) == 16);
 GMSKY_ASSERT(offsetof(GmskyTerrain, skyrim_frame) == 40);
 GMSKY_ASSERT(offsetof(GmskyTerrain, height) == 48);
 GMSKY_ASSERT(offsetof(GmskyShared, terrain) == 360);
-GMSKY_ASSERT(sizeof(GmskyShared) == 17320);
+GMSKY_ASSERT(sizeof(GmskyActor) == 72);
+GMSKY_ASSERT(offsetof(GmskyActor, yaw_deg) == 20);
+GMSKY_ASSERT(offsetof(GmskyActor, level) == 36);
+GMSKY_ASSERT(offsetof(GmskyActor, name) == 40);
+GMSKY_ASSERT(sizeof(GmskyActors) == 16 + 72 * GMSKY_MAX_ACTORS);
+GMSKY_ASSERT(offsetof(GmskyShared, actors) == 17320);
+GMSKY_ASSERT(sizeof(GmskyShared) == 21952);
 GMSKY_ASSERT(sizeof(GmskyShared) <= GMSKY_SLOTS_SIZE);
 GMSKY_ASSERT(sizeof(GmskyColMsgHeader) == 8);
 GMSKY_ASSERT(sizeof(GmskyColClear) == 8);
@@ -494,6 +534,11 @@ inline double WrapRad(double r) {
 // direction atan2(dx, dy) was 0.0-0.2 deg. Garry's Mod: walking straight, yaw minus atan2(vy, vx)
 // was 0.0 in 11 of 11 samples, and strafing gave +-90 / diagonals +-45, +-135 as predicted.
 inline double GmodYawToSkyrimHeading(double yaw_deg) { return WrapRad((90.0 - yaw_deg) * kPi / 180.0); }
+// The other way (step 3b, NPC facing): Source yaw in [-180, 180).
+inline double SkyrimHeadingToGmodYaw(double heading_rad) {
+    const double y = std::fmod(90.0 - heading_rad * 180.0 / kPi + 180.0, 360.0);
+    return (y < 0 ? y + 360.0 : y) - 180.0;
+}
 
 // Both games: positive pitch looks down. VERIFIED in game 2026-10-04: looking straight down gave
 // Skyrim 90.0 deg and Garry's Mod 89.0 deg.

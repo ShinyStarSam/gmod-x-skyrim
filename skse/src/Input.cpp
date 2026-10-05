@@ -1,7 +1,8 @@
 // Phase 1 step 1: input bridge. Skyrim keeps keyboard focus. While the puppet is on, Skyrim's
 // window is in front and no Skyrim menu has the input, keyboard and mouse go to Garry's Mod
 // (GmskyInput slot) instead of Skyrim's own player. Skyrim keeps Esc, ~, J, M, F9, and E for
-// activating doors, people and containers. V toggles Garry's Mod's noclip (step 3e). Approach and hooks adapted from SkyCraft (MIT).
+// activating doors, people and containers. V toggles Garry's Mod's noclip (step 3e). 1-6 and the
+// mouse wheel choose Garry's Mod's weapon, Q opens its spawn menu (Phase 3 step 3a). Approach and hooks adapted from SkyCraft (MIT).
 #include "Input.h"
 
 #include "Link.h"
@@ -38,12 +39,14 @@ namespace gmsky::Input
 			case 0x2A: return GMSKY_IN_SPEED;    // Left Shift (sprint)
 			case 0x38: return GMSKY_IN_WALK;     // Left Alt
 			case 0x13: return GMSKY_IN_RELOAD;   // R
+			case 0x10: return GMSKY_IN_MENU;     // Q (Sandbox's spawn menu)
 			default: return 0;
 			}
 		}
 
 		bool g_routing = false;
 		uint32_t g_held = 0;
+		uint32_t g_slot = 0;  // weapon slot key held (1-6), 0 = none
 		int64_t g_mouseX = 0, g_mouseY = 0;
 		int32_t g_wheel = 0;
 		uint32_t g_noclipPresses = 0;  // running total, so a quick tap between two ticks isn't lost
@@ -86,7 +89,7 @@ namespace gmsky::Input
 			GmskyInput in{};
 			in.frame = g_frame;
 			in.active = g_routing ? 1u : 0u;
-			in.buttons = g_routing ? g_held : 0u;
+			in.buttons = g_routing ? (g_held | (g_slot << GMSKY_IN_SLOT_SHIFT)) : 0u;
 			in.mouse_x_total = g_mouseX;
 			in.mouse_y_total = g_mouseY;
 			in.wheel_total = g_wheel;
@@ -114,6 +117,7 @@ namespace gmsky::Input
 			if (route != g_routing) {
 				g_routing = route;
 				g_held = 0;
+				g_slot = 0;
 				Write();
 			}
 			g_reason = reason;
@@ -189,6 +193,17 @@ namespace gmsky::Input
 								changed = true;
 								logger::info("V: noclip toggle #{} sent to Garry's Mod", g_noclipPresses);
 							}
+							continue;
+						}
+						if (code >= 0x02 && code <= 0x07) {  // keys 1-6: Garry's Mod's weapon slots
+							const uint32_t slot = code - 0x01;
+							if (down) {
+								g_slot = slot;
+								logger::info("weapon slot key {} sent to Garry's Mod", slot);
+							} else if (g_slot == slot) {
+								g_slot = 0;
+							}
+							changed = true;
 							continue;
 						}
 						action = ActionForKey(code);
@@ -294,6 +309,11 @@ namespace gmsky::Input
 		return BlockingMenuOpen();
 	}
 
+	bool MenuKeyHeld()
+	{
+		return g_routing && (g_held & GMSKY_IN_MENU) != 0;
+	}
+
 	bool MouseTotals(int64_t& a_x, int64_t& a_y)
 	{
 		a_x = g_mouseX;
@@ -303,8 +323,8 @@ namespace gmsky::Input
 
 	void LogSecond()
 	{
-		logger::info("INPUT {}: held={:#x} mouse this second=({}, {}) totals=({}, {}) wheel={} noclip presses={} events={} writes={} activations={}",
-			g_routing ? "to Garry's Mod" : "to Skyrim", g_held, g_secMouseX, g_secMouseY, g_mouseX, g_mouseY, g_wheel,
+		logger::info("INPUT {}: held={:#x} slot key={} mouse this second=({}, {}) totals=({}, {}) wheel={} noclip presses={} events={} writes={} activations={}",
+			g_routing ? "to Garry's Mod" : "to Skyrim", g_held, g_slot, g_secMouseX, g_secMouseY, g_mouseX, g_mouseY, g_wheel,
 			g_noclipPresses, g_events, g_writes, g_activations);
 		g_events = g_writes = g_activations = 0;
 		g_secMouseX = g_secMouseY = 0;

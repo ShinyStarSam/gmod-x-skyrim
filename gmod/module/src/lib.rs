@@ -59,7 +59,18 @@ struct InputTrack {
     /// GmskyInput.frame of the last active read (reported back to Skyrim with the player state).
     applied_frame: u64,
 }
-static INPUT: Mutex<InputTrack> = Mutex::new(InputTrack { last_seq: 0, last_change_ms: 0, base: None, applied_frame: 0 });
+/// One reader per side (index = side): the server turns input into the player's command, the
+/// client into Garry's Mod's key binds and its menu cursor (Phase 3 step 3a).
+static INPUT: Mutex<[InputTrack; 2]> = Mutex::new([
+    InputTrack { last_seq: 0, last_change_ms: 0, base: None, applied_frame: 0 },
+    InputTrack { last_seq: 0, last_change_ms: 0, base: None, applied_frame: 0 },
+]);
+
+/// Step 3a: the client side's report to the server, (time in ms, a menu cursor is up). Both
+/// sides run in this one module in single-player, so a static is enough.
+static CLIENT_INPUT: Mutex<(u64, bool)> = Mutex::new((0, false));
+/// The server trusts the client's report for this long.
+const CLIENT_INPUT_FRESH_MS: u64 = 500;
 
 fn root() -> PathBuf {
     ROOT.get().cloned().unwrap_or_else(|| PathBuf::from("."))
@@ -169,7 +180,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 28] = [
+    let funcs: [(&str, lua::CFn); 31] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -198,6 +209,9 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("OverlayShot", l_overlay_shot),
         ("OverlayBlur", l_overlay_blur),
         ("OverlayWindow", l_overlay_window),
+        ("SetClientInput", l_set_client_input),
+        ("ClientInput", l_client_input),
+        ("ReadActors", l_read_actors),
     ];
     for (name, f) in funcs {
         (a.pushnumber)(l, side as f64); // upvalue 1 = side
@@ -263,8 +277,9 @@ unsafe extern "C" fn l_heartbeat(l: *mut State) -> c_int {
 /// INPUT_STALE_MS. The deltas are since the previous call that returned active (so presses made
 /// while input went to Skyrim, e.g. in a menu, are not counted).
 unsafe extern "C" fn l_read_input(l: *mut State) -> c_int {
-    guarded(l, |a, _| {
-        let mut t = INPUT.lock().unwrap_or_else(|e| e.into_inner());
+    guarded(l, |a, side| {
+        let mut all = INPUT.lock().unwrap_or_else(|e| e.into_inner());
+        let t = &mut all[(side == SIDE_CLIENT) as usize];
         let now = now_ms();
         let read = mapping().ok().and_then(|m| m.shared().input.read().map(|(i, seq)| (m, i, seq)));
         let mut result = None;
@@ -303,6 +318,30 @@ unsafe extern "C" fn l_read_input(l: *mut State) -> c_int {
             }
         }
         6
+    })
+}
+
+/// gmsky.SetClientInput(cursor) (client, every frame while input comes from Skyrim): the client
+/// is turning Skyrim's clicks, wheel and slot keys into Garry's Mod's binds; cursor = a menu
+/// cursor is up (Skyrim's mouse moves it, so the view must not turn). gmsky.SetClientInput(nil)
+/// withdraws the report at once.
+unsafe extern "C" fn l_set_client_input(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let mut c = CLIENT_INPUT.lock().unwrap_or_else(|e| e.into_inner());
+        *c = if (a.type_)(l, 1) <= 0 { (0, false) } else { (now_ms(), (a.toboolean)(l, 1) != 0) };
+        0
+    })
+}
+
+/// gmsky.ClientInput() -> fresh, cursor: whether the client reported within the last 0.5 s, and
+/// whether its menu cursor is up.
+unsafe extern "C" fn l_client_input(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let (at, cursor) = *CLIENT_INPUT.lock().unwrap_or_else(|e| e.into_inner());
+        let fresh = at != 0 && now_ms().saturating_sub(at) < CLIENT_INPUT_FRESH_MS;
+        (a.pushboolean)(l, fresh as c_int);
+        (a.pushboolean)(l, (fresh && cursor) as c_int);
+        2
     })
 }
 
@@ -435,6 +474,55 @@ unsafe extern "C" fn l_anchor(l: *mut State) -> c_int {
         }
         for v in link.anchor {
             (a.pushnumber)(l, v);
+        }
+        3
+    })
+}
+
+/// gmsky.ReadActors(last_seq) -> seq, skyrim_frame, list (Phase 3 step 3b): Skyrim's actors near the
+/// player, nearest first. Each entry: { id = formId, flags, x, y, z (feet, Garry's Mod world
+/// units: the anchor is added here), yaw, radius, height, hp (0..1), level, name }.
+/// Returns false if nothing new since last_seq; nil if there is no table for the current origin
+/// (none yet, or written for another origin epoch: positions would be wrong).
+unsafe extern "C" fn l_read_actors(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let last = (a.tonumber)(l, 1) as u32;
+        let Some((t, seq)) = mapping().ok().and_then(|m| m.shared().actors.read()) else { return 0 };
+        if seq == last {
+            (a.pushboolean)(l, 0);
+            return 1;
+        }
+        let (epoch, anchor) = {
+            let link = LINK.lock().unwrap_or_else(|e| e.into_inner());
+            (link.epoch, link.anchor)
+        };
+        if epoch == 0 || t.origin_epoch != epoch {
+            return 0;
+        }
+        (a.pushnumber)(l, seq as f64);
+        (a.pushnumber)(l, t.skyrim_frame as f64);
+        let n = (t.count as usize).min(gmsky_protocol::MAX_ACTORS);
+        (a.createtable)(l, n as c_int, 0);
+        for (i, r) in t.actors[..n].iter().enumerate() {
+            (a.createtable)(l, 0, 12);
+            let num = |key: &str, v: f64| {
+                (a.pushnumber)(l, v);
+                lua::set_field(a, l, -2, key);
+            };
+            num("id", r.form_id as f64);
+            num("flags", r.flags as f64);
+            num("x", anchor[0] + r.pos[0] as f64);
+            num("y", anchor[1] + r.pos[1] as f64);
+            num("z", anchor[2] + r.pos[2] as f64);
+            num("yaw", r.yaw_deg as f64);
+            num("radius", r.radius as f64);
+            num("height", r.height as f64);
+            num("hp", r.health_frac as f64);
+            num("level", r.level as f64);
+            let end = r.name.iter().position(|&c| c == 0).unwrap_or(r.name.len());
+            lua::push_str(a, l, &String::from_utf8_lossy(&r.name[..end]));
+            lua::set_field(a, l, -2, "name");
+            (a.rawseti)(l, -2, i as c_int + 1);
         }
         3
     })
@@ -787,7 +875,8 @@ unsafe extern "C" fn l_write_player_state(l: *mut State) -> c_int {
             }
         }
         let (applied, input_frame) = {
-            let t = INPUT.lock().unwrap_or_else(|e| e.into_inner());
+            let all = INPUT.lock().unwrap_or_else(|e| e.into_inner());
+            let t = &all[SIDE_SERVER as usize];
             (t.base, t.applied_frame)
         };
         let (mx, my, _, _) = applied.unwrap_or((0, 0, 0, 0));

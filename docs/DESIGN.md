@@ -1044,6 +1044,101 @@ use), and exactly those are shown again afterwards.
 
 **Not in 2c:** Skyrim's own HUD (compass, crosshair, health) and the Garry's Mod window: 2d.
 
+**Phase 2 closed (2026-10-05, after test 50).** Its "done when" (hands, weapon and HUD drawn
+inside Skyrim; Garry's Mod window hidden) is met. Left open on purpose, not blocking: Garry's Mod's
+window size isn't matched to Skyrim's automatically (`tools\launch_gmod.ps1 -Width W -Height H`
+does it by hand), and quest markers / stamina / magicka in HOLOHUD (user's "future" list, 2d).
+One gap found while closing it belongs to Phase 3: Skyrim sends the mouse wheel but Garry's Mod
+ignores it, and keys 1-6 aren't sent at all, so weapons can't be switched from Skyrim's window
+(step 3a).
+
+### Phase 3 steps: combat (planned 2026-10-05)
+
+Goal (§12 table): fight a bandit camp with a crowbar. Garry's Mod's weapons hit Skyrim's NPCs
+through Skyrim's own hit system (they bleed, stagger, get angry, count as crimes), Skyrim's NPCs
+hurt the Garry's Mod player, and **Garry's Mod's health decides death** (§8).
+
+**Read in SkyCraft first** (`skse/src/Combat.cpp`, protocol `ActorRecord` / `McEvent` /
+`kInHurt`, its DESIGN §8): Skyrim writes a table of nearby actors every frame (`WriteActorTable`:
+formId, position, yaw, height, width, health fraction, level, hostile / dead / essential / in
+combat flags, name). Minecraft spawns an invisible stand-in for each. A Minecraft hit on a
+stand-in becomes an event that Skyrim feeds into its **own melee hit function** (ID 38586, only
+after checking that the engine's melee code at ID 38627 + 0x4A8 really calls it; otherwise plain
+`DoDamage`), with a vanilla weapon standing in for blood and sounds, skill experience, and
+`StartCombat`. Hits on the Skyrim player are **refunded** in Skyrim each frame (health topped up)
+and sent to Minecraft with the attacker and kind (from `TESHitEvent` and a `HandleHealthDamage`
+hook); damage over time is batched every 0.5 s. While Minecraft drives, the Skyrim player is
+**essential** (can't die in Skyrim); Minecraft's death kills the Skyrim player (`KillImpl`), and
+Skyrim's own death / reload flow runs. Damage scaling: Minecraft → Skyrim × (5 + 0.25 × level),
+Skyrim → Minecraft ÷ 5.
+
+**Different for Garry's Mod:** Garry's Mod has 100 health like Skyrim's player, and its weapons do
+tens of damage per hit (crowbar about 10, the .357 and crossbow far more; from memory, **not
+checked**: 3d logs the real numbers), so the scaling is probably closer to 1:1 than SkyCraft's
+(Minecraft swords do ~7). Defaults chosen in 3d / 3e,
+both Garry's Mod console variables. Stand-ins must **not** be physics objects (tests 12-17:
+creating physics objects near the moving player crashed `vphysics.dll`); a bounding box answered to
+traces is enough for bullets and the crowbar, the same way the ground is answered (step A).
+
+**Steps, each tested on its own:**
+- **3a. Weapon choice from Skyrim's window** (input bridge, no new protocol fields).
+  - *First build (2026-10-05), rejected by the user:* the server picked the next weapon itself
+    (`cmd:SelectWeapon`), a "quick switch" with no weapon menu, and Q was "last weapon". The user:
+    the weapon menu must show as in Garry's Mod, and **Q is Sandbox's spawn menu** (`+menu`).
+  - *Rebuilt:* Skyrim's keys are turned into Garry's Mod's own **binds on its client side**, the
+    way a real key press is: first the `PlayerBindPress` hook (where HOLOHUD 2's weapon menu
+    listens: `invnext` / `invprev` / `slotN` open and move it, `+attack` picks the weapon and is
+    swallowed, read in its `elements/weaponselection.lua`), then, if no hook took it, the bind is
+    run as a console command (`ply:ConCommand`). Mouse wheel up / down = `invprev` / `invnext`,
+    1-6 = `slot1`-`slot6` (bits 16-19 of `GmskyInput.buttons`, the slot key held), left / right
+    button = `+attack` / `+attack2`, Q = `+menu` while held (`GMSKY_IN_MENU`, 0x800).
+  - **Attack now comes from Garry's Mod's own command:** the server takes `IN_ATTACK` /
+    `IN_ATTACK2` from the player's command (filled by `+attack` on the client) instead of from
+    Skyrim's buttons, so a click that a menu swallowed never fires the weapon. If the client side
+    stops reporting (0.5 s), the server falls back to Skyrim's buttons as before.
+  - **Cursor mode** (spawn menu, any Garry's Mod menu with a mouse cursor, `vgui.CursorVisible()`):
+    Skyrim's mouse moves Garry's Mod's menu cursor (`gui.InternalCursorMoved`, the way VRMod drives
+    menus), its buttons and wheel click and scroll (`gui.InternalMousePressed` / `Released` /
+    `MouseWheeled`), and the view doesn't turn. The real Windows cursor isn't in the overlay
+    picture, so a cursor arrow is drawn in `DrawOverlay`. `gmsky_cursor_speed` (default 1) =
+    pixels per Skyrim mouse count. Typing into the spawn menu's search box: not covered.
+  - The physics gun holding something (attack held): the wheel isn't turned into binds; the server
+    passes it in the command (`cmd:SetMouseWheel`) and the gun pushes / pulls the prop.
+  - Module: the input reader keeps a separate baseline per side (server and client both read the
+    same input); `gmsky.SetClientInput(cursor)` / `gmsky.ClientInput()` tell the server that the
+    client is handling binds and whether a cursor is up.
+  - Logs: every bind (taken by a hook or run), cursor on / off with position, per-second counts.
+    Harness: binds for wheel / slot / attack / Q, a hook taking `+attack`, cursor mode, physgun
+    wheel, server attack from the command, fallback.
+- **3b. Nearby NPCs, Skyrim → Garry's Mod (log only).** New latest-value slot `actors` (protocol
+  v10): the nearest 64 actors within 6,000 Skyrim units (~3,200 Garry's Mod units, beyond a bow
+  shot; SkyCraft's `WriteActorTable`), position in Garry's Mod units relative to the anchor (like
+  the ground grids; the module adds the anchor and refuses a table from another origin), yaw,
+  height, radius, health fraction, level, flags, name; written every Skyrim frame as SkyCraft does
+  (the stand-ins in 3c move every tick). New `skse/src/Actors.cpp`, `gmod/lua/gmsky/actors.lua`. Garry's Mod logs the count and the
+  nearest few each second. Test: walk up to Whiterun guards; the log names them with distances
+  that match Skyrim's.
+- **3c. Stand-ins in Garry's Mod.** One invisible entity per actor (`gmsky_actor`, no physics
+  object, solid box sized from height and radius, moved every tick), removed when the actor
+  leaves the table or dies. Garry's Mod's bullets and the crowbar's trace hit them. Check by
+  numbers: once a second the trace along the player's aim names the stand-in under the crosshair,
+  and Skyrim logs its own crosshair target: the two must agree. Whether stand-ins block the
+  player's movement (Skyrim's NPCs are solid): decided in this step.
+- **3d. Garry's Mod hits Skyrim's NPCs.** A one-way event queue Garry's Mod → Skyrim (protocol bump).
+  `EntityTakeDamage` on a stand-in: the damage is cancelled there and sent as a hit (formId,
+  damage, damage type, hit position, direction, force). Skyrim applies it like SkyCraft's
+  `ApplyHit` (own hit function, checked first; stand-in Skyrim weapon by damage type for blood and
+  sound; skill experience; `StartCombat`). Damage scaling: console variable, default decided with
+  the user (§14 question 5). Test: crowbar a bandit until they die; Skyrim's log shows each hit.
+- **3e. Skyrim's NPCs hurt the Garry's Mod player.** SkyCraft's refund + attacker / kind
+  detection; the player essential in Skyrim while the puppet drives; an event queue Skyrim →
+  Garry's Mod; Garry's Mod applies it as damage from the attacker's stand-in (so its damage
+  direction indicator points at them), slash / bullet / burn by kind. Test: let a bandit hit you;
+  HOLOHUD's health drops, Skyrim's stays full.
+- **3f. Death.** Garry's Mod's death kills the Skyrim player (SkyCraft's `KillPlayer`); Skyrim's
+  death and reload run; the new origin after the reload re-anchors Garry's Mod, and Garry's Mod's
+  respawn is held until then. Test: die to a bandit; Skyrim reloads; you play on.
+
 ## 13. Repo layout
 
 ```

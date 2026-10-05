@@ -88,7 +88,7 @@ namespace gmsky::Puppet
 		RE::NiPoint3 g_lastTargetRaw{};
 		double g_lastHeadingDeg = 0.0, g_lastPitchDeg = 0.0;
 		// View lag and prediction (Phase 1 step 1b), per second.
-		uint32_t g_lagSamples = 0, g_lagMax = 0, g_predicted = 0;
+		uint32_t g_lagSamples = 0, g_lagMax = 0, g_predicted = 0, g_cursorFrames = 0;
 		uint64_t g_lagSum = 0;
 		double g_aheadMax = 0.0, g_aheadLast = 0.0;
 		float g_degPerCount = 0.0f;
@@ -116,6 +116,14 @@ namespace gmsky::Puppet
 				g_degPerCount = a_g.deg_per_count;
 			}
 
+			// A Garry's Mod menu cursor is up (or Q, its spawn menu, is held: known here before Garry's
+			// Mod's answer arrives): the mouse moves that cursor, never the view (step 3a).
+			if ((a_g.flags & GMSKY_PF_CURSOR) || Input::MenuKeyHeld()) {
+				if (a_stats) {
+					++g_cursorFrames;
+				}
+				return;
+			}
 			int64_t mx = 0, my = 0;
 			if (!Input::MouseTotals(mx, my) || a_g.deg_per_count <= 0.0f) {
 				return;
@@ -365,12 +373,12 @@ namespace gmsky::Puppet
 				g_skyrimSneaking ? "sneaking" : "not sneaking", g_sneakToggles, g_sneakRefused);
 			g_sneakToggles = g_sneakRefused = 0;
 			if (g_lagSamples) {
-				logger::info("VIEW lag (Skyrim frames, 1 = newest) avg={:.2f} max={} | prediction {}: frames={} ahead max={:.2f} deg, last frame {:.2f} deg",
+				logger::info("VIEW lag (Skyrim frames, 1 = newest) avg={:.2f} max={} | prediction {}: frames={} ahead max={:.2f} deg, last frame {:.2f} deg, paused for a menu cursor {} frames",
 					double(g_lagSum) / g_lagSamples, g_lagMax, g_degPerCount > 0.0f ? "on" : "off (gmsky_predict 0)",
-					g_predicted, g_aheadMax, g_aheadLast);
+					g_predicted, g_aheadMax, g_aheadLast, g_cursorFrames);
 			}
 		}
-		g_lagSamples = g_lagMax = g_predicted = 0;
+		g_lagSamples = g_lagMax = g_predicted = g_cursorFrames = 0;
 		g_lagSum = 0;
 		g_aheadMax = 0.0;
 		g_sets = g_groundRay = g_groundLand = g_groundKeep = g_bigSteps = 0;

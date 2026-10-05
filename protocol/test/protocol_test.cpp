@@ -58,6 +58,14 @@ static void TestAngles() {
     CHECK(Near(gmsky::GmodYawToSkyrimHeading(180.0), 270.0 * d2r)); // west
     CHECK(Near(gmsky::GmodYawToSkyrimHeading(-90.0), 180.0 * d2r)); // south
     CHECK(Near(gmsky::GmodPitchToSkyrimPitch(45.0), 45.0 * d2r));
+    // Step 3b: heading back to Source yaw, the exact inverse.
+    CHECK(Near(gmsky::SkyrimHeadingToGmodYaw(0.0), 90.0));             // north
+    CHECK(Near(gmsky::SkyrimHeadingToGmodYaw(90.0 * d2r), 0.0));       // east
+    CHECK(Near(gmsky::SkyrimHeadingToGmodYaw(270.0 * d2r), -180.0));   // west
+    CHECK(Near(gmsky::SkyrimHeadingToGmodYaw(180.0 * d2r), -90.0));    // south
+    for (double y = -179.0; y < 180.0; y += 7.0) {
+        CHECK(Near(gmsky::SkyrimHeadingToGmodYaw(gmsky::GmodYawToSkyrimHeading(y)), y));
+    }
 }
 
 // The three slot numbers (middle, writer, reader) are always 0, 1, 2 in some order.

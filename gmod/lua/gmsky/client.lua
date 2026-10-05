@@ -13,6 +13,8 @@ gmsky.Include("overlay")
 gmsky.Include("overlay2d")
 -- Phase 2 step 2b: the live overlay (gmsky_overlay_probe).
 gmsky.Include("liveoverlay")
+-- Phase 3 step 3a: Skyrim's clicks, wheel, 1-6 and Q as Garry's Mod's own binds; menu cursor.
+gmsky.Include("binds")
 
 local frames = 0
 hook.Add("Think", "gmsky_count_frames", function()

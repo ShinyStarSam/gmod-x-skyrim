@@ -15,9 +15,12 @@ gmsky.Include("terrain")
 local T = gmsky.terrain
 -- Collision field (re-plan step A): triangles answered from Lua, no physics objects.
 gmsky.Include("field")
+-- Phase 3 step 3b: Skyrim's actors near the player (log only).
+gmsky.Include("actors")
 if GetPlayer() and T then T.home = T.MeasureRoom(GetPlayer():GetPos() + Vector(0, 0, 40)) end
 local anchored = 0 -- the origin epoch Garry's Mod is anchored to
 local inputOn = false -- input comes from Skyrim's window right now
+local menuCursor = false -- a menu cursor is up (or Q held): the mouse never turns the view
 
 -- Jump log (after test 22: a few single-frame jumps of 100-260 units, cause not known). A tick
 -- where the player moved more than 40 units further than its speed explains is logged with what
@@ -77,6 +80,8 @@ hook.Add("Tick", "gmsky_player_state", function()
 	if ply:GetMoveType() == MOVETYPE_NOCLIP then flags = flags + 8 end
 	if driveCamera:GetBool() then flags = flags + 0x20 end
 	if smooth:GetBool() then flags = flags + 0x40 end
+	-- Step 3a: a menu cursor is up; Skyrim must not turn its camera ahead with the mouse.
+	if menuCursor then flags = flags + 0x100 end
 	-- Step D: ask Skyrim for its collision shapes (gmsky_ground shapes) or the ray grid.
 	if T and T.ShapesMode() then flags = flags + 0x80 end
 	-- Degrees per Skyrim mouse count, so Skyrim can draw the mouse movement still on its way here.
@@ -91,6 +96,7 @@ hook.Add("Tick", "gmsky_player_state", function()
 		ply:EyePos().z - pos.z, vel.x, vel.y, vel.z, flags, fov, degPerCount,
 		engine.TickInterval() * 1000, punch.p, punch.y, punch.r) or 0
 	if T then T.UpdateGround(ply, anchored, (gmsky.Status())) end
+	if gmsky.actors then gmsky.actors.Update() end
 end)
 
 -- Input typed into Skyrim's window (Phase 1 step 1). While Skyrim routes input here, it replaces
@@ -120,14 +126,25 @@ local function ToggleNoclip(ply)
 		allowed and "done" or "refused by the PlayerNoClip hook"))
 end
 
+-- Phase 3 step 3a: weapon choice and Garry's Mod's menus are done on the client side (binds.lua),
+-- through Garry's Mod's own key binds. Here: attack comes from the player's own command while
+-- the client handles binds (a click a weapon menu took never fires), no view turning while a
+-- menu cursor is up, and the physics gun gets the wheel while it holds something.
+local weapons = { physgunNotches = 0, fromClient = nil }
+
+local function NameOf(w)
+	return IsValid(w) and w:GetClass() or "nothing"
+end
+
 local function AngleGap(a, b)
 	return math.max(math.abs(math.NormalizeAngle(a.y - b.y)), math.abs(a.p - b.p))
 end
 
 hook.Add("StartCommand", "gmsky_input", function(ply, cmd)
 	if ply ~= GetPlayer() then return end
-	local active, buttons, dx, dy, _, noclipPresses = gmsky.ReadInput()
+	local active, buttons, dx, dy, dw, noclipPresses = gmsky.ReadInput()
 	if not active then
+		menuCursor = false
 		if view then
 			-- Tell the Garry's Mod window our view (it only had its own, stale one until now).
 			ply:SetEyeAngles(view)
@@ -158,13 +175,31 @@ hook.Add("StartCommand", "gmsky_input", function(ply, cmd)
 		gmsky.Log("input from Skyrim: ON")
 	end
 	for _ = 1, noclipPresses do ToggleNoclip(ply) end
-	local k = 0.022 * sensitivity:GetFloat()
-	view.y = math.NormalizeAngle(view.y - dx * k)
-	view.p = math.Clamp(view.p + dy * k, -89, 89)
+	local fromClient, cursor = gmsky.ClientInput()
+	-- Q (Sandbox's spawn menu) held: a cursor is up from the first tick, before the client sees it.
+	cursor = cursor or bit.band(buttons, 0x800) ~= 0
+	if cursor ~= menuCursor then
+		menuCursor = cursor
+		gmsky.Log(cursor and "menu cursor up: the mouse doesn't turn the view" or "menu cursor gone: the mouse turns the view again")
+	end
+	if fromClient ~= weapons.fromClient then
+		weapons.fromClient = fromClient
+		gmsky.Log(fromClient and "attack from Garry's Mod's own binds (client side handles clicks, wheel, 1-6, Q)"
+			or "attack from Skyrim's buttons (client side not handling binds)")
+	end
+	if not cursor then
+		local k = 0.022 * sensitivity:GetFloat()
+		view.y = math.NormalizeAngle(view.y - dx * k)
+		view.p = math.Clamp(view.p + dy * k, -89, 89)
+	end
 
 	local b = 0
 	for _, m in ipairs(IN_MAP) do
 		if bit.band(buttons, m[1]) ~= 0 then b = bit.bor(b, m[2]) end
+	end
+	local ATTACKS = bit.bor(IN_ATTACK, IN_ATTACK2)
+	if fromClient then
+		b = bit.bor(bit.band(b, bit.bnot(ATTACKS)), bit.band(cmd:GetButtons(), ATTACKS))
 	end
 	local fwd, side = 0, 0
 	if bit.band(buttons, 0x1) ~= 0 then fwd = fwd + FULL end
@@ -178,6 +213,17 @@ hook.Add("StartCommand", "gmsky_input", function(ply, cmd)
 	cmd:SetForwardMove(fwd)
 	cmd:SetSideMove(side)
 	cmd:SetViewAngles(view)
+	-- The physics gun holding something takes the wheel (pushes / pulls the prop); the client
+	-- doesn't turn the wheel into weapon binds then.
+	local wep = ply:GetActiveWeapon()
+	if NameOf(wep) ~= weapons.held then
+		if weapons.held then gmsky.Log(string.format("weapon now %s (was %s)", NameOf(wep), weapons.held)) end
+		weapons.held = NameOf(wep)
+	end
+	if dw ~= 0 and not cursor and IsValid(wep) and wep:GetClass() == "weapon_physgun" and bit.band(b, IN_ATTACK) ~= 0 then
+		cmd:SetMouseWheel(dw)
+		weapons.physgunNotches = weapons.physgunNotches + math.abs(dw)
+	end
 	-- Keep the Garry's Mod window's own view in step with ours, so letting go never snaps.
 	ply:SetEyeAngles(view)
 
@@ -208,16 +254,21 @@ timer.Create("gmsky_status", 1, 0, function()
 			where = where .. string.format(" moving yaw=%.1f speed=%.0f facing-minus-moving=%.1f", moveYaw, speed, diff)
 		end
 	end
-	local input = view and string.format(" input=ON cmds/s=%d buttons=0x%x mouse=(%d, %d)",
-		inputStats.cmds, inputStats.buttons, inputStats.dx, inputStats.dy) or " input=off"
+	local input = view and string.format(" input=ON cmds/s=%d buttons=0x%x mouse=(%d, %d) weapon=%s",
+		inputStats.cmds, inputStats.buttons, inputStats.dx, inputStats.dy, ply and NameOf(ply:GetActiveWeapon()) or "-") or " input=off"
 	local terrain = T and (T.Status(ply) .. (ply and T.GroundStatus(ply) or "")) or ""
 	if gmsky.field then terrain = terrain .. gmsky.field.Status(ply) end
+	if gmsky.actors then terrain = terrain .. gmsky.actors.Status(ply) end
 	gmsky.Log(string.format("tick=%d %s skyrim=%s epoch=%d skyrim_frame=%d writes/s=%d%s%s%s",
 		engine.TickCount(), where, connected and "CONNECTED" or "not connected", epoch, skyrimFrame,
 		writes - lastWrites, input, err and (" error=" .. err) or "", terrain) .. (jump.total > 0 and string.format(" | jumps %d", jump.total) or ""))
 	lastWrites = writes
 	jump.logged, jump.total = 0, 0
 	inputStats.cmds, inputStats.dx, inputStats.dy = 0, 0, 0
+	if weapons.physgunNotches > 0 then
+		gmsky.Log(string.format("physics gun: %d wheel notches this second", weapons.physgunNotches))
+		weapons.physgunNotches = 0
+	end
 end)
 
 -- Load the client side too: new players when they spawn, and anyone already in game now.
