@@ -26,6 +26,60 @@ L.cvar = L.cvar or CreateConVar("gmsky_overlay", "0", 0,
 -- This frame: cleared yet, alpha forced, which hooks ran (for the one-time order log).
 L.frame = L.frame or {}
 
+-- After test 44 (the physgun turned Skyrim's whole screen black): Garry's Mod's halo library
+-- (physgun grab outline, freeze effects, Sandbox entity outlines) clears the whole screen to black
+-- with alpha 255 before drawing its outline and pastes the scene back over it, so after a halo the
+-- picture is opaque everywhere. While the overlay is on, each halo is drawn between a copy of the
+-- frame's alpha and a restore of exactly that alpha (colours untouched): the outline's glow is
+-- then added light (colour with alpha 0), like HOLOHUD's glow. gmsky_overlay_halofix 0 turns this
+-- off (to compare). Counted in the 5 s status line.
+L.halofix = L.halofix or CreateConVar("gmsky_overlay_halofix", "1", 0,
+	"1 = keep the overlay's transparency when Garry's Mod draws a halo (physgun grab outline)")
+L.halos = L.halos or { fixed = 0, unfixed = 0, ms = 0 }
+
+-- A screen-sized picture of our own that keeps alpha, and a material that draws it.
+local function AlphaStore()
+	local w, h = ScrW(), ScrH()
+	if L.store and L.store.w == w and L.store.h == h then return L.store end
+	local name = string.format("gmsky_alphastore_%dx%d", w, h)
+	-- Point sampling, clamped (1 + 4 + 8): pixel for pixel.
+	local rt = GetRenderTargetEx(name, w, h, RT_SIZE_LITERAL, MATERIAL_RT_DEPTH_NONE, 13, 0, IMAGE_FORMAT_RGBA8888)
+	local mat = CreateMaterial(name .. "_mat", "UnlitGeneric", {
+		["$basetexture"] = rt:GetName(), ["$translucent"] = "1", ["$ignorez"] = "1",
+		["$vertexcolor"] = "0", ["$vertexalpha"] = "0",
+	})
+	L.store = { w = w, h = h, rt = rt, mat = mat }
+	return L.store
+end
+
+local function WrapHalo()
+	if not halo or not halo.Render or halo.Render == L.wrappedRender then return end
+	local orig = halo.Render
+	L.origRender = orig
+	L.wrappedRender = function(entry)
+		if not (L.frame.active and L.halofix:GetBool()) then
+			if L.frame.active then L.halos.unfixed = L.halos.unfixed + 1 end
+			return orig(entry)
+		end
+		local t0 = SysTime()
+		local s = AlphaStore()
+		render.CopyRenderTargetToTexture(s.rt)
+		orig(entry)
+		-- Alpha back from the copy: colour factors ZERO, ONE (colour stays), alpha ONE, ZERO
+		-- (alpha replaced by the copy's).
+		render.OverrideAlphaWriteEnable(true, true)
+		render.OverrideBlend(true, BLEND_ZERO, BLEND_ONE, BLENDFUNC_ADD, BLEND_ONE, BLEND_ZERO, BLENDFUNC_ADD)
+		render.SetMaterial(s.mat)
+		render.DrawScreenQuad()
+		render.OverrideBlend(false)
+		render.OverrideAlphaWriteEnable(L.frame.alphaForced and true or false, true)
+		L.halos.fixed = L.halos.fixed + 1
+		L.halos.ms = L.halos.ms + (SysTime() - t0) * 1000
+	end
+	halo.Render = L.wrappedRender
+	gmsky.Log("live overlay: halo.Render wrapped (keeps the overlay's alpha)")
+end
+
 local function QueueMode()
 	local cv = GetConVar("mat_queue_mode")
 	return cv and cv:GetString() or "?"
@@ -53,6 +107,7 @@ local function Apply(on)
 		gmsky.Log(string.format("live overlay ON (mat_queue_mode %s, screen %dx%d): %s", QueueMode(), ScrW(), ScrH(), line))
 		if gmsky.OverlayEnable then gmsky.OverlayEnable(true) end
 		L.orderLogged = false
+		WrapHalo()
 	else
 		if gmsky.OverlayEnable then gmsky.OverlayEnable(false) end
 		-- (Not logged at start-up, when it was never on.)
@@ -121,11 +176,35 @@ hook.Add("PostRender", "gmsky_liveoverlay", function()
 	f.active = false
 end)
 
+-- Step 2c-1: asks Skyrim to save its next drawn frame (before and after our picture, and the
+-- picture) into logs/overlay/ for tools\skyrim_shot_report.py.
+-- gmsky_overlay_shot [seconds]: after that many seconds (default 0), so the console can be closed
+-- first (Garry's Mod's console and menus are in the picture too).
+concommand.Add("gmsky_overlay_shot", function(_, _, args)
+	local delay = math.max(0, tonumber(args[1] or "0") or 0)
+	local function Shoot()
+		local line = gmsky.OverlayShot and gmsky.OverlayShot() or "this module build has no OverlayShot"
+		gmsky.Log("overlay shot: " .. line)
+		print("[gmsky] " .. line)
+	end
+	if delay > 0 then
+		print(string.format("[gmsky] snapshot in %.0f s", delay))
+		timer.Simple(delay, Shoot)
+	else
+		Shoot()
+	end
+end)
+
 -- A Lua error inside a timer makes Garry's Mod delete the timer, so errors are caught and logged.
 timer.Create("gmsky_liveoverlay_status", 5, 0, function()
 	local ok, err = pcall(function()
 		local s = gmsky.OverlayStatus and gmsky.OverlayStatus()
-		if s then gmsky.Log(s .. "; mat_queue_mode " .. QueueMode()) end
+		if s then
+			local h = L.halos
+			gmsky.Log(string.format("%s; mat_queue_mode %s; halos: %d with alpha kept (%.2f ms each), %d without",
+				s, QueueMode(), h.fixed, h.fixed > 0 and h.ms / h.fixed or 0, h.unfixed))
+			L.halos = { fixed = 0, unfixed = 0, ms = 0 }
+		end
 	end)
 	if not ok then gmsky.Log("ERROR in live overlay status: " .. tostring(err)) end
 end)

@@ -646,6 +646,45 @@ fn main() {
             let want = "depthAlpha(false) Clear(0,0,0,0,true,true) alphaWrite(true,true) depthAlpha(true) alphaWrite(false) | forced=false / \
                         depthAlpha(false) Clear(0,0,0,0,true,true) alphaWrite(true,true) depthAlpha(true) alphaWrite(false) | forced=false /  | forced=false";
             check(r == Ok(Some(want.into())), &format!("gmsky_overlay 1 prepares each frame, 0 leaves it alone: {r:?}"));
+            // After test 44: with the overlay on, a halo is drawn between a copy of the frame's alpha
+            // and a restore of it (colour kept, alpha replaced); with gmsky_overlay_halofix 0, or
+            // with the overlay off, the halo is drawn untouched.
+            let halo_lua = r#"
+                local rec = function(name) return function(...) local t = {} for i = 1, select('#', ...) do t[i] = tostring((select(i, ...))) end HARNESS_RENDER[#HARNESS_RENDER + 1] = name .. "(" .. table.concat(t, ",") .. ")" end end
+                render.CopyRenderTargetToTexture = rec("copy")
+                render.OverrideBlend = function(on, ...) HARNESS_RENDER[#HARNESS_RENDER + 1] = "blend(" .. tostring(on) .. (on and ("," .. table.concat({ ... }, ",")) or "") .. ")" end
+                render.SetMaterial = rec("material")
+                render.DrawScreenQuad = rec("quad")
+                BLEND_ZERO, BLEND_ONE, BLENDFUNC_ADD = 0, 1, 0
+                RT_SIZE_LITERAL, MATERIAL_RT_DEPTH_NONE, IMAGE_FORMAT_RGBA8888 = 5, 2, 0
+                function GetRenderTargetEx(name) return { GetName = function() return name end } end
+                function CreateMaterial(name) return name end
+                halo = { Render = function(entry) HARNESS_RENDER[#HARNESS_RENDER + 1] = "HALO" end }
+                local out = {}
+                for _, step in ipairs({ { "1", "1" }, { "1", "0" }, { "0", "1" } }) do
+                    HARNESS_CVARS.gmsky_overlay, HARNESS_CVARS.gmsky_overlay_halofix = step[1], step[2]
+                    hook.Run("PreRender")
+                    hook.Run("PreDrawViewModel")
+                    HARNESS_RENDER = {}
+                    halo.Render({})
+                    out[#out + 1] = table.concat(HARNESS_RENDER, " ")
+                    hook.Run("PreDrawHUD") hook.Run("PostRender")
+                end
+                HARNESS_CVARS.gmsky_overlay_halofix = nil
+                hook.Run("PreRender")
+                return table.concat(out, " / ")
+            "#;
+            let r = lua.run(lc, halo_lua);
+            let want = "copy(table: X) HALO alphaWrite(true,true) blend(true,0,1,0,1,0,0) material(gmsky_alphastore_1280x720_mat) quad() blend(false) alphaWrite(false,true) / HALO / HALO";
+            let got = r.clone().ok().flatten().map(|s| {
+                // The render target is a table: its address changes every run.
+                let i = s.find("copy(table: ").map(|i| i + 12);
+                match i { Some(i) => { let j = s[i..].find(')').map(|j| i + j).unwrap_or(i); format!("{}X{}", &s[..i], &s[j..]) } None => s }
+            });
+            check(got.as_deref() == Some(want), &format!("halo keeps the overlay's alpha (on), untouched with halofix 0 / overlay off: {r:?}"));
+            // Step 2c-1: a snapshot request without an open picture block says what to do.
+            let r = lua.run(lc, "return gmsky.OverlayShot()");
+            check(r == Ok(Some("no overlay block open: switch gmsky_overlay 1 on first".into())), &format!("OverlayShot without a block: {r:?}"));
             // Patched HOLOHUD 2 copy (tools/build_holohud.py), if built: its render.lua with our
             // patch appended compiles in Garry's Mod's Lua (compiled only, not run).
             let holo = root.join("build").join("holohud2_gmsky").join("lua").join("holohud2").join("render.lua");

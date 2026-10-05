@@ -54,7 +54,7 @@ Single-player and offline only.
 ## How to build and test
 
 - Rust (module, stub, harness, protocol): `cargo build --release`, then
-  `target\release\gmod_harness.exe` → `HARNESS PASSED` (109 checks); `cargo test --release` (ring and sweep unit tests). It runs our Lua in Garry's
+  `target\release\gmod_harness.exe` → `HARNESS PASSED` (111 checks); `cargo test --release` (ring and sweep unit tests). It runs our Lua in Garry's
   Mod's real `lua_shared.dll` with fake game objects (incl. the collision math and the ground
   entity's `TestCollision`); it does not run Garry's Mod's movement.
 - C++ layout test: `cmake --build build/protocol --config Release`, then
@@ -125,8 +125,14 @@ multisampling; hook 0.001 ms per frame; no crash.
 - **2b-4 works (test 43, both games):** Skyrim writes its back buffer size (1280×720, = Garry's
   Mod's) into the block and sees Garry's Mod's newest picture, 6-9 ms old, ~180 per second
   (`skse/src/Overlay.cpp`). **Step 2b is done.**
-- **Next:** step 2c (Skyrim draws the picture), then blur behind the plates done in
-  Skyrim from a plate mask. Plans: `docs/DESIGN.md` "Step 2b in detail" and Phase 2 steps.
+- **Now: step 2c** (Skyrim draws the picture; plan `docs/DESIGN.md` "Step 2c in detail"). **2c-1
+  works (test 44):** Skyrim draws Garry's Mod's picture over its frame in linear light (snapshot:
+  ≤ 1 level from the prediction), 7-9 ms old, hidden in menus. Holding a prop with the physgun
+  blacked out Skyrim's screen (Garry's Mod's halo makes the frame opaque): **fixed**
+  (`liveoverlay.lua` keeps the alpha around halos; test 45: ≤ 10% opaque with halos, 100% without
+  the fix). Garry's Mod's menus and console show in Skyrim too: **kept, user's choice**.
+  Next: 2c-2 (hide Skyrim's arms), then blur behind the plates.
+
 ## Evidence (tests 33-37)
 
 Pictures and logs: `build/logs-ingame-test-33/` … `-37/` (`overlay/`). Reports:

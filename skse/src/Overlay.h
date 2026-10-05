@@ -1,5 +1,7 @@
 #pragma once
 
+#include "gmsky_protocol.h"
+
 namespace gmsky::Overlay
 {
 	// Step 2b-4 (DESIGN.md "Step 2b in detail"): the Skyrim side of the overlay picture block
@@ -11,4 +13,14 @@ namespace gmsky::Overlay
 	void PerFrame();
 	// Once a second: Skyrim's size, Garry's Mod's newest picture.
 	void LogSecond();
+
+	// Step 2c-1, the reader (any thread, but one at a time: the Present hook).
+	bool IsOpen();
+	// If Garry's Mod published a picture since the last take, makes it ours: *a_slot, true. The
+	// first call attaches Skyrim as the block's reader.
+	bool Take(uint32_t* a_slot);
+	GmskyOverlaySlotHdr Header(uint32_t a_slot);
+	const uint8_t* Pixels(uint32_t a_slot);
+	// Garry's Mod's snapshot request counter (gmsky_overlay_shot); 0 if the block isn't open.
+	uint32_t ShotRequest();
 }

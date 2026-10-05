@@ -138,6 +138,32 @@ namespace gmsky::Overlay
 		std::atomic_ref<int64_t>(c.skyrim_size_qpc).store(q.QuadPart, std::memory_order_release);
 	}
 
+	namespace
+	{
+		std::atomic<bool> g_readerAttached{ false };
+	}
+
+	bool IsOpen() { return g_base != nullptr; }
+
+	bool Take(uint32_t* a_slot)
+	{
+		if (!g_base) {
+			return false;
+		}
+		if (!g_readerAttached.exchange(true)) {
+			const uint32_t slot = ov::AttachShared(Ctl(), false);
+			logger::info("overlay: Skyrim attached as the reader (slot {}, slots now {:#x})", slot,
+				std::atomic_ref<uint32_t>(Ctl().state).load());
+		}
+		return ov::TakeShared(Ctl(), a_slot);
+	}
+
+	GmskyOverlaySlotHdr Header(uint32_t a_slot) { return SlotHdr(a_slot); }
+
+	uint32_t ShotRequest() { return g_base ? std::atomic_ref<uint32_t>(Ctl().shot_request).load(std::memory_order_acquire) : 0; }
+
+	const uint8_t* Pixels(uint32_t a_slot) { return g_base + GMSKY_OV_PIXELS_OFF + uint64_t(a_slot) * GMSKY_OV_SLOT_BYTES; }
+
 	void LogSecond()
 	{
 		if (!g_base) {

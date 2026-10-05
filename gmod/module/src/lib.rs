@@ -168,7 +168,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 25] = [
+    let funcs: [(&str, lua::CFn); 26] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -194,6 +194,7 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("OverlayStatus", l_overlay_status),
         ("OverlayEnable", l_overlay_enable),
         ("OverlayPrepared", l_overlay_prepared),
+        ("OverlayShot", l_overlay_shot),
     ];
     for (name, f) in funcs {
         (a.pushnumber)(l, side as f64); // upvalue 1 = side
@@ -723,6 +724,14 @@ unsafe extern "C" fn l_overlay_prepared(l: *mut State) -> c_int {
     guarded(l, |_, _| {
         capture::mark_prepared();
         0
+    })
+}
+
+/// gmsky.OverlayShot() -> line for the log: asks Skyrim to save its next drawn frame (step 2c-1).
+unsafe extern "C" fn l_overlay_shot(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        lua::push_str(a, l, &capture::request_shot());
+        1
     })
 }
 

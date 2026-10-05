@@ -95,6 +95,10 @@ static FINISH_TICKS: AtomicU64 = AtomicU64::new(0);
 static FINISH_MAX: AtomicU64 = AtomicU64::new(0);
 /// Frames between starting a copy and publishing it (sum, for the average).
 static LAG_FRAMES: AtomicU64 = AtomicU64::new(0);
+/// How much of each published picture is fully opaque, in thousandths, from every 8th pixel in
+/// each direction (after test 44: a halo made whole pictures opaque). Sum (for the average) and max.
+static OPAQUE_SUM: AtomicU64 = AtomicU64::new(0);
+static OPAQUE_MAX: AtomicU64 = AtomicU64::new(0);
 /// The last error, for the log.
 static LAST_ERROR: Mutex<String> = Mutex::new(String::new());
 
@@ -199,6 +203,9 @@ impl Capture {
                 std::ptr::copy_nonoverlapping(l.bits.add(y * l.pitch as usize), dst.add(y * row), row);
             }
         }
+        let opaque = opaque_permille(l.bits, l.pitch as usize, w, h);
+        OPAQUE_SUM.fetch_add(opaque, Relaxed);
+        OPAQUE_MAX.fetch_max(opaque, Relaxed);
         unlock(s.sys);
         block.publish(&SlotHdr {
             width: w, height: h, format: FMT_BGRA8, flags: F_PREMULTIPLIED | F_SRGB, frame: s.frame,
@@ -225,6 +232,19 @@ impl Capture {
         s.qpc = gmsky_protocol::shm::now_qpc();
         Ok(())
     }
+}
+
+/// Thousandths of the sampled pixels (every 8th in each direction) with alpha 255. BGRA bytes.
+unsafe fn opaque_permille(bits: *const u8, pitch: usize, w: u32, h: u32) -> u64 {
+    let (mut all, mut opaque) = (0u64, 0u64);
+    for y in (0..h as usize).step_by(8) {
+        let row = bits.add(y * pitch);
+        for x in (0..w as usize).step_by(8) {
+            all += 1;
+            opaque += (*row.add(x * 4 + 3) == 255) as u64;
+        }
+    }
+    if all == 0 { 0 } else { opaque * 1000 / all }
 }
 
 fn qpc() -> u64 {
@@ -363,6 +383,19 @@ pub fn enabled() -> bool {
     ENABLED.load(Acquire)
 }
 
+/// gmsky.OverlayShot(): asks Skyrim to save its next drawn frame (before and after our picture is
+/// drawn, and the picture; step 2c-1). A line for the log.
+pub fn request_shot() -> String {
+    let cap = CAP.lock().unwrap_or_else(|e| e.into_inner());
+    match cap.block.as_ref() {
+        Some(b) => {
+            let n = b.ctl().shot_request.fetch_add(1, AcqRel) + 1;
+            format!("Skyrim asked for snapshot {n}: files logs/overlay/skyrim_shot_{n}_*.bin once Skyrim draws a frame")
+        }
+        None => "no overlay block open: switch gmsky_overlay 1 on first".into(),
+    }
+}
+
 /// Step 2b-4: Skyrim's back buffer size (written by Skyrim every frame) against ours.
 fn size_line(b: &OverlayMapping, w: u32, h: u32) -> String {
     let (sw, sh) = b.skyrim_size();
@@ -395,6 +428,7 @@ pub fn status(ms: impl Fn(u64) -> f64) -> String {
     let (unprepared, busy, dropped, too_big) = (take(&UNPREPARED), take(&BUSY), take(&DROPPED), take(&TOO_BIG));
     let (failures, remade, resets) = (take(&FAILURES), take(&REMADE), take(&RESETS));
     let (start_t, finish_t, finish_max, lag) = (take(&START_TICKS), take(&FINISH_TICKS), take(&FINISH_MAX), take(&LAG_FRAMES));
+    let (opaque_sum, opaque_max) = (take(&OPAQUE_SUM), take(&OPAQUE_MAX));
     let cap = CAP.lock().unwrap_or_else(|e| e.into_inner());
     let block = cap.block.as_ref().map(|b| {
         let c = b.ctl();
@@ -405,19 +439,34 @@ pub fn status(ms: impl Fn(u64) -> f64) -> String {
     format!(
         "overlay copy {}: {published} published, {started} started, {unprepared} frames not prepared by Lua, {busy} skipped (all copies busy), \
          {dropped} dropped (newer one ready), {too_big} too big, {failures} failures{}; {}x{}, made {remade}x, {resets} device resets; \
-         start {:.3} ms/frame, finish {:.3} ms/frame (max {:.3}), {:.2} frames from copy to publish; {block}",
+         start {:.3} ms/frame, finish {:.3} ms/frame (max {:.3}), {:.2} frames from copy to publish; opaque {:.1}% avg, {:.1}% max; {block}",
         if enabled() { "ON" } else { "off" },
         if err.is_empty() { String::new() } else { format!(" (last: {err})") },
         cap.w, cap.h,
         if started > 0 { ms(start_t) / started as f64 } else { 0.0 },
         if published > 0 { ms(finish_t) / published as f64 } else { 0.0 }, ms(finish_max),
-        if published > 0 { lag as f64 / published as f64 } else { 0.0 })
+        if published > 0 { lag as f64 / published as f64 } else { 0.0 },
+        if published > 0 { opaque_sum as f64 / published as f64 / 10.0 } else { 0.0 }, opaque_max as f64 / 10.0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::d3d::tests::{with_test_device_sized, GLOBAL_STATE};
+
+    /// After test 44: the opaque share is counted from every 8th pixel in each direction.
+    #[test]
+    fn counts_opaque_pixels() {
+        let (w, h) = (64u32, 16u32);
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h as usize {
+            for x in 0..(w / 2) as usize {
+                px[(y * w as usize + x) * 4 + 3] = 255; // left half opaque
+            }
+        }
+        assert_eq!(unsafe { opaque_permille(px.as_ptr(), (w * 4) as usize, w, h) }, 500);
+        assert_eq!(unsafe { opaque_permille(px.as_ptr(), (w * 4) as usize, 0, 0) }, 0);
+    }
 
     /// Step 2b-4: Skyrim's size (as Skyrim writes it) against ours.
     #[test]
@@ -486,6 +535,7 @@ mod tests {
                 }
                 assert!(line.contains("1 frames not prepared by Lua"), "{line}");
                 assert!(line.contains(" 0 failures"), "{line}");
+                assert!(line.contains("opaque 0.0% avg, 0.0% max"), "half-transparent colour: nothing opaque: {line}");
                 // A reset releases our pictures; the next prepared frame makes them again.
                 on_reset();
                 assert_eq!(CAP.lock().unwrap().w, 0);

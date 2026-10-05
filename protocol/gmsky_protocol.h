@@ -257,7 +257,7 @@ typedef struct GmskyOverlayCtl {
     uint32_t version;            // GMSKY_OV_VERSION
     uint64_t map_size;           // GMSKY_OV_MAP_SIZE
     uint32_t state;              // the triple buffer (see above); compare-and-swap only
-    uint32_t reserved0;
+    uint32_t shot_request;       // Garry's Mod adds 1 (gmsky_overlay_shot): Skyrim saves its next drawn frame (step 2c-1)
     uint64_t frames_published;   // by Garry's Mod
     uint64_t frames_taken;       // by Skyrim
     uint32_t skyrim_width;       // Skyrim's back buffer size (step 2b-4), 0 = not known yet

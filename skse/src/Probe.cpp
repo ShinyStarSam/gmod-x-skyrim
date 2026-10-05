@@ -6,6 +6,7 @@
 #include "Body.h"
 #include "Camera.h"
 #include "Collision.h"
+#include "Draw.h"
 #include "Input.h"
 #include "Link.h"
 #include "Overlay.h"
@@ -224,6 +225,7 @@ namespace gmsky::Probe
 			Collision::LogSecond();
 			Body::LogSecond();
 			Overlay::LogSecond();
+			Draw::LogSecond();
 			g_logTimer = 0.0f;
 		}
 	}

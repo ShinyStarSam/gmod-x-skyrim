@@ -46,7 +46,7 @@ def qpc():
 
 
 def ctl(m):
-    keys = ("magic", "version", "map_size", "state", "reserved0", "published", "taken",
+    keys = ("magic", "version", "map_size", "state", "shot_request", "published", "taken",
             "skyrim_w", "skyrim_h", "skyrim_qpc")
     return dict(zip(keys, CTL.unpack_from(m, 0)))
 

@@ -946,6 +946,55 @@ alpha in it and the copy would have to come from Source's own render target inst
 which it always is, and the same format); the cost of a 1280 × 720 copy (3.7 MB, expected
 ~1-3 ms on the render thread).
 
+### Step 2c in detail (planned 2026-10-05)
+
+Goal: Garry's Mod's hands, weapon and HUD appear in Skyrim's window, over Skyrim's world, every
+Skyrim frame, with the right transparency.
+
+**Read in SkyCraft first** (`skse/src/Overlay.cpp`, `Game.cpp` `HideFirstPersonMeshes` and its menu
+check): it replaces entry 8 (`Present`) of Skyrim's swap chain function table at start-up
+(`kDataLoaded`). In the hook, before the real `Present`: take the newest picture, copy it into a
+texture on the graphics card (`Map` with `WRITE_DISCARD`), and draw one triangle covering the
+screen that samples it, blended "premultiplied" (out = picture + (1 − picture alpha) × Skyrim).
+Every graphics setting it changes is saved first and put back after. Not drawn while a Skyrim menu
+is open or while loading. Skyrim's own first-person meshes (arms, weapon) are hidden while
+Minecraft drives, by marking the meshes "culled" (never the nodes, which the camera and animation
+use), and exactly those are shown again afterwards.
+
+**Different from SkyCraft, on purpose:**
+- **Linear light.** Garry's Mod blends in linear light and stores sRGB-encoded colours (test 32), so
+  a stored colour is sRGB(linear colour × alpha). Mixing it with Skyrim's sRGB picture directly (as
+  SkyCraft does) makes see-through parts too dark or too bright. Instead: our texture is created as
+  an sRGB format (the graphics card decodes when sampling: linear, premultiplied), and Skyrim's back
+  buffer is drawn into through an sRGB "view" (the card decodes Skyrim's pixel, blends in linear
+  light, encodes again). The shader only copies. If the sRGB view of the back buffer can't be made
+  (it depends on the back buffer's format and how its swap chain presents), it falls back to
+  SkyCraft's way and logs "approximate blending".
+- **Stale pictures are not drawn:** if the newest picture is more than 0.5 s old (Garry's Mod
+  stopped, paused, or `gmsky_overlay 0`), nothing is drawn, so a frozen HUD never hangs over Skyrim.
+- **Drawn only while the puppet drives the player** (`Puppet::IsActive`), no Skyrim menu is open
+  (`Input::SkyrimMenuOpen`, the same check input uses).
+
+**Sub-steps, each tested on its own:**
+- **2c-1. Present hook, take, upload, draw.** New `skse/src/Draw.cpp`; `Overlay.cpp` gains the
+  reader side (attach as reader, take, slot pixels). Logs once a second: presents, pictures taken,
+  frames drawn, frames not drawn by reason (menu, puppet off, no picture yet, stale), upload ms
+  (average, max), picture age when drawn (ms), back buffer format, linear or approximate blending,
+  which thread presents (against the game thread). Test: the crowbar and HUD appear in Skyrim's
+  window, move with the view, disappear in menus; numbers as above. Skyrim's own arms still show
+  (2c-2).
+- **2c-2. Skyrim's first-person arms hidden** while the overlay is drawn (SkyCraft's
+  `HideFirstPersonMeshes`, on the game thread in the per-frame driver, not in the `Present` hook).
+  Logs the number of meshes hidden / shown again.
+
+- **2c-1 done (tests 44, 45):** linear blending confirmed by snapshot (≤ 1 level). Garry's Mod's
+  halo library (physgun grab outline) made the frame opaque: while the overlay is on, `halo.Render`
+  is wrapped so the frame's alpha is copied before and written back after (`liveoverlay.lua`).
+  **Garry's Mod's menus and console are part of the overlay and show in Skyrim: kept (user's
+  decision, 2026-10-05).**
+
+**Not in 2c:** Skyrim's own HUD (compass, crosshair, health) and the Garry's Mod window: 2d.
+
 ## 13. Repo layout
 
 ```

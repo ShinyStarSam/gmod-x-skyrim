@@ -29,6 +29,8 @@ add_commonlibsse_plugin(
 get_filename_component(GMSKY_PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 target_include_directories(gmsky PRIVATE src "${GMSKY_PROJECT_ROOT}/protocol")
 target_precompile_headers(gmsky PRIVATE src/PCH.h)
+# Step 2c: drawing Garry's Mod's picture in Skyrim's Present (as SkyCraft).
+target_link_libraries(gmsky PRIVATE d3d11.lib d3dcompiler.lib dxgi.lib)
 target_compile_definitions(gmsky PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
 	GMSKY_PROJECT_ROOT="${GMSKY_PROJECT_ROOT}")
 if(MSVC)

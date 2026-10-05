@@ -43,7 +43,8 @@ pub struct Ctl {
     pub version: AtomicU32,
     pub map_size: AtomicU64,
     pub state: AtomicU32,
-    pub reserved0: u32,
+    /// Garry's Mod adds 1 (gmsky_overlay_shot): Skyrim saves its next drawn frame (step 2c-1).
+    pub shot_request: AtomicU32,
     pub frames_published: AtomicU64,
     pub frames_taken: AtomicU64,
     pub skyrim_width: AtomicU32,
