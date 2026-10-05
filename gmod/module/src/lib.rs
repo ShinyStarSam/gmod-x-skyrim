@@ -168,7 +168,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 26] = [
+    let funcs: [(&str, lua::CFn); 27] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -195,6 +195,7 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("OverlayEnable", l_overlay_enable),
         ("OverlayPrepared", l_overlay_prepared),
         ("OverlayShot", l_overlay_shot),
+        ("OverlayBlur", l_overlay_blur),
     ];
     for (name, f) in funcs {
         (a.pushnumber)(l, side as f64); // upvalue 1 = side
@@ -723,6 +724,15 @@ unsafe extern "C" fn l_overlay_enable(l: *mut State) -> c_int {
 unsafe extern "C" fn l_overlay_prepared(l: *mut State) -> c_int {
     guarded(l, |_, _| {
         capture::mark_prepared();
+        0
+    })
+}
+
+/// gmsky.OverlayBlur(on): Skyrim blurs its picture behind see-through parts of ours (flag in each
+/// picture's header).
+unsafe extern "C" fn l_overlay_blur(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        capture::set_blur((a.toboolean)(l, 1) != 0);
         0
     })
 }

@@ -251,6 +251,7 @@ typedef struct GmskyColTri {
 // GmskyOverlaySlotHdr.flags
 #define GMSKY_OVF_PREMULTIPLIED 0x1u  // colour already multiplied by alpha (drawn over transparent black)
 #define GMSKY_OVF_SRGB 0x2u           // colour values are sRGB-encoded (blend in linear light, test 32)
+#define GMSKY_OVF_BLUR 0x4u           // Skyrim blurs its picture behind see-through parts (gmsky_overlay_blur)
 
 typedef struct GmskyOverlayCtl {
     uint32_t magic;              // GMSKY_OV_MAGIC once initialized (GMSKY_MAGIC_INIT while one side sets it up)

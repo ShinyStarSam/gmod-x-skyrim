@@ -36,6 +36,8 @@ pub const S_READER_ON: u32 = 0x400;
 pub const FMT_BGRA8: u32 = 1;
 pub const F_PREMULTIPLIED: u32 = 0x1;
 pub const F_SRGB: u32 = 0x2;
+/// Skyrim blurs its picture behind see-through parts (gmsky_overlay_blur).
+pub const F_BLUR: u32 = 0x4;
 
 #[repr(C)]
 pub struct Ctl {

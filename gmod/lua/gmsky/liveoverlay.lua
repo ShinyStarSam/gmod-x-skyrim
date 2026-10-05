@@ -37,6 +37,11 @@ L.halofix = L.halofix or CreateConVar("gmsky_overlay_halofix", "1", 0,
 	"1 = keep the overlay's transparency when Garry's Mod draws a halo (physgun grab outline)")
 L.halos = L.halos or { fixed = 0, unfixed = 0, ms = 0 }
 
+-- Blur behind see-through parts (HOLOHUD's plates, the console): done by Skyrim, which blurs its own
+-- picture there; this only sets a flag in each picture (DESIGN.md "Blur behind the plates").
+L.blur = L.blur or CreateConVar("gmsky_overlay_blur", "1", FCVAR_ARCHIVE,
+	"1 = Skyrim blurs its world behind see-through parts of the overlay (HOLOHUD's plates)")
+
 -- A screen-sized picture of our own that keeps alpha, and a material that draws it.
 local function AlphaStore()
 	local w, h = ScrW(), ScrH()
@@ -131,6 +136,12 @@ local function ClearOnce(where)
 end
 
 hook.Add("PreRender", "gmsky_liveoverlay", function()
+	local blur = L.blur:GetBool()
+	if blur ~= L.blurSent and gmsky.OverlayBlur then
+		gmsky.OverlayBlur(blur)
+		L.blurSent = blur
+		if L.on then gmsky.Log("live overlay: blur behind see-through parts " .. (blur and "ON" or "OFF")) end
+	end
 	-- Once per switch-on: the order of the last frame's final hooks, and where it was cleared.
 	local prev = L.frame
 	if L.on and not L.orderLogged and prev.cleared then

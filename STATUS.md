@@ -133,7 +133,9 @@ multisampling; hook 0.001 ms per frame; no crash.
   the fix). Garry's Mod's menus and console show in Skyrim too: **kept, user's choice**.
   **2c-2 works (tests 46-48)** (`skse/src/Arms.cpp`): Skyrim's arms hidden while the overlay is
   live; single-frame flashes around Skyrim menus fixed (0 in test 48). **Step 2c is done.**
-  Next: blur behind HOLOHUD's plates, done in Skyrim.
+  **Blur behind HOLOHUD's plates works (test 49):** done in Skyrim (`skse/src/Draw.cpp`), weight
+  from the picture's alpha, every drawn frame, 0.007 ms CPU; `gmsky_overlay_blur 0/1`.
+  Next: step 2d (Garry's Mod window out of the way; which HUD each game shows).
 
 ## Evidence (tests 33-37)
 

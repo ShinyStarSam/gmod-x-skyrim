@@ -11,7 +11,7 @@
 //! the device is reset (resolution change) and made again at the new size.
 
 use crate::d3d::{func, RELEASE, SURFACE_GET_DESC};
-use gmsky_protocol::overlay::{OverlayMapping, SlotHdr, FMT_BGRA8, F_PREMULTIPLIED, F_SRGB, MAX_H, MAX_W};
+use gmsky_protocol::overlay::{OverlayMapping, SlotHdr, FMT_BGRA8, F_BLUR, F_PREMULTIPLIED, F_SRGB, MAX_H, MAX_W};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::*};
 use std::sync::Mutex;
@@ -73,6 +73,8 @@ struct Capture {
 
 static CAP: Mutex<Capture> = Mutex::new(Capture { dev: 0, w: 0, h: 0, format: 0, sets: [const { Set { rt: 0, sys: 0, query: 0, stage: Stage::Free, frame: 0, qpc: 0 } }; SETS], block: None, frame: 0 });
 static ENABLED: AtomicBool = AtomicBool::new(false);
+/// gmsky_overlay_blur: Skyrim blurs behind see-through parts (flag in each picture's header).
+static BLUR: AtomicBool = AtomicBool::new(true);
 /// Set by Lua each frame it prepared; taken by the next Present.
 static PREPARED: AtomicBool = AtomicBool::new(false);
 /// Block name (tests use their own).
@@ -208,7 +210,8 @@ impl Capture {
         OPAQUE_MAX.fetch_max(opaque, Relaxed);
         unlock(s.sys);
         block.publish(&SlotHdr {
-            width: w, height: h, format: FMT_BGRA8, flags: F_PREMULTIPLIED | F_SRGB, frame: s.frame,
+            width: w, height: h, format: FMT_BGRA8,
+            flags: F_PREMULTIPLIED | F_SRGB | if BLUR.load(Relaxed) { F_BLUR } else { 0 }, frame: s.frame,
             capture_qpc: s.qpc, row_bytes: row as u32, ..Default::default()
         });
         Ok(())
@@ -379,6 +382,11 @@ pub fn mark_prepared() {
     PREPARED.store(true, Release);
 }
 
+/// gmsky.OverlayBlur(on): the blur flag for the next pictures.
+pub fn set_blur(on: bool) {
+    BLUR.store(on, Relaxed);
+}
+
 pub fn enabled() -> bool {
     ENABLED.load(Acquire)
 }
@@ -526,7 +534,7 @@ mod tests {
                 let slot = got.expect("a picture arrived");
                 let h = reader.slot_hdr(slot);
                 assert_eq!((h.width, h.height, h.row_bytes, h.format), (64, 48, 256, FMT_BGRA8));
-                assert_eq!(h.flags, F_PREMULTIPLIED | F_SRGB);
+                assert_eq!(h.flags, F_PREMULTIPLIED | F_SRGB | F_BLUR, "blur on by default (gmsky_overlay_blur 1)");
                 assert!(h.frame > 0 && h.capture_qpc > 0);
                 let px = std::slice::from_raw_parts(reader.slot_ptr(slot) as *const u32, 64 * 48);
                 // A8R8G8B8 in memory is B, G, R, A: as a little-endian u32, exactly the ARGB colour.

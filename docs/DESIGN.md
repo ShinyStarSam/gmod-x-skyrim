@@ -837,6 +837,25 @@ updates"; keep the curve if not too hard).**
     switching it off (`gmsky_blur 0`, new console variable) shows plain see-through plates.
   - Not from SkyCraft (it has no blur; its overlay only adds an "invert" blend for the crosshair,
     `Overlay.cpp`). Not tested; nothing built.
+  - **Revised before building (2026-10-05, after step 2c):** no separate plate mask. The picture's
+    own alpha already marks the plates (94 exactly there, 0 where nothing is, tests 38-39), so the
+    blur weight is taken from it: w = min(1, a / 0.35) (plates: full blur; anti-aliased edges:
+    less). Under opaque things (hands, a = 1) the blur is drawn but fully covered, so it costs
+    nothing visible. Side effect: every see-through Garry's Mod background is frosted, including
+    the console and menus the user keeps in the overlay. No change to the HOLOHUD patch or the
+    block layout.
+  - **How, in the existing draw (one pass, no extra blending step):** in Skyrim's `Present` hook,
+    before drawing: copy the back buffer (`CopyResource` into a texture of the same format family,
+    read through an sRGB view: linear light), shrink it to half and then quarter size (bilinear),
+    blur the quarter-size one (separable Gaussian, horizontal then vertical, in 16-bit float
+    textures). Then the overlay's pixel shader outputs colour = P + (1 − a)·w·B and alpha
+    1 − (1 − a)(1 − w), so the unchanged premultiplied blend gives exactly
+    out = P + (1 − a)·(w·B + (1 − w)·S) (P picture, B blurred Skyrim, S Skyrim, all linear).
+  - **Switch:** `gmsky_overlay_blur` (Garry's Mod console, default 1) sets a new flag bit
+    `GMSKY_OVF_BLUR` in each picture's header (existing `flags` field, layout unchanged).
+  - **Logs:** frames blurred, CPU time of the blur passes; the snapshot report checks that pixels
+    with alpha 0 and opaque pixels are exactly as before, and that see-through pixels are smoother
+    than the unblurred prediction.
 - **Test (35):** `gmsky_test_alpha2d hh nopatches` with `holohud2_r_3d 0`, then with the visor on
   (`holohud2_r_3d 4`). The report's grey check must now show small errors (HOLOHUD's own alpha
   matches the alpha the black/grey pair implies) and no "alpha everywhere".

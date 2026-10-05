@@ -101,6 +101,18 @@ def main():
         print(f"\npredicted {name}: error in sRGB levels")
         for rname, mask in regions.items():
             print(f"  {rname:24} {stats(err, mask)}")
+    # Blur behind see-through parts (gmsky_overlay_blur 1): there, `after` is not the plain linear
+    # prediction but should be smoother than it. Fine detail = mean |pixel - mean of its 4 neighbours|.
+    def detail(img, mask):
+        g = img.mean(axis=2)
+        lap = np.abs(g[1:-1, 1:-1] - (g[:-2, 1:-1] + g[2:, 1:-1] + g[1:-1, :-2] + g[1:-1, 2:]) / 4)
+        m = mask[1:-1, 1:-1]
+        return lap[m].mean() if m.any() else float("nan")
+    see = regions["see-through (0<a<255)"]
+    if see.any():
+        d_pred, d_real = detail(linear, see), detail(real, see)
+        print(f"\nsee-through parts, fine detail: Skyrim {d_real:.2f}, unblurred prediction {d_pred:.2f} "
+              f"(ratio {d_real / d_pred:.2f}: about 1 = no blur, well below 1 = blurred)")
     changed = np.abs(after - before)[:, :, :3].max(axis=2) > 0
     print(f"\npixels Skyrim's frame changed: {changed.sum()}; where the picture is empty: "
           f"{(changed & regions['empty (a=0, black)']).sum()} (should be 0)")
