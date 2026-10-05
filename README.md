@@ -75,6 +75,11 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
 
 ## What doesn't work yet
 
+- **Garry's Mod's hands, weapon and HUD inside Skyrim** (Phase 2): step 2a done in Garry's Mod
+  alone: the hands/weapon (test 30) and the patched HOLOHUD 2 (test 39, flat and curved visor;
+  plates alpha 94/255, glow adds light only) come out as one picture with a usable alpha. Not
+  sent to Skyrim yet (steps 2b, 2c). Until then the Garry's Mod window shows them.
+
 
 
 - Walking around objects (posts, rocks, carts) is bumpy: the ground is measured with rays 48

@@ -600,6 +600,26 @@ fn main() {
             lua.run(ls, "HARNESS_CVARS.gmsky_ground = 'grid' HARNESS_POS = nil gmsky.terrain.holding = false").unwrap();
         }
 
+        // 9. Phase 2a: test pictures are saved only as plain names under logs/overlay/, byte for byte.
+        {
+            let r = lua.run(lc, "local ok, err = gmsky.WriteLogFile('../escape.png', 'x') return tostring(ok) .. ' ' .. tostring(err)");
+            check(r == Ok(Some("false bad file name \"../escape.png\"".into())), &format!("WriteLogFile refuses a path: {r:?}"));
+            let r = lua.run(lc, r"return tostring(gmsky.WriteLogFile('t_bin.png', 'ab\0cd\255'))");
+            let bytes = std::fs::read(log_dir.join("overlay").join("t_bin.png")).unwrap_or_default();
+            check(r == Ok(Some("true".into())) && bytes == b"ab\0cd\xff", &format!("WriteLogFile keeps binary data: {r:?} {bytes:?}"));
+            // 2D alpha test (idea 1): with no game graphics loaded, D3DState says so instead of crashing.
+            let r = lua.run(lc, "return gmsky.D3DState()");
+            check(r == Ok(Some("not found: shaderapidx9.dll is not loaded".into())), &format!("D3DState without the game: {r:?}"));
+            // Patched HOLOHUD 2 copy (tools/build_holohud.py), if built: its render.lua with our
+            // patch appended compiles in Garry's Mod's Lua (compiled only, not run).
+            let holo = root.join("build").join("holohud2_gmsky").join("lua").join("holohud2").join("render.lua");
+            if let Ok(code) = std::fs::read_to_string(&holo) {
+                // "do return end" first: the whole file is compiled, nothing of it runs.
+                let r = lua.run(lc, &format!("do return 'compiles' end\n{code}"));
+                check(r == Ok(Some("compiles".into())), &format!("patched HOLOHUD render.lua compiles: {r:?}"));
+            }
+        }
+
         // 8c. Collision field (re-plan step A): swept box against triangles.
         {
             let sweep = |setup: &str, args: &str| lua.run(ls, &format!(
@@ -696,6 +716,9 @@ fn main() {
           "gmod_client.log: counted 200 frames");
     check(client_log.contains("fps_max_nofocus=300"), "gmod_client.log: fps_max_nofocus logged");
     check(client_log.contains("ran gmod/lua/gmsky/terrain.lua"), "gmod_client.log: terrain.lua runs on the client");
+    check(client_log.contains("ran gmod/lua/gmsky/overlay.lua") && client_log.contains("graphics: ") && client_log.contains(" modules loaded; Vulkan "),
+          "gmod_client.log: overlay.lua runs on the client and logs the graphics DLLs");
+    check(client_log.contains("ran gmod/lua/gmsky/overlay2d.lua"), "gmod_client.log: overlay2d.lua runs on the client");
     let server_log = std::fs::read_to_string(log_dir.join("gmod_server.log")).unwrap_or_default();
     check(server_log.contains("input from Skyrim: ON") && server_log.contains("input from Skyrim: OFF, holding yaw=38.4 pitch=6.7"),
           "gmod_server.log: input ON and OFF logged");

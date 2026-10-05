@@ -7,6 +7,10 @@ local gmsky = gmsky
 -- Collision (Phase 1 step 3): the client builds the same collision, for movement prediction.
 gmsky.Include("terrain")
 gmsky.Include("field")
+-- Phase 2a: the overlay experiment (gmsky_test_overlay).
+gmsky.Include("overlay")
+-- Phase 2a after test 31: why 2D drawing writes no alpha (gmsky_test_alpha2d).
+gmsky.Include("overlay2d")
 
 local frames = 0
 hook.Add("Think", "gmsky_count_frames", function()

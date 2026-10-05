@@ -95,6 +95,16 @@ pub unsafe fn to_string(a: &Api, l: *mut State, idx: c_int) -> Option<String> {
     Some(String::from_utf8_lossy(bytes).into_owned())
 }
 
+/// The raw bytes of a Lua string (binary data such as a PNG; no UTF-8 conversion).
+pub unsafe fn to_bytes(a: &Api, l: *mut State, idx: c_int) -> Option<Vec<u8>> {
+    let mut len = 0usize;
+    let p = (a.tolstring)(l, idx, &mut len);
+    if p.is_null() {
+        return None;
+    }
+    Some(std::slice::from_raw_parts(p as *const u8, len).to_vec())
+}
+
 pub unsafe fn set_field(a: &Api, l: *mut State, idx: c_int, key: &str) {
     let k = CString::new(key).unwrap();
     (a.setfield)(l, idx, k.as_ptr());

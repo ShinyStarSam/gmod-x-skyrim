@@ -1,9 +1,11 @@
 # STATUS
 
-Written 2026-10-04 after in-game test 24. **Phase 1 is complete** (steps 4 and 4b and the
-launcher change tested in test 24). Next: Phase 2 (the overlay). "Verified" means checked with logged numbers
-from a real run; "not tested" means not checked in game. Full history with numbers: `MODLOG.md`.
-Design and plan: `docs/DESIGN.md` §12 ("Phase 1 re-plan after test 17").
+Written 2026-10-04 after in-game test 31; rewritten 2026-10-05 after in-game test 37 (blocked on
+HOLOHUD 2's alpha); **unblocked after test 39** (see "The current problem"). **Phase 1 is complete and committed.** Phase 2 (the
+overlay) is in step 2a, an experiment in Garry's Mod alone. "Verified" means checked with logged
+numbers from a real run; "not tested" means not checked in game. Full history with numbers:
+`MODLOG.md`. Design and plan: `docs/DESIGN.md` §12 (Phase 2 steps, "HUD decision after test 32",
+"HOLOHUD 2, patched").
 
 ## Goal
 
@@ -52,7 +54,7 @@ Single-player and offline only.
 ## How to build and test
 
 - Rust (module, stub, harness, protocol): `cargo build --release`, then
-  `target\release\gmod_harness.exe` → `HARNESS PASSED` (98 checks); `cargo test --release` (ring and sweep unit tests). It runs our Lua in Garry's
+  `target\release\gmod_harness.exe` → `HARNESS PASSED` (101 checks); `cargo test --release` (ring and sweep unit tests). It runs our Lua in Garry's
   Mod's real `lua_shared.dll` with fake game objects (incl. the collision math and the ground
   entity's `TestCollision`); it does not run Garry's Mod's movement.
 - C++ layout test: `cmake --build build/protocol --config Release`, then
@@ -107,50 +109,87 @@ publishes the origin.
 
 ## The current problem
 
-None blocking. Next, in order (user's direction 2026-10-04: get to Skyrim's real collision
-shapes as soon as possible, triple-checked against SkyCraft):
+**Resolved 2026-10-05 (tests 38, 39). No blocker.** HOLOHUD 2's alpha is now right in Garry's Mod
+(flat and curved visor). Two causes:
+- **Plates:** the "see-through glass" was a trick: HOLOHUD pasted a blurred, fully opaque copy of
+  the screen under each plate (`modules/render.lua` `BlurRect`), then black at 94/255 on top. That
+  is why the plate layer held alpha 255 and why the plates looked 0.368 see-through over flat grey.
+  Fix: the patch sets HOLOHUD's own setting `holohud2_r_blur 0` (saved). Plates now alpha 94.
+- **Glow:** its texture has alpha 255 almost everywhere. Fix: drawn with separate alpha blend
+  factors ZERO, ONE (keep the picture's alpha) instead of switching alpha writes off. Now adds
+  colour only.
+- Grey check (curved): one picture predicts the real frame over grey to 1.6 levels on average.
+- **Next:** step 2b (picture to shared memory), 2c (Skyrim draws it), then blur behind the plates
+  done in Skyrim from a plate mask (plan in `docs/DESIGN.md`, user's request).
 
-- **Step C: re-centring the origin: done (test 22, 42 re-centres, "works flawlessly").**
-  Garry's Mod moves the player and the anchor back to the middle of the map together
-  (`terrain.lua` `T.Recentre`, `gmsky.ShiftAnchor`); grids are anchor-relative (protocol 7).
-  Open question from test 22: a few single-frame jumps of 100–260 Garry's Mod units, mostly
-  near window switches, not at re-centres (MODLOG test 22). `gmod_server.log` now logs
-  `JUMP tick …` lines (and `jumps N` in the status line) to find out; read them after the next test.
-- **Step D: Skyrim's real collision shapes: done (test 23, "perfect and superior to grid").**
-- **Phase 1 step 4 (camera) and 4b (crouch = sneak): done (test 24).**
+## Evidence (tests 33-37)
 
-## Evidence (latest test, 22)
+Pictures and logs: `build/logs-ingame-test-33/` … `-37/` (`overlay/`). Reports:
+`python tools\alpha2d_report.py build\logs-ingame-test-N\overlay <name>`.
 
-`build/logs-ingame-test-22/`: `gmod_server.log` 42 × `origin: RE-CENTRE #n` (player minus anchor
-identical before/after in all), 42 × `2 ticks after re-centre` with the speed kept, 0 × `HOLD at`,
-furthest player minus anchor y 58,024 (≈ 109,000 Skyrim units); `skyrim.log` origin epoch 1 all
-session; 6 × `PUPPET big step` (one = a `LIFT`, the rest mostly near window switches; MODLOG test
-22); no new file in `GarrysMod\crashes\`. Test 21 (ground, noclip): `build/logs-ingame-test-21/`.
+| Test | What | Alpha result |
+|---|---|---|
+| 33 | HOLOHUD as installed, 3D visor on | 862,905 px (93.6%) alpha 255 in every frame, forced or not |
+| 34 | visor off | 921,599 of 921,600 px alpha 255 in every frame; black/grey matte right (plates 0.37, glow ~0) |
+| 35 | patched copy | unforced: plates 255 (104,312 px), rest 0; forced: 921,599 px 255 |
+| 36 | step-by-step captures | unforced: glow layer adds no alpha; forced: glow layer makes 921,599 px 255. `RT_FRAME` (0,0,0,255) on plates; `RT_COMPOSITE` alpha 255 on 921,599 px |
+| 37 | glow drawn with the override off; plate experiment | glow layer makes 921,599 px 255 in **both** frames; plates fully opaque in our own picture in all 3 set-ups (implied alpha 1.000, plate colour 0 over grey 124) |
+
+Plate see-through on the real screen (test 35 grey frame): 0.368 on every plate pixel (1st-99th
+percentile), = 94/255.
 
 ## What we've already tried
 
+- **Phase 2a, getting the overlay out of Garry's Mod (tests 25-37, MODLOG):**
+  - `vm:DrawModel()` / `hands:DrawModel()` / `render.RenderHUD` into a render target from
+    `PostRender`: nothing drawn (test 25).
+  - `render.RenderView` into a render target from `PostRender`: only the sky (test 26).
+  - Own frame, clear at the view model, capture in `DrawOverlay`: hands, weapon, HUD, panels
+    (tests 27-29).
+  - Source's default alpha: depth, unusable (test 27). `render.SetWriteDepthToDestAlpha(false)`: 3D
+    right (test 30).
+  - Forcing alpha writes from `PreDrawHUD`: exact for Lua 2D and the engine HUD; VGUI panels 0;
+    `OverrideBlend` changes nothing (test 32; test 31's "no fix" was a measuring error).
+  - Reading Direct3D 9's settings natively (`gmsky.D3DState`, `gmod/module/src/d3d.rs`): device not
+    found (10 objects with a function table in d3d9.dll, none with a plain null device's functions;
+    probably a 9Ex device, not verified) (test 32).
+  - Our own Lua HUD: started, cancelled by the user (2026-10-05).
+  - HOLOHUD 2 as installed: alpha 1 everywhere (tests 33, 34).
+  - **HOLOHUD patched, attempt 1** (plates "over" with alpha, glow `OverrideAlphaWriteEnable(true,
+    false)`): plates 1, glow fine unforced / alpha 1 everywhere forced (tests 35, 36).
+  - **HOLOHUD patched, attempt 2** (glow with the override off): glow alpha 1 everywhere in both
+    frames; plates still 1 (test 37).
 - **Ground as Garry's Mod physics objects (`PhysicsFromMesh`), steps 3a–3e:** worked for walking
   but crashed Garry's Mod 5 times (tests 12, 13, 14, 15, 17): access violation in `vphysics.dll`
   `+0xaaff0`, a 16-bit list overflowing while working out what a **new** physics object
   touches, reached from `CollisionRulesChanged` → `RecheckCollisionFilter`
-  (`server.dll+0x2eb909`), whenever a piece was created near the moving player. Tried: smaller
-  pieces (crashed), lattice + reusing pieces (worked while walking), solid-before-mesh (crash
-  moved into `PhysicsFromMesh`), a guard that held the player before building under it (test
-  17: crashed with a fast player *beside* a piece). **Replaced** by Lua triangle collision
-  (steps A–B), which creates no physics objects. That code is gone (the replay tool,
-  `gmsky_reuse_pieces`, `gmsky_test_terrain` with it). Don't go back to physics objects for
-  Skyrim's world near the player.
+  (`server.dll+0x2eb909`), whenever a piece was created near the moving player. **Replaced** by
+  Lua triangle collision (steps A–B), which creates no physics objects. Don't go back to physics
+  objects for Skyrim's world near the player.
 - **Lift rule using the highest point under the footprint:** popped the player onto object
   spikes up to 23×/s (test 17). Now judged at the player's centre (test 18: 0 lifts).
 - **Grids centred where the player was:** fast players outran them (test 20). Now centred ahead.
 
 ## Ideas not tried yet
 
-- If step D's Lua cost is too high: move the swept test into the Rust module (it already runs
-  on both sides) and call it from `TestCollision`.
-- Physics props on Skyrim's ground, if ever needed: a few `PhysicsFromMesh` pieces *far* from
-  the player only (never near it).
-- Faster long view rays on the client: walk cells along the ray (DDA) instead of sections.
+For the HUD's alpha (in the order I'd suggest):
+1. **Alpha from two backgrounds, alternating frames (recommended).** Proven right on HOLOHUD (test
+   34), needs no knowledge of how any addon draws, and covers VGUI panels (hints, chat, menus) too.
+   Each Garry's Mod frame: keep the hands/weapon picture right after they're drawn (their own alpha
+   works, test 30), then clear to black on even frames and grey on odd ones before the HUD; Skyrim
+   combines the newest black/grey pair in linear light. The flicker doesn't matter (the Garry's Mod
+   window will be out of sight, step 2d). Cost: HUD at half Garry's Mod's frame rate; a one-frame
+   wrong edge where the HUD changes between the two frames. Differs from SkyCraft (one picture).
+2. **Both backgrounds in one frame, for HOLOHUD only:** draw HOLOHUD's finished output twice into
+   two pictures of our own (black, grey) in the same frame. No motion error. But test 37 showed
+   HOLOHUD's plates come out differently in our own picture than on screen, so first find out why.
+3. **See Direct3D 9's real states per draw:** a call trace (apitrace's d3d9 wrapper) would show
+   exactly which blend / alpha-write states each draw uses, and explain both mysteries. Needs a
+   download and a `d3d9.dll` placed next to `gmod_win64.exe` (a write into the game folder: only
+   with the user's go-ahead).
+4. **Fix the device search** (a Direct3D 9Ex reference device) to read those states from our module.
+- (Collision) Faster long view rays on the client: walk cells along the ray (DDA).
+- (Collision) Physics props on Skyrim's ground: `PhysicsFromMesh` pieces only *far* from the player.
 
 ## Files that matter
 
@@ -164,6 +203,7 @@ session; 6 × `PUPPET big step` (one = a `LIFT`, the rest mostly near window swi
 - Garry's Mod: `gmod/module/src/lib.rs` (Lua functions `gmsky.*`), `gmod/lua/gmsky/server.lua`
   (per-tick state, input, noclip), `client.lua`, `terrain.lua` (grids → ground, holds, lift),
   `field.lua` (triangle store, swept test, `gmsky_field` entity, `gmsky_test_field`),
-  `gmod/autorun/gmsky_autoload.lua`.
+  `gmod/autorun/gmsky_autoload.lua`. Phase 2a: `overlay.lua` (`gmsky_test_overlay`), `overlay2d.lua`
+  (`gmsky_test_alpha2d`), `gmod/module/src/d3d.rs` (`gmsky.D3DState`, read only).
 - Tests: `gmod/harness/src/main.rs` (78 checks), `protocol/test/`.
-- Tools: `tools/launch_gmod.ps1`, `tools/install_gmod_stubs.ps1`, `tools/install_gmod_autoload.ps1`.
+- Tools: `tools/overlay_preview.py`, `tools/alpha2d_report.py`, `tools/launch_gmod.ps1`, `tools/install_gmod_stubs.ps1`, `tools/install_gmod_autoload.ps1`.

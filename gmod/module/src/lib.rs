@@ -4,6 +4,7 @@
 //! `gmsky` table of functions, then runs gmod/lua/gmsky/<server|client>.lua from this project.
 //! Logs: logs/gmod_server.log, logs/gmod_client.log
 
+mod d3d;
 mod lua;
 mod shapes;
 
@@ -165,7 +166,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 18] = [
+    let funcs: [(&str, lua::CFn); 21] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -183,6 +184,9 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("ShapesKnown", l_shapes_known),
         ("ShapesBounds", l_shapes_bounds),
         ("ShapesStatus", l_shapes_status),
+        ("GraphicsInfo", l_graphics_info),
+        ("WriteLogFile", l_write_log_file),
+        ("D3DState", l_d3d_state),
         ("ReadGridFile", l_read_grid_file),
     ];
     for (name, f) in funcs {
@@ -582,6 +586,102 @@ unsafe extern "C" fn l_shapes_status(l: *mut State) -> c_int {
         (a.pushnumber)(l, tris as f64);
         lua::push_str(a, l, &line);
         3
+    })
+}
+
+// ---- Phase 2a: the overlay experiment (DESIGN.md "Phase 2 steps") ----
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCurrentProcess() -> isize;
+    fn K32EnumProcessModules(process: isize, modules: *mut isize, cb: u32, needed: *mut u32) -> i32;
+    fn K32GetModuleFileNameExW(process: isize, module: isize, name: *mut u16, size: u32) -> u32;
+}
+
+/// Full paths of every DLL loaded in this process.
+fn loaded_modules() -> Vec<String> {
+    unsafe {
+        let me = GetCurrentProcess();
+        let mut mods = vec![0isize; 1024];
+        let mut needed = 0u32;
+        if K32EnumProcessModules(me, mods.as_mut_ptr(), (mods.len() * 8) as u32, &mut needed) == 0 {
+            return Vec::new();
+        }
+        mods.truncate((needed as usize / 8).min(mods.len()));
+        mods.iter()
+            .filter_map(|&m| {
+                let mut buf = [0u16; 520];
+                let n = K32GetModuleFileNameExW(me, m, buf.as_mut_ptr(), buf.len() as u32);
+                (n > 0).then(|| String::from_utf16_lossy(&buf[..n as usize]))
+            })
+            .collect()
+    }
+}
+
+/// gmsky.GraphicsInfo() -> line: which Direct3D 9 this Garry's Mod draws with: d3d9.dll's path and
+/// size, and whether a translation layer (DXVK: vulkan-1.dll / dxgi.dll next to d3d9) or other
+/// graphics DLLs are loaded. Read only; nothing is hooked.
+unsafe extern "C" fn l_graphics_info(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let mods = loaded_modules();
+        let interesting = ["d3d9", "d3d11", "dxgi", "vulkan-1", "dxvk", "shaderapi", "materialsystem", "opengl32", "nvapi", "amdxx", "igd", "renderdoc", "reshade"];
+        let mut lines: Vec<String> = mods.iter()
+            .filter(|m| {
+                let name = m.rsplit('\\').next().unwrap_or(m).to_ascii_lowercase();
+                interesting.iter().any(|k| name.contains(k))
+            })
+            .map(|m| {
+                let size = std::fs::metadata(m).map(|md| md.len()).unwrap_or(0);
+                format!("{m} ({size} bytes)")
+            })
+            .collect();
+        lines.sort();
+        let vulkan = mods.iter().any(|m| m.to_ascii_lowercase().ends_with("vulkan-1.dll"));
+        let line = format!("graphics: {} modules loaded; Vulkan {} (DXVK would load it); graphics DLLs: {}",
+            mods.len(), if vulkan { "LOADED" } else { "not loaded" }, lines.join("; "));
+        lua::push_str(a, l, &line);
+        1
+    })
+}
+
+/// gmsky.WriteLogFile(name, data) -> true | false, error: saves binary data (a test picture) to
+/// logs/overlay/<name>. Only plain file names (no folders, no ".."), never into the game folder.
+unsafe extern "C" fn l_write_log_file(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let name = lua::to_string(a, l, 1).unwrap_or_default();
+        let ok_name = !name.is_empty() && name.len() < 64
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+            && !name.contains("..");
+        let fail = |msg: String| {
+            (a.pushboolean)(l, 0);
+            lua::push_str(a, l, &msg);
+            2
+        };
+        if !ok_name {
+            return fail(format!("bad file name {name:?}"));
+        }
+        let Some(data) = lua::to_bytes(a, l, 2) else { return fail("no data".into()) };
+        let dir = log_dir().join("overlay");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return fail(format!("create {}: {e}", dir.display()));
+        }
+        match std::fs::write(dir.join(&name), &data) {
+            Ok(()) => {
+                (a.pushboolean)(l, 1);
+                1
+            }
+            Err(e) => fail(format!("write {name}: {e}")),
+        }
+    })
+}
+
+/// gmsky.D3DState() -> line: Garry's Mod's Direct3D 9 blending settings right now (alpha writes,
+/// blend rules, render target format), for the 2D alpha test. Read only (d3d.rs). Only meaningful
+/// with mat_queue_mode 0 (Source drawing on the Lua thread); overlay2d.lua checks that.
+unsafe extern "C" fn l_d3d_state(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        lua::push_str(a, l, &d3d::state());
+        1
     })
 }
 

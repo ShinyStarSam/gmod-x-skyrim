@@ -605,6 +605,241 @@ Steps, each tested on its own:
     the in-game test is the real check). In-game test: walk into a building's wall, up stairs,
     under an arch, into an interior (a load door: new origin epoch), past trees and fences.
 
+### Phase 2 steps: the overlay (planned 2026-10-04)
+
+Goal: Garry's Mod's hands, weapon and HUD (health, ammo, crosshair, tool gun screens, chat)
+drawn inside Skyrim's window, and the Garry's Mod window out of the way.
+
+**Read in SkyCraft first** (`skse/src/Overlay.cpp`, `fabric/.../client/FrameExporter.java`,
+`protocol/skycraft_protocol.h` overlay slots, its DESIGN §9): what SkyCraft shipped is the
+"through normal memory" path, not GPU sharing. Minecraft renders hand + HUD + screens on a
+**transparent** background into its main render target, copies it back from the graphics card
+asynchronously (a few staging buffers; a frame is shipped once its copy has finished, typically a
+frame later) into one of **three picture slots** in shared memory (up to 3840 × 2160 × 4 bytes
+each; a "triple buffer", so the writer never waits for the reader and the reader always gets a
+whole picture). Skyrim hooks its swap chain's `Present` (the call that shows a finished frame;
+patched in its function table), uploads the newest picture into a texture (`Map` with
+`WRITE_DISCARD`) and draws it over the whole screen in one triangle with premultiplied alpha
+(colour already multiplied by its transparency). It skips the overlay while a Skyrim menu is open
+and hides Skyrim's own first-person arms and weapon (`HideFirstPersonMeshes`).
+
+**What is different for Garry's Mod (the unknowns, measured first):**
+- **Transparency:** Source does not promise a meaningful alpha (transparency) channel when it
+  draws models: depending on the shader it writes 1, 0 or depth into it. If the alpha can't be
+  trusted, the fallback is **two-background matting**: draw the overlay once on black and once on
+  white; where they differ, the pixel is partly see-through (alpha = 1 − (white − black)), which
+  gives exact transparency for any shader, at twice the drawing cost.
+- **Drawing only our things:** Garry's Mod normally draws the world, then the view model (hands
+  + weapon), then the HUD. We need the last two alone, at Skyrim's resolution. Lua can draw into
+  a render target (an offscreen picture): the view model and hands with `cam.Start3D` +
+  `DrawModel` (and the weapon's own view-model hooks), and the HUD with `render.RenderHUD` plus
+  the `HUDPaint` hooks. Whether that matches what Garry's Mod shows is the experiment.
+- **Getting the picture out:** Lua can't read a render target quickly (`render.Capture` encodes a
+  PNG). The module can: it runs inside Garry's Mod's process, finds the Direct3D 9 device, and
+  copies the render target to normal memory (`GetRenderTargetData`), then into shared memory.
+  Which Direct3D 9 Garry's Mod uses (plain 9, 9Ex, or a translation layer such as DXVK) is
+  logged first; GPU sharing (9Ex) stays a later improvement.
+- **Garry's Mod is single-player with `-insecure`** (VAC off through the game's own switch), so a
+  module looking at its own process's Direct3D device touches no anti-cheat (AGENTS.md rule 5).
+
+**Found in 2a (tests 25-30):** Garry's Mod draws with Windows' own Direct3D 9 (no DXVK). Drawing
+the view model or a second view (`render.RenderView`) from `PostRender` gives nothing / only the
+sky. What works: in Garry's Mod's **own frame**, clear the screen to transparent at the first
+`PreDrawViewModel` / `PreDrawPlayerHands` and capture at the end of its 2D drawing (`DrawOverlay`:
+that includes the HUD, the crosshair and Garry's Mod's panels: notifications, chat, menus). By
+default Source writes depth, not transparency, into the alpha channel (13-90 on solid pixels);
+with `render.SetWriteDepthToDestAlpha(false)` the 3D view model's alpha is right in one frame, but
+the 2D parts (HUD panel, crosshair, panels) write none (test 30).
+
+**Kept in line with SkyCraft (re-checked 2026-10-04, user request):** the target is SkyCraft's
+pipeline, step for step:
+| SkyCraft | Garry's Mod |
+|---|---|
+| Minecraft doesn't draw its world (`LevelRendererMixin` cancels it): hand + HUD on a transparent background | The world is wiped at the view model (same result). Later, to save its cost: not drawing it at all |
+| Minecraft writes correct alpha itself; one frame | One frame, Garry's Mod's own alpha: depth-in-alpha off (3D right); the 2D parts made to write it (test 31: forced alpha writes with "over" blending of the alpha channel) |
+| Async GPU readback (`FrameExporter`: a few staging buffers, ship the newest finished) | The same in the module (Direct3D 9 `GetRenderTargetData` into system-memory surfaces, used a frame later) |
+| Three picture slots in shared memory | The same |
+| Skyrim `Present` hook draws it with premultiplied alpha, skipped in menus; Skyrim's arms hidden | The same |
+The black/white pair (two-background matting) is **only a measuring tool** for the experiment: it
+needs two frames (wrong edges when the hands move, a flickering window), which SkyCraft doesn't
+do; it is used only if Garry's Mod's 2D parts can't be made to write alpha.
+
+**2a after test 31: why the 2D parts write no alpha (planned 2026-10-04; of the troubleshooting
+ideas listed after test 31 the user chose 1 (read Direct3D's settings), 2 (Lua test patches) and
+3 (read VRMod) first, and likes 5, the native fix below VGUI (STATUS's first idea), if it also
+covers Lua-drawn UI).**
+
+*Idea 3, read VRMod (done, research only).* VRMod (Garry's Mod's VR addon) has the same problem: it
+shows Garry's Mod HUD and menus on see-through panels. Read in its maintained x64 fork
+(https://github.com/Abyss-c0re/vrmod-x64, `lua/vrmod/ui/cl_hud.lua`, `cl_ui.lua`; no licence
+stated, so read only, nothing copied). What it does:
+- **Menus (Derma, i.e. Lua UI):** each panel is set to "painted manually" and painted by VRMod
+  into its **own render target**: `PushRenderTarget`, `cam.Start2D`,
+  `render.OverrideAlphaWriteEnable(true, true)`, `render.Clear(0, 0, 0, 0)`,
+  `render.SetWriteDepthToDestAlpha(false)`, `panel:PaintManual()`, everything set back, pop. **No
+  `OverrideBlend`** (so partly see-through pixels get alpha × alpha, e.g. 0.5 → 0.25: good enough
+  for VR). The render target is then shown with a translucent material, i.e. its alpha is used.
+- **HUD:** it does **not** use Garry's Mod's own HUD. It draws its own health / armour / ammo
+  ("vitals") in Lua into a render target the same way (troubleshooting idea 6: our own Lua HUD). The engine HUD
+  (`render.RenderHUD`) is optional, off by default, and described as "often empty / noisy"
+  (matches our test 25).
+- So VRMod never gets the engine's HUD or the engine's own VGUI pass to write alpha either; it
+  avoids them. Two things it does that we haven't tried: alpha writes forced **without**
+  `OverrideBlend`, and painting Lua UI **into our own render target** with `PaintManual`.
+- A likely reason (from memory of Source SDK 2013 shader code, **not verified for Garry's Mod**):
+  Source's shaders switch alpha writes **off for translucent materials** (they keep them only for
+  fully opaque ones, to store depth there). The HUD's and panels' materials are translucent; the
+  view model is opaque, which would explain why exactly the 3D part works.
+
+*Idea 2, Lua test patches (step 2a-T32).* A new console command `gmsky_test_alpha2d [name]`
+(`gmod/lua/gmsky/overlay2d.lua`), Garry's Mod alone. It draws **known** shapes whose correct
+alpha we know in advance, so no black/white reference is needed. Over 3 consecutive frames
+(variants), the screen is cleared to transparent black at `PreDrawHUD` (depth-in-alpha off), so
+the frame shows only 2D drawing, and captured in `DrawOverlay`:
+- variants: `plain` (no override), `write` (VRMod's: `OverrideAlphaWriteEnable` only), `over`
+  (test 31's: also `OverrideBlend` with "over" for alpha);
+- patches, each 40 × 40 px, white, alpha 255 / 128 / 46 (46 ≈ the health panel's 0.18):
+  `surface.DrawRect` and `surface.DrawTexturedRect` and `draw.RoundedBox` in `HUDPaint` (Lua 2D
+  through VGUI's surface), `render.DrawQuad` with the colour material (Lua 2D *not* through
+  VGUI's surface), and a Derma panel painted by the engine's VGUI pass (Lua UI);
+- once, VRMod's way: a second Derma panel painted manually into our own render target
+  (`<name>_rt.png`);
+- the engine HUD (health corner) is in the same captures.
+`tools/alpha2d_report.py` prints, per variant and patch, the measured alpha against the expected
+one (and against alpha × alpha, the "no separate alpha blending" result). Logs: `mat_queue_mode`,
+frame numbers, which hooks ran.
+
+*Idea 1, read Direct3D 9's settings natively (step 2a-T32, same test).* New
+`gmod/module/src/d3d.rs`, `gmsky.D3DState(label)`. **Read only: nothing is hooked or written.**
+- Finds Garry's Mod's Direct3D 9 device (the object every draw goes through). First it makes a
+  throwaway **null device** (`D3DDEVTYPE_NULLREF`: draws nothing, on a hidden 16 × 16 window,
+  released at once; the usual way overlay tools learn this), to learn the addresses of a real
+  device's functions. Then it scans `shaderapidx9.dll`'s data for a pointer to an object with
+  those functions (memory read with `ReadProcessMemory` on our own process, so a bad pointer can't
+  crash; nothing is called on an object whose functions don't match), and confirms it by asking
+  the object whether it is a device (`QueryInterface`). Logged once: where, creation flags (a
+  "pure" device can't be read; multithreaded or not). Unit test (`cargo test`): the same reads on
+  a null device and on a real hidden 16 × 16 device on this PC, which also shows a real device has
+  the null device's functions.
+- Each call logs the blending settings at that moment: alpha in `COLORWRITEENABLE`,
+  `ALPHABLENDENABLE`, `SRCBLEND` / `DESTBLEND`, `SEPARATEALPHABLENDENABLE`, `SRCBLENDALPHA` /
+  `DESTBLENDALPHA`, `ALPHATESTENABLE`, and the current render target's format and size.
+- Called from the test at: `PreDrawHUD` (after the override), in `HUDPaint` after the first
+  patch, at the end of `HUDPaint`, in the Derma panel's paint, in `DrawOverlay`.
+- **Only when `mat_queue_mode` is 0.** By default Source draws on a second thread
+  (`mat_queue_mode -1`): Lua's hooks then run before the real drawing, so a read would describe a
+  different moment (and touch the device from another thread). The test refuses and says so; the
+  user sets `mat_queue_mode 0` (the game's own setting) for this test.
+- Limit: Source applies settings lazily, at the next draw, so a read shows "what the last draw
+  used", close to but not exactly each patch. Exact per-draw settings would need the hook of idea 5.
+
+*What decides idea 5:* if Lua UI and engine 2D show alpha writes **off** in `COLORWRITEENABLE` (or
+blending without a separate alpha rule) while they draw, the native fix (force them on below
+VGUI) should work, and it would cover Lua UI too, since Lua's `surface` / Derma drawing goes
+through the same VGUI surface and the same Direct3D calls (the patches check this). If alpha
+writes are already **on** and alpha still comes out 0, the shaders output alpha 0, and idea 5 as
+planned would not be enough.
+
+**Steps, each tested on its own:**
+- **2a. Experiment, Garry's Mod alone** (like 3a). The module logs which `d3d9.dll` is loaded
+  (path, file version) and whether DXVK / other layers are present. `gmsky_test_overlay` (client
+  console) draws the view model, hands and HUD into a render target (cleared transparent), for a
+  few frames, and saves three pictures to `logs/overlay/` through the module (never into the
+  game folder): the plain picture, its alpha channel as grey, and the two-background matte. Logs:
+  draw time per frame, render target format. I look at the pictures and the numbers to choose
+  the alpha method. Test: hold the crowbar, the physics gun and the tool gun, run the command for
+  each; the HUD shows health/ammo.
+- **2b. Picture to shared memory.** The module copies the render target to normal memory each
+  frame and writes it into three picture slots (SkyCraft's triple buffer; protocol bump; a second
+  shared memory block sized for the largest picture, so the 16 MB collision block stays as it is).
+  Skyrim publishes its window size; Garry's Mod draws at that size. Harness: the triple buffer
+  never hands out a half-written picture. Logs: copy ms, frames written, slot swaps.
+- **2c. Skyrim draws it.** Present hook (as SkyCraft), upload, full-screen triangle, premultiplied
+  alpha; skipped while a Skyrim menu is open or the puppet is off; Skyrim's first-person arms and
+  weapon hidden (as SkyCraft). Logs: frames drawn, picture age in frames (latency), upload ms.
+  Test: the crowbar and HUD appear in Skyrim's window, move with the view, disappear in menus.
+- **2d. The Garry's Mod window out of the way** (still rendering: Source stops drawing when
+  minimized, so it is moved behind Skyrim / off screen instead), and which HUD each game shows
+  (Skyrim's compass, health bars and crosshair vs Garry's Mod's), decided with the user.
+
+**HUD decision after test 32 (2026-10-05, the user): a downloaded HUD, HOLOHUD 2.** (A "full Lua
+UI" of our own was started and cancelled the same day; nothing of it is kept.) The user installed
+**HOLOHUD 2** (D/GL4, "Customizable Holographic HUD", Workshop 3459525275), which has a compass and
+a radar (later: enemies and quest markers from Skyrim on it). Read from its `.gma` (in the session
+scratchpad, never in the repo or the game):
+- It draws the HUD in **`HUDPaintBackground` / `HUDPaint`** (only with the camera weapon in
+  `DrawOverlay`). Its panels (`vgui.Create`) are only its settings menu. Test 32: alpha forced from
+  `PreDrawHUD` is right for drawing in `HUDPaint`, so its HUD should get alpha too.
+- It renders its elements into its own render targets in `PreDrawHUD` and lays them on the screen
+  as two layers: a translucent background ("frame") and an **additive** glowing composite (text,
+  lines, compass, radar; plus blur, scanlines, colour fringes).
+- **The open question is the additive layer.** On screen it adds light. Skyrim will draw our picture
+  with premultiplied alpha (out = colour + (1 − alpha) × Skyrim), which can show added light
+  exactly, **if** the additive layer adds colour and *no* alpha. If forcing alpha writes makes it
+  write alpha, Skyrim would be darkened behind the glow (dark halos).
+- **How it is measured (test 33):** `gmsky_test_alpha2d` gets a fourth frame, `grey`: like `write`
+  but cleared to mid-grey instead of black. In linear light, Garry's Mod's real result over grey is
+  known exactly from that frame, and our one-frame picture (`write`: colour + alpha over black)
+  predicts it as colour + (1 − alpha) × grey. `tools/alpha2d_report.py` compares the two per pixel
+  (error in sRGB levels 0-255; where; how much of it is additive-only, i.e. colour with alpha 0).
+  Grey, not white: on white an additive glow would clip at full brightness and hide the answer.
+  The colour test patches can be switched off (`gmsky_test_alpha2d <name> nopatches`) so they
+  don't cover HUD elements. Two consecutive frames: HOLOHUD's animations (flicker, scanlines) add
+  some difference that isn't an alpha error; the report shows where.
+- **Colours are sRGB over linear-light blending** (test 32): step 2c must composite in linear light
+  (decode, blend, encode).
+- **Tests 33-34:** HOLOHUD's own drawing writes alpha 1 over the whole screen (curved "3D visor" and
+  flat), forced or not, so its alpha is unusable as it is. Its colours are right, and the alpha
+  worked out from a black and a grey frame is right (plates 0.37, glow 0).
+
+**HOLOHUD 2, patched (decided 2026-10-05, the user: "our own personal copy … no need to worry about
+updates"; keep the curve if not too hard).**
+- **What it draws** (`lua/holohud2/render.lua`): every frame `ComputeHUD` (in `PreDrawHUD`) builds two
+  full-screen layers in render targets: `MAT_FRAME`, the see-through background plates (drawn on
+  screen with "over" blending in `HUDPaintBackground`), and `MAT_COMPOSITE`, everything else (glow,
+  text, lines, compass, radar), drawn **additively** in `HUDPaint`, i.e. it adds light. Then
+  `PaintOver` elements drawn directly. With the 3D visor, both layers are drawn on a strip of
+  polygons that bends them (`surface.DrawPoly`) instead of one full-screen quad.
+- **The patch:** replacement `RenderHUDBackground` / `RenderHUD` that draw the same layers, on the
+  same quad or polygons (so **the curve stays**), but with alpha writes set per layer: frame layer
+  **on**, with "over" for alpha (alpha = plate alpha); glow layer **off** (adds colour only, which is
+  exactly how Skyrim's premultiplied drawing shows added light). Afterwards, alpha writes go back to
+  what gmsky wants (`gmsky.alphaForced`, set by our capture code; off otherwise). The branch with
+  HOLOHUD's post-processing off (`holohud2_r_pp 0`) calls the original.
+- **Where things live:**
+  - Our code only, in git: `gmod/holohud2_patch/render_append.lua` (appended to the end of the copy's
+    `render.lua`, so it sees that file's local variables; `init.lua` picks up the drawing functions
+    after `render.lua` has run). HOLOHUD has no licence file (all rights reserved), so **none of its
+    files go into git.**
+  - `tools/build_holohud.py`: extracts the user's Workshop `.gma` (read only) into
+    `build/holohud2_gmsky/` (never tracked), checks that `render.lua` still has what the patch
+    needs, appends the patch, writes `gmsky_patch.txt` (source size/date, patch hash).
+  - `tools/install_holohud.ps1`, **run by the user** (it writes into the game folder):
+    copies that folder to `garrysmod\addons\holohud2_gmsky\`, replacing only that folder. The
+    Workshop HOLOHUD 2 must be **disabled** in Garry's Mod's Addons menu, or both copies load.
+- **Tests 36-38: the plates' "glass" was a fake.** HOLOHUD pastes a blurred, fully opaque copy of
+  the screen under each plate (`modules/render.lua` `BlurRect`), then black at 94/255 on top. A blur
+  of Skyrim's world can't come out of Garry's Mod, so the patch turns it off (`holohud2_r_blur 0`,
+  HOLOHUD's own saved setting). Test 38: plates then alpha 94 exactly. Glow: drawn with separate
+  alpha blend factors ZERO, ONE (keeps the picture's alpha), after two failed tries with the alpha
+  write switch (tests 36, 37).
+- **Blur behind the plates, done in Skyrim (planned 2026-10-05, after step 2c works; user asked
+  for it):**
+  - Garry's Mod sends a **plate mask** next to the picture: HOLOHUD's plate layer alpha (`RT_FRAME`,
+    > 0 exactly on plates, test 38), copied by the patch into a one-channel picture, quarter size
+    (the blur is soft anyway; ~0.2 MB at 1280×720 instead of 3.7 MB). Goes in the same triple
+    buffer as the picture (step 2b), so mask and picture always belong to the same frame.
+  - Skyrim, in the Present hook before laying our picture on: copy its finished frame, blur it
+    (downsample twice + a few-tap blur in a small pixel shader), then mix: scene = blurred × mask +
+    scene × (1 − mask); then our picture on top as planned (premultiplied, linear light).
+  - Logs: mask pixels > 0 per frame, blur ms. Test: plates show a blurred Skyrim behind them;
+    switching it off (`gmsky_blur 0`, new console variable) shows plain see-through plates.
+  - Not from SkyCraft (it has no blur; its overlay only adds an "invert" blend for the crosshair,
+    `Overlay.cpp`). Not tested; nothing built.
+- **Test (35):** `gmsky_test_alpha2d hh nopatches` with `holohud2_r_3d 0`, then with the visor on
+  (`holohud2_r_3d 4`). The report's grey check must now show small errors (HOLOHUD's own alpha
+  matches the alpha the black/grey pair implies) and no "alpha everywhere".
+
 ## 13. Repo layout
 
 ```

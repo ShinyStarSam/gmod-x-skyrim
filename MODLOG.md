@@ -623,3 +623,222 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 
 **Result (logs: `build/logs-ingame-test-24/`):** camera 120.5 Skyrim units above the feet standing, 52.7 crouched, values between during the duck transition (e.g. 63.3, 80.7); view punch up to 7.97°; `CAMERA FOV: Skyrim's 80.0 -> Garry's Mod's 100.0`. Sneak: 20 logged toggles, all `taken`, 0 refused. The launcher loaded gm_flatmap directly (`map gm_flatmap room`), gmsky loaded by itself.
 **Not exercised:** `gmsky_camera 0` (no `FOV back to Skyrim's own` line), a second FOV value.
+
+## 2026-10-04 Phase 2 planned; step 2a: overlay experiment in Garry's Mod (not tested in game)
+
+**Plan:** `docs/DESIGN.md` "Phase 2 steps: the overlay" (written first). **Read in SkyCraft first:** `skse/src/Overlay.cpp`, `fabric/.../client/FrameExporter.java`, the overlay slots in `protocol/skycraft_protocol.h`: SkyCraft ships the "copy through normal memory" path (Minecraft draws hand + HUD on a transparent background, copies it back from the GPU asynchronously into one of three picture slots in shared memory; Skyrim's `Present` hook uploads the newest one and draws it full screen with premultiplied alpha, skipped in menus, Skyrim's own first-person arms hidden). Unknowns for Garry's Mod, measured first: whether Source's alpha can be trusted (fallback: matting from a black and a white background), whether the view model and HUD can be drawn alone into a render target, and which Direct3D 9 Garry's Mod uses.
+**Changed:**
+- Module: `gmsky.GraphicsInfo()` (lists the loaded graphics DLLs with path and size, and whether `vulkan-1.dll` is loaded, which DXVK would need; read only, nothing hooked); `gmsky.WriteLogFile(name, data)` (saves binary data to `logs/overlay/<name>`; plain file names only); `lua::to_bytes` (a Lua string's raw bytes).
+- New `gmod/lua/gmsky/overlay.lua` (client, included by `client.lua`): logs `gmsky.GraphicsInfo()` at load; console command `gmsky_test_overlay [name]` saves, on the next frame, `<name>_screen.png` (the screen) and the overlay drawn alone (view models with the weapon's own view-model hooks, hands, then `render.RenderHUD`) into a render target cleared to transparent black and to transparent white (`<name>_black.png`, `<name>_white.png`), and logs draw and capture times.
+- Harness: 101 checks (new: overlay.lua runs on the client and logs the graphics line; `WriteLogFile` refuses `../escape.png` and keeps binary data byte for byte).
+**Tested how:** `cargo build --release`; `gmod_harness.exe` → HARNESS PASSED (101). The drawing itself can't run in the harness (no renderer).
+**Not tested in game.** Not known: whether `render.RenderHUD` draws the engine HUD (health/ammo) into a render target; whether `render.Capture` keeps alpha (`alpha = true`); whether the view model drawn this way is lit like Garry's Mod's own.
+
+## 2026-10-04 In-game test 25 (step 2a, first try): pictures empty; new approach (not tested in game)
+
+**Result (logs: `build/logs-ingame-test-25/`):** user: "they're all black".
+- `graphics:` Garry's Mod draws with Windows' own `C:\Windows\SYSTEM32\d3d9.dll`; **no Vulkan / DXVK**; also loaded: `shaderapidx9.dll`, `materialsystem.dll`, `d3d11.dll`, `dxgi.dll` (the latter two are loaded by something else; Garry's Mod's renderer is `shaderapidx9`).
+- Measured from the PNGs (Pillow): every `_black.png` pixel is exactly (0, 0, 0, 0) and every `_white.png` pixel (255, 255, 255, 0): the render target and `render.Capture` with `alpha = true` work (the transparent clear colour survives), but **nothing was drawn**: `vm:DrawModel()`, `hands:DrawModel()` and `render.RenderHUD` from the `PostRender` hook drew nothing (0.1-0.3 ms). Guess (not proven): Garry's Mod only draws view models and the HUD inside its own view-model / HUD passes. `render.Capture` of the screen in `PostRender` returned nothing.
+- Capture + PNG of 1280×720: ~20 ms (only for the experiment; the real path copies raw pixels).
+**Changed:** `overlay.lua`: Garry's Mod draws a whole second view into the render target (`render.RenderView`, view model and HUD on, no post-processing); at the first `PreDrawViewModel` / `PreDrawPlayerHands` of that view the render target is cleared to transparent black or white, so what remains is what Garry's Mod draws after the world, drawn by its own code. The same view without the clear is saved as `<name>_scene.png`. Logged per view: time, whether the clear happened, which hooks ran (`PreDrawViewModel`, `PreDrawPlayerHands`, `HUDPaint`).
+**Tested how:** harness PASSED (101). **Not tested in game.** If this works, 2b could do the same clear in Garry's Mod's normal frame instead (no second view: the Garry's Mod window would show only hands and HUD, and it is going out of sight in 2d anyway).
+
+## 2026-10-04 In-game test 26 (step 2a, second try): only the sky; third try (not tested in game)
+
+**Result (logs: `build/logs-ingame-test-26/`):** user: "the scene image is just the skybox, no hud, viewmodel or world". Measured: in every view `PreDrawViewModel` and `PreDrawPlayerHands` ran once and the clear happened (`cleared at the view model: true`), yet `_black`/`_white` are again exactly the clear colour, and the three `_scene.png` are pixel-identical for three different weapons (26,155 colours, only sky). Each `render.RenderView` took 0.4-0.9 ms: the world wasn't drawn. So a second view started from `PostRender` draws only the sky. Cause not known (not investigated further: the plan for 2b never needed a second view).
+**Changed:** `overlay.lua`, third try: Garry's Mod's own normal frame, three frames in a row: (1) as it is, (2) the screen cleared to black at the frame's first `PreDrawViewModel` / `PreDrawPlayerHands`, (3) the same with white; each captured in `PostDrawHUD` (after the whole HUD, still inside the frame). Logged per frame: hooks that ran, whether the clear happened, capture time.
+**Tested how:** harness PASSED (101). **Not tested in game.**
+
+## 2026-10-04 In-game test 27 (step 2a, third try): hands and weapon captured; HUD missing (fix not tested)
+
+**Result (logs and pictures: `build/logs-ingame-test-27/`), measured with Pillow/NumPy:**
+- **The normal-frame method works for the view model:** clearing at the frame's first `PreDrawViewModel` and capturing in `PostDrawHUD` gives the hands and weapon alone: crowbar 17,304 px, physics gun 82,857, tool gun 58,467 (box x 618-1188, y 347-719: lower right, where the view model is).
+- **Source's own alpha can't be used:** on fully solid weapon pixels it is 13-90 (of 255) and the background clear's 0 survives elsewhere; it is something Source stores there (probably depth for fog), not transparency.
+- **Two-background matting is exact:** where something is drawn, the black and white pictures agree to the last bit (crowbar, physics gun: 0 difference on every drawn pixel, all solid); empty pixels differ by exactly 255. Tool gun: 335 partly see-through pixels (its screen / glow), channel spread ≤ 17.
+- **The HUD was missing**, also in the plain frame (no HUD colours in the health/ammo corners, nothing at the crosshair), and `HUDPaint` didn't run in any captured frame. Most likely cause: the capture ran on the very next frames, while the console the command was typed in was still open (Garry's Mod doesn't draw the HUD then).
+- Times: capture + PNG 21-27 ms per frame (experiment only).
+**Changed:** `overlay.lua`: the capture waits until the console / menu is closed and 0.5 s have passed (`gui.IsGameUIVisible`, `gui.IsConsoleVisible`), logs `console closed, capturing`.
+**Tested how:** harness PASSED (101). **Not tested in game.**
+
+## 2026-10-04 In-game test 28 (step 2a, console fix): HUD captured, crosshair not; preview tool (not tested in game)
+
+**Result (logs and pictures: `build/logs-ingame-test-28/`):** user: "still no hud that I can see, only on the scene", and "darkening around the bottom half" of the scene. Measured:
+- `HUDPaint` now runs in every captured frame (the console fix works).
+- **The HUD is in the overlay:** the health panel at x 24-176, y 648-701 (its background 18% opaque, the digits 64-86%: 661 yellow pixels against 689 on screen, the rest edge pixels); ammo corner 4,094-30,168 drawn pixels depending on the weapon. It wasn't visible to the user because the PNGs carry Source's meaningless alpha channel (0 on most of those pixels), which an image viewer applies. **Not a capture problem.**
+- **The "darkening" is the ground:** scene brightness by eighths, top to bottom: ~180-195 (sky), then ~80 (gm_flatmap's floor) from the horizon down, even from left to right (no vignette).
+- **No crosshair:** nothing drawn in the centre 25×25 of the overlay, and the scene's centre is flat (75-85) for the physics gun and the tool gun. Either the crosshair is drawn after `PostDrawHUD`, or it is off.
+**Changed:**
+- `overlay.lua`: each frame is also captured in `DrawOverlay` (the last 2D hook): `<name>_scene_late.png`, `_black_late.png`, `_white_late.png`.
+- New `tools/overlay_preview.py`: turns each black/white pair into `<name>_preview.png` (the overlay over a grey checkerboard, with the real transparency from the pair, composited as Skyrim will: black + (1 - alpha) × background) and prints drawn pixels per area (health, ammo, crosshair). Run on test 28: crowbar 25,553 drawn px, physics gun 91,124, tool gun 158,753; health corner 8,250 px each; crosshair 0.
+**Tested how:** harness PASSED (101); the preview tool run on test 28's pictures. **Not tested in game.**
+
+## 2026-10-04 In-game test 29 (step 2a, late capture, crosshair on): crosshair captured; capture point = DrawOverlay; one-frame alpha test (not tested in game)
+
+**Result (logs and pictures: `build/logs-ingame-test-29/`, `tools/overlay_preview.py`):** the crosshair was off in the user's settings ("I had my crosshair disabled"); with it on, it is captured: 5 pixels, Half-Life 2's dots at (639, 352), (629, 360), (639, 360), (649, 360), (639, 368). Health corner 8,250 px, ammo corner 4,102-33,808 px. **Panels drawn after `PostDrawHUD`** show only in the `DrawOverlay` captures: physics gun +14,451 px (x 1006-1279, y 545-644), tool gun +16,310 px (x 956-1259, y 514-572), dark and see-through (alpha median 0.35): Garry's Mod's on-screen panels (notifications, hints, the tool's info). Chat and menus are panels too. **So the real capture point is `DrawOverlay`.**
+**Open problem:** the black/white pair comes from two consecutive frames; when the hands move between them (a swing, weapon sway), the matte is wrong at the edges.
+**Changed:** `overlay.lua`: a fourth frame, cleared to transparent black with `render.SetWriteDepthToDestAlpha(false)` (Source stores depth in the alpha channel by default; set back in `PostRender`): `<name>_alpha.png`. `tools/overlay_preview.py` compares that picture's own alpha with the matte (mean difference, pixels off by more than 0.1) and writes `<name>_preview1.png` from it. If it matches, one frame is enough (no black/white flicker, no motion error).
+**Tested how:** harness PASSED (101). **Not tested in game.**
+
+## 2026-10-04 In-game test 30 (one-frame alpha) and a re-check against SkyCraft; test 31 built (not tested in game)
+
+**User:** "double check that we're doing something at least similar to what SkyCraft is doing. Refocus."
+**Re-checked SkyCraft** (`fabric/.../client/mixin/LevelRendererMixin.java`, `FrameExporter.java`, `skse/src/Overlay.cpp`): Minecraft doesn't draw its world while linked, so hand + HUD land on a transparent background **in one frame with Minecraft's own alpha**; async readback through staging buffers; three picture slots; Skyrim's `Present` hook draws it. **Our black/white matting (tests 27-29) was a drift from that** (two frames, motion errors, flicker): now only a measuring tool. `docs/DESIGN.md` Phase 2 has the side-by-side table.
+**Test 30 result (logs and pictures: `build/logs-ingame-test-30/`), one frame with `render.SetWriteDepthToDestAlpha(false)`, compared with the matte per area (pixels off by > 0.1 / drawn):** view model mostly right (physics gun: 490 edge pixels of 27,099; solid pixels read 1, empty 0), but the tool gun's screen writes 0 (6,836 of 28,318); ammo numbers right (0-4 off); **2D parts write no alpha:** health panel 8,222 of 8,250 off (0 instead of 0.18), notification panels 6,756-16,307 off, crosshair 5 of 5 off (0 instead of 1). Frames lined up (colour difference to the black frame 0.01-0.25 of 255), so motion wasn't a factor in this test.
+**Changed:** `overlay.lua`: two more frames: `alpha2d` (from `PreDrawHUD` on: `render.OverrideAlphaWriteEnable(true, true)` and `render.OverrideBlend` with the alpha channel blended as "over": src + dest × (1 − src alpha)) and `alphaall` (the same from the view model on); set back in `PostRender`. `tools/overlay_preview.py`: per-area comparison for `alpha`, `alpha2d`, `alphaall`, previews `<name>_preview_<variant>.png`.
+**Tested how:** harness PASSED (101); preview tool run on test 30. **Not tested in game.**
+
+## 2026-10-04 In-game test 31 (forced 2D alpha): no fix; stopped and wrote STATUS.md
+
+**Result (logs and pictures: `build/logs-ingame-test-31/`; `tools/overlay_preview.py`):** forcing alpha writes with "over" blending of the alpha channel (`render.OverrideAlphaWriteEnable` + `render.OverrideBlend`) from `PreDrawHUD` (`alpha2d`) or from the view model (`alphaall`) does **not** give the 2D parts their alpha: health panel 7,174-7,956 of 8,250 pixels still off by > 0.1 (default 8,222), notification panels unchanged (16,304 of 26,175), crosshair now 324 pixels off around it (alpha written where nothing is visible), and the view model gets worse (540 → 1,815-1,870 of 20,417 off). Ammo numbers right in all variants.
+**Two real attempts failed** (tests 30, 31) at getting Garry's Mod's 2D drawing to write transparency from Lua, so per AGENTS.md I stopped and wrote up `STATUS.md` ("The current problem", "Ideas not tried yet": a native Direct3D 9 render-state fix below VGUI (recommended, SkyCraft's one-frame model), a hybrid with matting for 2D only, or our own Lua HUD). Waiting for the user's decision.
+
+
+## 2026-10-04 Troubleshooting idea 3: read how VRMod gets Garry's Mod's UI with transparency (research only)
+
+**Changed:** `docs/DESIGN.md` Phase 2, "2a after test 31": what VRMod does, and the plan for ideas 2 and 1.
+**Why:** after test 31 I listed seven ways to troubleshoot (1 read Direct3D's settings, 2 Lua test patches, 3 read VRMod, 4 `PaintManual` into our own render target, 5 the native fix below VGUI = STATUS's first idea, 6 our own Lua HUD, 7 hybrid). The user chose 1-3 first, and likes 5 if it also covers Lua-drawn UI.
+**Tested how:** read VRMod's maintained x64 fork (https://github.com/Abyss-c0re/vrmod-x64, `lua/vrmod/ui/cl_hud.lua`, `cl_ui.lua`; downloaded to the session scratchpad, not into the project; no licence stated, so nothing copied). SkyCraft re-checked first: it has no 2D-alpha trick (Minecraft's GUI writes alpha itself, by its exporter's comment; not checked in Minecraft's code).
+**Result:**
+- VRMod paints **Derma menus (Lua UI) into its own render target**: `PushRenderTarget`, `cam.Start2D`, `render.OverrideAlphaWriteEnable(true, true)`, `render.Clear(0, 0, 0, 0)`, `render.SetWriteDepthToDestAlpha(false)`, `panel:PaintManual()`. **No `OverrideBlend`.** We tried neither "alpha writes without the blend override" nor "our own render target + `PaintManual`".
+- VRMod does **not** capture Garry's Mod's engine HUD. It draws its own health / armour / ammo in Lua (= troubleshooting idea 6). `render.RenderHUD` is optional and called "often empty / noisy" (like our test 25).
+- Possible reason (from memory of Source SDK 2013 shaders, **not verified for Garry's Mod**): Source turns alpha writes off for translucent materials. The HUD and panels are translucent; the view model is opaque.
+**Still broken / not tested:** nothing built in this step.
+**Next:** idea 2 (Lua test patches) and idea 1 (read Direct3D's settings), both in one in-game test (32).
+
+## 2026-10-04 Troubleshooting idea 2: Lua test patches for 2D alpha, `gmsky_test_alpha2d` (not tested in game)
+
+**Changed:** new `gmod/lua/gmsky/overlay2d.lua` (included from `client.lua`); new `tools/alpha2d_report.py`; harness check that it loads.
+**Why:** find out which kinds of 2D drawing write alpha and which don't, with shapes whose right alpha is known (no black/white reference).
+**What it does:** console `gmsky_test_alpha2d [name]`, then close the console. 3 consecutive frames (`plain`: nothing forced; `write`: alpha writes forced, VRMod's way; `over`: alpha writes + "over" blending, test 31's way). Each frame is cleared to transparent black at `PreDrawHUD` (depth-in-alpha off), then white 40 × 40 patches with alpha 255 / 128 / 46 are drawn with `surface.DrawRect`, `surface.DrawTexturedRect`, `draw.RoundedBox`, `render.DrawQuad` (in `HUDPaint`) and in a Derma panel (Lua UI, painted by the engine's VGUI pass), and the frame is captured in `DrawOverlay`. Once, VRMod's way: a second Derma panel painted manually into our own render target (`<name>_rt.png`). Saves `<name>_plain/write/over/rt.png` and `<name>_patches.txt` in `logs/overlay/`. The report prints, per patch, the measured alpha against the right one and against alpha × alpha (alpha written but blended like the colour), plus the engine HUD's health digits and the crosshair.
+**Tested how:** harness PASSED (103 checks); report tool run on made-up pictures (right / alpha × alpha / none recognised). **Not tested in game.**
+**Still broken / not tested:** whether `render.DrawQuad` draws at screen coordinates inside `HUDPaint` (the report says "not drawn" if not); whether `render.Capture` reads our own render target while it is pushed. The window shows 3 black frames during the test.
+
+## 2026-10-04 Troubleshooting idea 1: read Direct3D 9's blending settings from the module, `gmsky.D3DState` (not tested in game)
+
+**Changed:** new `gmod/module/src/d3d.rs`; `lib.rs` registers `gmsky.D3DState()`; `overlay2d.lua` calls it at `PreDrawHUD`, in `HUDPaint` (after the first patch, at the end), in the Derma panel's paint, and in `DrawOverlay`; harness check (without the game it answers "not found: shaderapidx9.dll is not loaded"); unit test in `d3d.rs`.
+**Why:** see directly whether alpha writes (`COLORWRITEENABLE`) and a separate alpha blending rule are on while the 2D parts draw. That decides whether idea 5 (forcing them below VGUI, STATUS's first idea) can work.
+**How it finds the device (read only, nothing hooked or changed):** a throwaway null Direct3D device on a hidden window gives the addresses of a device's functions; `shaderapidx9.dll`'s data is scanned (with `ReadProcessMemory`, so bad pointers can't crash) for an object with those functions, confirmed with `QueryInterface`. Re-checked on every call. Logs creation flags, colour write mask, blending on/off and rules, separate alpha blending and rules, alpha test, sRGB write, render target format and size.
+**Only with `mat_queue_mode 0`:** Source draws on a second thread by default, so Lua's hooks wouldn't match the real drawing. The test logs "Direct3D reads skipped" otherwise.
+**Tested how:** `cargo test --release` (unit test on this PC, without the game): a null device gave flags 0x922 (not pure, not multithreaded) and Direct3D's defaults (colour write RGBA, blending off ONE/ZERO); a real hidden 16 × 16 hardware device has the same functions and gave "render target X8R8G8B8 16x16". Harness PASSED (103). **Not tested in game** (the scan of `shaderapidx9.dll` can only run there).
+**Still broken / not tested:** Source applies settings at the next draw, so a read shows what the previous draw used (close, not exact per patch). If the scan finds no device, the log says how many objects it looked at.
+**Next:** in-game test 32 (both ideas together).
+
+## 2026-10-05 In-game test 32 (2D alpha diagnostics): forcing alpha writes from Lua works for the HUD and Lua 2D; not for VGUI panels; device not found; tests 28-31's reference was skewed
+
+**Result (logs and pictures: `build/logs-ingame-test-32/`; `python tools\alpha2d_report.py build\logs-ingame-test-32\overlay a2d`; physics gun, 1280×720, `mat_queue_mode 0`):**
+- **`plain` (nothing forced):** every patch, the HUD digits and the crosshair have alpha 0 (as tests 30-31).
+- **`write` (`render.OverrideAlphaWriteEnable(true, true)` from `PreDrawHUD`, VRMod's way): all 12 Lua 2D patches have exactly the right alpha** (`surface.DrawRect`, `DrawTexturedRect`, `draw.RoundedBox`, `render.DrawQuad`: 1.00 / 0.50 / 0.18). **The engine HUD too:** health digits 0.91, panel background 0.35 (8,258 of 8,262 pixels with alpha); crosshair dots 1.00.
+- **`over` (also `OverrideBlend`):** identical to `write`, pixel for pixel. The blend override isn't needed.
+- **Derma panel painted by the engine's VGUI pass: alpha 0 in every variant**, like Garry's Mod's own right-side panels (15,920 drawn pixels, alpha 0). **VRMod's way (painted manually into our own render target): exactly right** (1.00 / 0.50 / 0.18).
+- **Side effect of forcing:** an 18×18 square (324 px) around the crosshair has alpha 0.13 and no colour. In the 61×61 area around it, 1,029 px read 0.13. Probably something drawn additively (adds no colour but writes alpha). **Not explained yet.**
+- **Colours are blended in linear light and stored as sRGB** (gamma-encoded): alpha 0.50 white gives colour 188, not 128; 0.18 gives 118 (both exactly the sRGB curve). **So the black/white matte of tests 28-31 reads partly see-through pixels wrongly:** test 31's forced `alpha2d` pictures have health-panel alpha 0.353; the matte said 0.176, exactly what 0.353 becomes through the sRGB curve. **Test 31's "no fix" for the health panel was a measuring error.** What was really missing there: the VGUI panels (alpha 0), plus the crosshair square above.
+- **Idea 1 failed:** `gmsky.D3DState` found no device. Each call: ~640 pointers, 10 objects with a function table in `d3d9.dll`, none with the null device's functions; 27-35 ms per call, searched again on every call (15 times: 3 frames stalled ~150 ms each). Likely cause (**not verified**): Garry's Mod made a Direct3D 9**Ex** device, whose functions differ from the plain null device used as the reference.
+**Changed:** nothing (results only). `STATUS.md` updated.
+**Next:** proposed to the user: (A) a Lua test forcing alpha writes *inside* the VGUI pass (in a panel's own `Paint`, and from an invisible panel painted first); (B) fixing the device search (a 9Ex reference device, log the 10 objects, don't search again after a failure) only if A fails; (C) the crosshair square; (D) an sRGB-correct matte in `overlay_preview.py`, and remembering linear-light blending for Skyrim's drawing (step 2c).
+
+## 2026-10-05 Own Lua HUD started and cancelled; HOLOHUD 2 chosen instead
+
+**Changed:** a Lua HUD of our own (`gmod/lua/gmsky/hud.lua`: HL2-style health, suit, ammo, crosshair; engine elements hidden) was started after the user said "a full Lua UI", then **cancelled** by the user ("I can just download a UI"). Removed again: `hud.lua`, its `client.lua` line, its harness checks. Never tested in game. One of its harness checks was wrong (`tostring` of an empty `hook.Run` result); it went with the file.
+**Why:** the user installed **HOLOHUD 2** (D/GL4, Workshop 3459525275, compass and radar; later Skyrim's enemies and quest markers on the radar).
+**Tested how:** read its `.gma` in the session scratchpad (never in the repo or the game). It draws the HUD in `HUDPaintBackground` / `HUDPaint` (forced alpha worked there in test 32); `vgui.Create` only in its settings menu. It renders into its own render targets in `PreDrawHUD`, then draws a translucent background layer and an **additive** glowing layer. hl2hud (Workshop 2954934766) was also downloaded, then removed by the user.
+**Next:** test 33: does the additive layer write alpha it shouldn't?
+
+## 2026-10-05 Test 33 built: grey frame to check an additive HUD's alpha (not tested in game)
+
+**Changed:** `overlay2d.lua`: a fourth frame `grey` (alpha forced, cleared to sRGB 124 ≈ 0.2 linear instead of black); option `gmsky_test_alpha2d <name> nopatches` (no test patches or panels, so they don't cover HUD elements). `tools/alpha2d_report.py`: "grey check". From the `write` frame (colour + alpha over black) it predicts the picture over grey in linear light, and compares that with the real `grey` frame. It prints the error in sRGB levels, whether alpha is too high (dark halos in Skyrim) or too low, additive-only pixels, a 3 × 3 screen grid of where errors are, and writes `<name>_grey_check.png` (real | predicted, error × 8 | alpha). `docs/DESIGN.md`: the "full Lua UI" plan replaced by "HUD decision after test 32".
+**Tested how:** harness PASSED (103); the grey check run on made-up pictures: a correct translucent panel and a correct additive glow gave error ≤ 0.13 levels mean; a glow that wrongly wrote alpha 0.3 was flagged (8,000 of 8,000 px, "too high", top right). **Not tested in game.**
+**Still broken / not tested:** the two frames are consecutive, so HOLOHUD's animations (flicker, scanlines) also show up as error; to judge from the picture.
+
+## 2026-10-05 In-game test 33 (HOLOHUD 2, grey check): its "3D visor" writes alpha 1 over almost the whole screen
+
+**Result (logs and pictures: `build/logs-ingame-test-33/`; `python tools\alpha2d_report.py build\logs-ingame-test-33\overlay hh`; physics gun, `mat_queue_mode -1`, `nopatches`):**
+- All 4 frames captured, `HUDPaint` ran in each.
+- **In every frame, including `plain` (nothing forced), 862,905 of 921,600 pixels (93.6%) have alpha 255**, with almost no colour (colour > 2 on only 45,787 px). The alpha is identical in all 4 frames. In the picture, the solid area is a curved, screen-sized shape (bulging top and bottom edges): HOLOHUD 2's **"3D visor" effect** (`holohud2_r_3d`, default 4 = high; `render.lua`). It bends the whole HUD onto a curved surface over the screen, and that surface writes alpha 1 by itself, not because of our forcing.
+- So the grey check reads "everything wrong" (mean error 120 levels, alpha too high on 860,710 px). Over Skyrim this would cover the whole view with black. **Not usable with the 3D visor on.**
+- The HUD itself looks right in colour over black and over grey: radar, compass, clock, HOLOHUD's welcome panel, and Garry's Mod's own hint boxes ("Hold 'C'…").
+**Changed:** nothing.
+**Next:** test 34, the same with `holohud2_r_3d 0` (flat HUD, drawn with `surface.DrawTexturedRect` instead of the curved surface).
+
+## 2026-10-05 In-game test 34 (HOLOHUD 2, 3D visor off): its flat layer writes alpha 1 everywhere too; the black/grey matte is right
+
+**Result (logs and pictures: `build/logs-ingame-test-34/`; `holohud2_r_3d 0`; the log has 3 runs, the pictures are from the last):**
+- The colours are right (user: "the images themselves are perfect").
+- **Alpha is 255 on 921,599 of 921,600 pixels in all 4 frames, also `plain`** (nothing forced). HOLOHUD's flat full-screen layers mark the whole screen solid by themselves. So the report's grey check found "no empty pixels". **HOLOHUD's own alpha can't be used, with or without forcing.**
+- **Alpha worked out from the black and grey frames (in linear light) is right** (checked by eye on a composite over a sky colour, and by numbers): 80,228 px with alpha > 0.02; HOLOHUD's dark plates 0.37 (median); its glow ~0 (adds light only, as it should); 99th percentile 0.96. Garry's Mod's own hint box (a VGUI panel) comes out right this way too. Unreliable pixels: 4,647 at full brightness in the grey frame (clipped), 4,419 where colour channels disagree (motion or flicker between the two frames).
+**Changed:** nothing.
+**Next:** a design decision for the user: the black/grey matte (any HUD, any panel) needs two pictures; how to get them (DESIGN.md / chat).
+
+## 2026-10-05 HOLOHUD 2, our patched personal copy (not tested in game)
+
+**Changed:**
+- New `gmod/holohud2_patch/render_append.lua` (our code): replacement `HOLOHUD2.render.RenderHUDBackground` / `RenderHUD`. They draw HOLOHUD's own two layers on its own quad or curved "3D visor" polygons, so **the curve is kept**. Only the alpha writes change: the plate layer (`MAT_FRAME`) writes alpha with "over" blending; the glow layer (`MAT_COMPOSITE`, additive) writes none. Afterwards alpha writes go back to what gmsky wants (`gmsky.alphaForced`). With HOLOHUD's post-processing or its 3D debug view on, the originals run.
+- New `tools/build_holohud.py`: extracts the user's Workshop `holohud2.gma` (read only) into `build/holohud2_gmsky/` (never tracked; HOLOHUD has no licence file, so none of its files go into git). It checks that `render.lua` still has the 10 things the patch uses, appends the patch, and writes `gmsky_patch.txt`.
+- New `tools/install_holohud.ps1` (**for the user to run**: it writes into the game folder): copies that build to `garrysmod\addons\holohud2_gmsky`, replacing only a folder of ours.
+- `overlay2d.lua`: sets `gmsky.alphaForced` while it forces alpha. Harness: if the copy is built, its patched `render.lua` must compile in Garry's Mod's Lua (compiled only, not run). `docs/DESIGN.md`: "HOLOHUD 2, patched".
+**Why:** tests 33-34: HOLOHUD's own drawing writes alpha 1 everywhere. The user asked for our own copy to patch ("no need to worry about updates"), keeping the curve if possible.
+**Tested how:** `python tools\build_holohud.py`: 518 files, patch appended (2,895 bytes); git status shows only our 3 new files, not the copy. Harness PASSED (104). **Not tested in game.**
+**Still broken / not tested:** whether HOLOHUD's plate layer texture carries a right alpha (it looked right on screen, matte 0.37 in test 34); whether HOLOHUD's direct-paint elements (`PaintOver`) write a right alpha; Garry's Mod's own hint boxes (VGUI) are still not covered.
+
+## 2026-10-05 In-game test 35 (patched HOLOHUD): patch loads and changes the alpha, but not right yet; diagnostics added for test 36 (not tested in game)
+
+**Result (logs and pictures: `build/logs-ingame-test-35/`; `flat` = `holohud2_r_3d 0`, `curved` = 4; AR2):**
+- **The patch is loaded:** in the unforced frame (`plain`) the alpha is now 0 on 817,288 px and 255 on 104,312 (before the patch: 255 everywhere). The solid shapes are exactly HOLOHUD's plates.
+- **But the plates get alpha 1 where they are really 0.368 see-through** (from the grey frame: plate colour 100 over grey 124, black over black). So the alpha written for the plate layer isn't the see-through amount its colour is blended with.
+- **In the frames where alpha is forced (`write`, `grey`), something again writes alpha 1 over the whole screen** (flat: 921,599 px; curved: the visor shape, 862,905 px). Not the damage-indicator overlay (it only draws while hurt). Not found by reading the code.
+- Colours unchanged and right in all frames.
+**Changed (for test 36, diagnostics only):** the patch saves pictures while `gmsky.holohudProbe` is set: HOLOHUD's two layer textures (`_rtframe`, `_rtcomposite`) and the screen before the plates, after the plates, before and after the glow layer, after its direct-paint elements (`_1before` … `_5afterpaintover`). `overlay2d.lua` sets it in the `plain` and `write` frames. Copy rebuilt (patch 4,034 bytes); harness PASSED (104). **Not tested in game.**
+**Next:** one run; the pictures show which step writes the whole-screen alpha and what alpha the plate texture really holds. This is the second attempt at the HOLOHUD alpha. If the next fix fails too, stop and write STATUS.md (AGENTS.md).
+
+## 2026-10-05 In-game test 36 (HOLOHUD diagnostics): the glow layer causes the full-screen alpha; the plates lose their 94; glow fix + plate experiment built (not tested in game)
+
+**Result (pictures: `build/logs-ingame-test-36/overlay/probe_*`; flat, AR2):**
+- Screen alpha, step by step (unforced / forced frame): before HOLOHUD 0 everywhere / same; after the plates 255 on 104,312 px (the plates), 0 elsewhere / same; **after the glow layer unchanged / 255 on 921,599 px**. HOLOHUD's glow texture (`RT_COMPOSITE`) has alpha 255 on 921,599 px. So **the glow layer writes the full-screen alpha whenever alpha writes are forced**. The patch's `render.OverrideAlphaWriteEnable(true, false)` doesn't stop it once gmsky has forced writes on. With the override off (unforced frame) it writes none.
+- **Plates:** HOLOHUD's plate texture (`RT_FRAME`) is (0, 0, 0, 255) on every plate pixel. On screen every plate is exactly 0.368 = 94/255 see-through (test 35 grey frame: 1st-99th percentile all 0.368). That is HOLOHUD's plate colour setting `Color(0, 0, 0, 94)`. So the 94 is applied while drawing, but never reaches the alpha channel, which ends up at 255. **Why: not known.**
+- The user: the pictures' colours look "genuinely perfect" (they are; the problem is only the alpha channel).
+**Changed:** glow layer drawn with the alpha override **off** (`OverrideAlphaWriteEnable(false)`), then forcing restored for HOLOHUD's direct-paint elements. Plate experiment (diagnostics, once in the `plain` frame): the plate layer drawn into our own RGBA8888 picture with 3 blend set-ups (`over` = the patch's, `material` = the material's own, `holohud` = HOLOHUD's original), each over black and over grey: `<name>_plain_plate_<setup>_<black|grey>.png`. Copy rebuilt (patch 5,710 bytes); harness PASSED (104). **Not tested in game.**
+**Next:** test 37. The glow fix is the second fix attempt for the HOLOHUD alpha. If it fails, or the plate experiment shows no set-up writing 0.369, stop and write STATUS.md.
+
+## 2026-10-05 In-game test 37 (glow fix, plate experiment): both failed; stopped and rewrote STATUS.md
+
+**Result (pictures: `build/logs-ingame-test-37/overlay/probe_*`; flat, AR2):**
+- **Glow fix failed:** with the alpha override off (`OverrideAlphaWriteEnable(false)`), the glow layer now makes 921,599 px alpha 255 in **both** frames (test 36: only in the forced one). The override's effect depends on what was set before, in a way not understood.
+- **Plate experiment:** drawn into our own RGBA8888 picture, HOLOHUD's plate layer is **fully opaque** with all 3 set-ups (`over`, `material`, `holohud`): written alpha 1.000 on all 104,312 plate px, 0 elsewhere; plate colour 0 over grey 124 (implied alpha 1.000). On the real screen the same plates are 0.368 see-through (test 35). **Where the 0.368 comes from is not known.**
+**Changed:** nothing in code. `STATUS.md` rewritten ("The current problem", evidence table for tests 33-37, everything tried, ideas not tried yet).
+**Why stop:** second failed fix attempt on HOLOHUD's alpha (tests 35, 37). AGENTS.md: stop and write STATUS.md instead of trying variations.
+**Next:** the user decides. Recommended: alpha from a black and a grey background on alternating frames (right on HOLOHUD in test 34, independent of how any addon draws).
+
+## 2026-10-05 HOLOHUD's plates: the see-through look is a blur trick; blur turned off (not tested in game)
+
+**Found (by reading HOLOHUD's code, no game run):** the plates are not transparent. `components/panel.lua` `PaintFrame` first pastes a blurred copy of the screen, fully opaque (`modules/render.lua` `BlurRect`, material `pp/blurscreen`, snapshot taken by `ComputeBlur` earlier in the frame), then draws `Color(0, 0, 0, 94)` on top. That explains tests 35-37: the plate layer holds alpha 255 because the blur patch is solid; on the real screen over flat grey it measured 0.368 because a blur of flat grey is the same grey; in our own picture it was opaque because the snapshot wasn't our background. A blur of Skyrim's world can't come out of Garry's Mod, so it can't be in our picture.
+**Also checked:** VRMod's HUD (semi-official fork `Pescorr/Gmod-VRMod-Semioffcial`, `lua/vrmodunoffcial/vrmod_hud.lua`; the original repo is gone) captures with `PushRenderTarget`, `OverrideAlphaWriteEnable(true, true)`, `Clear(0,0,0,0)`, `render.RenderHUD`, from its RenderScene-time hook. Same idea as our test 32; it does nothing about HOLOHUD's blur either.
+**Changed:** `gmod/holohud2_patch/render_append.lua`: runs `holohud2_r_blur 0` (HOLOHUD's own "Blurs the panels' backgrounds" setting) when the patched copy loads. The setting is saved, so it stays off for HOLOHUD outside this project too until set back to 1. Copy rebuilt (`python tools\build_holohud.py`, patch 6,318 bytes); harness PASSED (it doesn't run HOLOHUD, so it says nothing about this).
+**Still broken / not tested:** not tested in game. Expected plate alpha 0.369 (94/255); it may come out about 0.136 (0.369 x 0.369) if HOLOHUD's drawing into its plate layer squares the alpha. The glow layer's full-screen alpha 1 (tests 36-37) is not touched by this.
+**Next:** test 38, the same alpha test as 35-37, and read the plate alpha.
+
+## 2026-10-05 In-game test 38 (blur off): plates fixed, glow still alpha 1 everywhere
+
+**Tested how:** user installed the rebuilt copy and ran `gmsky_test_alpha2d flat` (flat visor, AR2); logs in `build/logs-ingame-test-38/`. Measured HOLOHUD's step pictures directly (the report's test patches are hidden under the glow's full-screen alpha).
+**Result:**
+- **Plates right:** plate layer (`flat_plain_rtframe`) alpha **94** on all 68,244 plate px, colour 0. Screen after the plates (`_2afterframe`), plain and forced frames: alpha 94 on the same 68,244 px, 0 elsewhere. In our own picture over grey 124: colour 100, alpha 94 (= black at 94/255 over grey in linear light). Test 36-37 with blur: 255. So the 255 was the blur patch. (Fewer plate px than test 35's 104,312: not checked why; maybe panels shown differ.)
+- Since the patch's "over" draw wrote 94 and not 94 x 94 / 255 = 35, Garry's Mod's 7-argument `render.OverrideBlend` (separate alpha factors) does take effect here.
+- **Glow still wrong:** after the glow layer alpha 255 on 921,599 px in both frames; `RT_COMPOSITE` itself has alpha 255 everywhere except the one bottom-left pixel (719, 0). That matches HOLOHUD's chromatic-aberration quads drawn 1 px off in each direction, so those quads are what fill the glow layer's alpha (not proven). 95.5% of that layer's pixels are black (colour ≤ 2).
+**Still broken / not tested:** glow alpha. Two fixes of the glow's alpha write switch failed (tests 36, 37).
+**Next:** user decides: one try with a different mechanism (draw the glow with separate alpha factors ZERO, ONE = leave the picture's alpha as it is; shown to work for the plates), or switch to another HUD.
+
+## 2026-10-05 Glow drawn with "keep alpha" blending; post blur planned (not tested in game)
+
+**Changed:** `gmod/holohud2_patch/render_append.lua` `RenderHUD`: the glow layer is drawn with alpha writes as gmsky wants them and `render.OverrideBlend(true, ONE, ONE, ADD, ZERO, ONE, ADD)`: colour added (as HOLOHUD's `$additive` material), alpha = what was already there. Third and last try at the glow (user's go-ahead: if it fails, switch HUD). Copy rebuilt (patch 6,702 bytes); harness PASSED (doesn't run HOLOHUD). `docs/DESIGN.md`: plan for blurring Skyrim behind the plates in Skyrim's Present hook, from a plate mask sent with the picture (after steps 2b and 2c exist).
+**Why:** test 38: glow layer texture alpha 255 everywhere; the separate alpha factors were shown to work for the plates.
+**Still broken / not tested:** not tested in game. Curved visor (`holohud2_r_3d 4`) not tested with either fix. Post blur: plan only.
+**Next:** test 39: after the glow, screen alpha should stay 94 on plates and 0 elsewhere except where HOLOHUD's direct-paint elements draw.
+
+## 2026-10-05 In-game test 39 (glow "keep alpha"): HOLOHUD's alpha is right, flat and curved
+
+**Tested how:** user installed the rebuilt copy; `gmsky_test_alpha2d flat` (`holohud2_r_3d 0`) and `gmsky_test_alpha2d curved` (`holohud2_r_3d 4`), AR2. Logs: `build/logs-ingame-test-39/`. Measured HOLOHUD's step pictures and ran `tools/alpha2d_report.py`.
+**Result:**
+- **The glow no longer touches alpha.** Screen alpha after the plates and after the glow are identical in both frames (plain and forced): flat 817,288 px alpha 0, 104,312 px alpha 94, none 255 (test 38: 921,599 px 255 after the glow). Curved: 819,556 px 0, 98,827 px 94, 3,217 px in between (the visor polygons' edges). The glow adds colour with alpha 0 (flat 2,188 px, curved 1,693 px outside the plates).
+- **Grey check, curved** (our one picture predicting Garry's Mod's real frame over grey): mean error 1.63 levels, 95% under 3.4 levels (0-255).
+- **Grey check, flat:** mean 3.51, 95% 43.4; the error sits bottom-right (7,692 px). In the same area 3,427 px change colour between the two consecutive frames themselves (plain → write), so most likely a HUD animation between frames, not an alpha error (not proven; the curved run had 0 there).
+- Test patches over a plate read 0.69 = 0.5 + 0.5 × 0.37, which is right for a 50% patch over a 37% plate.
+**Still broken / not tested:** HUD not yet sent to Skyrim (2b, 2c). Blur behind the plates: planned in Skyrim (DESIGN.md), not built. HOLOHUD's saved `holohud2_r_blur` stays 0.
+**Next:** step 2b (picture to shared memory), then 2c (Skyrim draws it), then the post blur.
