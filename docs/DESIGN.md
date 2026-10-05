@@ -1118,12 +1118,8 @@ traces is enough for bullets and the crowbar, the same way the ground is answere
   (the stand-ins in 3c move every tick). New `skse/src/Actors.cpp`, `gmod/lua/gmsky/actors.lua`. Garry's Mod logs the count and the
   nearest few each second. Test: walk up to Whiterun guards; the log names them with distances
   that match Skyrim's.
-- **3c. Stand-ins in Garry's Mod.** One invisible entity per actor (`gmsky_actor`, no physics
-  object, solid box sized from height and radius, moved every tick), removed when the actor
-  leaves the table or dies. Garry's Mod's bullets and the crowbar's trace hit them. Check by
-  numbers: once a second the trace along the player's aim names the stand-in under the crosshair,
-  and Skyrim logs its own crosshair target: the two must agree. Whether stand-ins block the
-  player's movement (Skyrim's NPCs are solid): decided in this step.
+- **3c. Stand-ins in Garry's Mod, with Skyrim's own hitboxes.** Planned in detail below
+  ("Hitboxes: how bullets hit Skyrim's NPCs").
 - **3d. Garry's Mod hits Skyrim's NPCs.** A one-way event queue Garry's Mod → Skyrim (protocol bump).
   `EntityTakeDamage` on a stand-in: the damage is cancelled there and sent as a hit (formId,
   damage, damage type, hit position, direction, force). Skyrim applies it like SkyCraft's
@@ -1138,6 +1134,141 @@ traces is enough for bullets and the crowbar, the same way the ground is answere
 - **3f. Death.** Garry's Mod's death kills the Skyrim player (SkyCraft's `KillPlayer`); Skyrim's
   death and reload run; the new origin after the reload re-anchors Garry's Mod, and Garry's Mod's
   respawn is held until then. Test: die to a bandit; Skyrim reloads; you play on.
+
+**Hitboxes: how bullets hit Skyrim's NPCs (planned 2026-10-05, the user asked for this plan before 3c).**
+
+*What counts as "the right hitbox".* Skyrim's own projectiles (arrows, bolts, spells) hit an NPC's
+**per-bone body shapes**: capsules and small hulls fixed to the skeleton (head, spine, arms, legs;
+for creatures their own set), the same bodies that become the ragdoll when it dies. They follow
+the NPC's animation every frame. (From memory of how Skyrim works, **not verified**: an arrow
+sticking in the bone it hit suggests it. Step 3c-1 measures it.) Skyrim's melee doesn't use
+hitboxes at all (a reach and angle check), so for Garry's Mod's bullets, crowbar and explosions
+the per-bone shapes are the only "real" target. SkyCraft uses one box per NPC; Minecraft's own
+hitboxes are boxes, so that was exact for it, but it is too coarse for guns (shots over a
+shoulder or between the legs would hit).
+
+*Options considered:*
+1. One box or upright capsule per NPC from its bound size (SkyCraft's way, what 3b already
+   sends). Simple, but misses the real shape: arms out, crouching, lying, creatures.
+2. **Skyrim's per-bone shapes, copied to Garry's Mod every frame (recommended).** Skyrim reads
+   each NPC's body shapes (the decoder exists: `Collision.cpp` already turns Havok capsules,
+   boxes and hulls into positions for the ground), converts them like everything else, and sends
+   them; Garry's Mod's stand-in answers every trace against those shapes (`TestCollision`, the
+   same way the ground works). Every Garry's Mod weapon that traces (bullets, the crowbar's hull
+   trace, crossbow bolts, explosion line-of-sight) then hits exactly what a Skyrim arrow would.
+3. Let Skyrim decide every bullet: Garry's Mod sends each fired bullet's ray, Skyrim casts it
+   against its own physics. Exact by definition, but only for `FireBullets` (the crowbar,
+   projectiles and explosions don't use it), and a hit would land a frame later than Garry's Mod
+   thinks. Kept as a *checking tool* (below), not the main path.
+
+*How option 2 works:*
+- **Skyrim (new `Hitboxes.cpp`, game thread):** for each actor in the table within a shorter
+  range (bullets beyond ~3,000 Skyrim units are rare; tunable), walk its 3D for collision bodies
+  on Skyrim's body layers (`kBiped`, `kBipedNoCC`; `kDeadBip` once dead), decode each shape with
+  the existing decoder, and send one record per part: a capsule (two end points + radius) or a
+  small hull, in Garry's Mod units relative to the anchor, with the bone's name (so "head" is
+  known). Expected size: ~15-25 parts per person, a few KB a frame for a dozen NPCs. The slots
+  area (64 KB) can't hold it next to the rest for 64 NPCs, so it goes in its own block or a bigger
+  slots area (protocol bump; decided when building).
+- **Fallback if the bodies aren't readable or don't follow the animation while alive** (3c-1
+  tells): capsules between the skeleton's bone nodes (which certainly animate: head, neck,
+  spine, upper / lower arms and legs), sized from a small table per body part and the NPC's
+  scale. Close, not exact, and logged as such.
+- **Garry's Mod (`gmsky_actor` entity per NPC):** no physics object (tests 12-17); a box around
+  all its parts as the entity's bounds (so the engine only asks it about traces that come near);
+  `TestCollision` checks the ray (or hull) against each part and returns the nearest hit, and
+  remembers which part it was. Moved every tick from the newest record, blended like the player
+  (Skyrim's frames vs Garry's Mod's ticks).
+- **Body parts:** Garry's Mod normally gets a "hit group" (head, chest, arm...) from its own
+  models; custom collision can't return one, so the stand-in records the part it reported and
+  step 3d sends that bone with the hit (Skyrim plays blood there; whether a head shot does more
+  damage is for the user to decide in 3d).
+- **Walking into NPCs:** traces with a size (the player's movement box) are answered with one
+  upright capsule per NPC, not the limbs, so you bump into people smoothly instead of snagging on
+  arms. Bullets (size zero) use the parts.
+
+*Delay.* Garry's Mod sees each NPC's shapes about one Skyrim frame plus up to one tick late
+(~15-30 ms). A walking NPC (~100-200 Skyrim units/s) moves 2-6 units in that time; a running one
+(~400) up to ~12. Measured in 3c (below); if it matters, Garry's Mod moves the shapes ahead by the
+NPC's speed (it knows it from consecutive frames), as Skyrim already does for the ground.
+
+*How we prove the hitboxes match, by numbers (no looking):*
+1. **Shapes, 3c-1 (Skyrim only):** log, per NPC kind (person, wolf, mudcrab, ...) alive and dead,
+   how many body parts were found, their physics layer, shape kind, bone, size and whether they
+   are in Skyrim's physics world. Every frame for the nearest three living NPCs and the nearest
+   corpse: each part's position **in its bone's own frame**; if the parts follow the animation that
+   stays fixed while the bones move (drift ≈ 0, bones moving), if they don't the drift grows with
+   the bones' movement (fallback).
+2. **Conversion check (automatic, both sides):** Skyrim also computes, for the parts it just
+   sent, a few test rays (through the head, the chest, past the shoulder) with its own maths;
+   the harness and an in-game command check that Garry's Mod's `TestCollision` gives the same hit
+   points (within 0.1 unit) for the same records.
+3. **Against Skyrim's real physics (the decisive test):** console command `gmsky_hitbox_test`:
+   with an NPC under the crosshair, Garry's Mod sends a fan of rays (e.g. 21 × 21 over the NPC);
+   Skyrim casts every ray against its own physics (body layers only) **and** answers which part
+   Garry's Mod's copy says it hits, in the same Skyrim frame (Skyrim checks Garry's Mod's copy
+   with the same maths, so both are judged at one moment and the delay doesn't blur the
+   result). Report: rays hit in both / only Skyrim / only Garry's Mod, the same body part or not,
+   and the distance between hit points. Target: ≥ 98% agreement on a standing NPC; the
+   disagreements should sit on part edges. Repeated on a walking NPC to measure the delay's
+   effect with the normal (delayed) copy.
+4. **While playing:** once a second, Garry's Mod's trace along the aim names the NPC and body
+   part under the crosshair, and Skyrim's own crosshair pick names its target: agreement count in
+   the logs.
+
+*Decided (the user, 2026-10-05):* option 2 with the bone fallback, target as above. **Corpses
+must stay hittable**, exactly as in Skyrim: shooting or blowing up a body works (the stand-in stays
+after death, with the ragdoll's shapes, `kDeadBip`; 3d pushes the ragdoll, SkyCraft's
+`FlingRagdoll`). **Head shots do extra damage** (amount decided in 3d).
+
+*Found in 3c-1 (test 56):* people have 19 capsules (COM, three spine, neck, head, arms, hands,
+legs, feet), dogs / wolves / rabbits 22, a chicken 7; all capsules; they follow the animation
+(in their bone's frame they move ≤ 0.02 units a frame while the bones move up to 6). A carried
+bow has its own box on the body layer (gear, not body). Most living NPCs' parts are **not** in
+Skyrim's physics world (the corpse's are): how Skyrim's arrows hit the living is open, and 3c-3's
+check against "Skyrim's real physics" has to use what Skyrim's projectiles really hit, not a plain
+ray cast against the world.
+
+**3c-2 in detail (planned 2026-10-05):**
+- **Protocol v11:** new slot `hitboxes` (in the 64 KB slots area, ~16.8 KB): up to 24 actors
+  (nearest first, within 3,000 Skyrim units, living or dead) and 512 parts (~26 people). Part:
+  kind (capsule: two end points + radius, exact; box: world box, marked approximate), body group,
+  flags (approximate, gear), in Garry's Mod units relative to the anchor. Actor: formId, first
+  part, part count, flags (dead, parts in Skyrim's physics world).
+- **Body groups** are Garry's Mod's hit groups, chosen in Skyrim from the bone's name: head;
+  chest (upper spine, neck); stomach (lower spine, COM, pelvis); left / right arm (upper arm,
+  forearm, hand, clavicle; a creature's front legs); left / right leg (thigh, calf, foot, a
+  creature's back legs); generic (tails and anything else); gear (bones that aren't body: bow,
+  weapon, shield, quiver). Logged per NPC kind with the bone names, so a wrong guess shows.
+- **Garry's Mod module** (new `hitboxes.rs`): keeps the newest table; does the maths in Rust
+  (unit-tested): ray against capsule / box with the hit point, normal, part and group;
+  `gmsky.HitboxActors(last)` (per actor: formId, flags, box around its parts),
+  `gmsky.HitTrace(id, start, delta, extents)`, `gmsky.HitPartAt(id, point)` (nearest part, for
+  where damage landed).
+- **`gmsky_actor` entity** (new `gmod/lua/gmsky/standins.lua`, both sides like `gmsky_field`):
+  one per actor in the table, removed when it leaves; no physics object; custom collisions;
+  bounds = the parts' box plus a margin (the client's copy of the entity lags behind the server's
+  by Garry's Mod's interpolation; the shapes themselves come from the module on both sides, so
+  only the bounds need slack). `TestCollision`: a line (bullets) is tested against every body
+  part (not gear); a box (player movement, the crowbar's fallback trace) against one upright
+  capsule per actor around its parts, widened by the box's size, so you bump into people without
+  snagging on arms. A trace that starts inside the shape doesn't hit it (nobody gets stuck when
+  an NPC walks into them). `gmsky_actor_solid 0` lets the player walk through NPCs.
+  **Changed after test 57 (the user: bumping "felt really weird"):** a fixed, flat-sided,
+  world-aligned box per living NPC instead of the capsule ("hull", like Garry's Mod's own NPCs),
+  at the NPC's feet from the actors table (not from the animated parts, which made the capsule
+  wobble), half width min(Skyrim's bound radius, 0.4 × height) clamped to 6-24, as tall as the
+  NPC; corpses have none (you walk over bodies, as over Garry's Mod's ragdolls).
+- **Logs:** stand-ins made / removed, parts per actor, traces asked / hit per second; every
+  damage a stand-in takes (from, weapon, damage, damage type, body group, distance from the
+  nearest part) — not passed to Skyrim yet (3d); once a second the NPC and body group under
+  Garry's Mod's crosshair (Skyrim's own crosshair target next to it moves to 3c-3, with the check
+  against Skyrim's real physics).
+
+*Sub-steps:* **3c-1** read and log the body shapes (Skyrim only; decides option 2 or the
+fallback). **3c-2** send them (protocol bump) and build the stand-ins in Garry's Mod, with the
+harness check (2). **3c-3** `gmsky_hitbox_test` (3) and the crosshair agreement (4) in game.
+Hits doing anything is 3d.
 
 ## 13. Repo layout
 

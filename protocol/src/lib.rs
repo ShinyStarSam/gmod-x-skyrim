@@ -16,7 +16,7 @@ pub const RING_BYTES: usize = 16 << 20;
 pub const MAP_SIZE: usize = RING_OFFSET + RING_BYTES;
 pub const MAGIC: u32 = 0x594B_534D;
 pub const MAGIC_INIT: u32 = 0x5449_4E49;
-pub const VERSION: u32 = 10; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain; 8: collision ring; 9: view punch; 10: Actors
+pub const VERSION: u32 = 11; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain; 8: collision ring; 9: view punch; 10: Actors; 11: Hitboxes
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
 
 pub const PF_ON_GROUND: u32 = 0x1;
@@ -229,6 +229,67 @@ impl Default for Actors {
     }
 }
 
+/// The body shapes of the actors near the player (Phase 3 step 3c-2). See gmsky_protocol.h.
+pub const HB_MAX_ACTORS: usize = 24;
+pub const HB_MAX_PARTS: usize = 512;
+pub const HBK_CAPSULE: u8 = 1;
+pub const HBK_BOX: u8 = 2;
+pub const HBF_APPROX: u8 = 0x1;
+pub const HBF_GEAR: u8 = 0x2;
+pub const HBG_GENERIC: u8 = 0;
+pub const HBG_HEAD: u8 = 1;
+pub const HBG_CHEST: u8 = 2;
+pub const HBG_STOMACH: u8 = 3;
+pub const HBG_LEFTARM: u8 = 4;
+pub const HBG_RIGHTARM: u8 = 5;
+pub const HBG_LEFTLEG: u8 = 6;
+pub const HBG_RIGHTLEG: u8 = 7;
+pub const HBG_GEAR: u8 = 10;
+pub const HBA_DEAD: u32 = 0x1;
+pub const HBA_IN_WORLD: u32 = 0x2;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct HitPart {
+    pub a: [f32; 3],
+    pub b: [f32; 3],
+    pub r: f32,
+    pub kind: u8,
+    pub group: u8,
+    pub flags: u8,
+    pub bone: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct HitActor {
+    pub form_id: u32,
+    pub first_part: u16,
+    pub part_count: u16,
+    pub flags: u32,
+    pub reserved0: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hitboxes {
+    pub actor_count: u32,
+    pub part_count: u32,
+    pub origin_epoch: u32,
+    pub reserved0: u32,
+    pub skyrim_frame: u64,
+    pub qpc: i64,
+    pub actors: [HitActor; HB_MAX_ACTORS],
+    pub parts: [HitPart; HB_MAX_PARTS],
+}
+
+impl Default for Hitboxes {
+    fn default() -> Self {
+        Hitboxes { actor_count: 0, part_count: 0, origin_epoch: 0, reserved0: 0, skyrim_frame: 0, qpc: 0,
+                   actors: [HitActor::default(); HB_MAX_ACTORS], parts: [HitPart::default(); HB_MAX_PARTS] }
+    }
+}
+
 /// A latest-value slot guarded by a seqlock. `seq == 0` means never written.
 #[repr(C)]
 pub struct Slot<T> {
@@ -285,6 +346,7 @@ pub struct Shared {
     pub input: Slot<Input>,
     pub terrain: Slot<Terrain>,
     pub actors: Slot<Actors>,
+    pub hitboxes: Slot<Hitboxes>,
 }
 
 // ---- Layout checks: the same numbers as gmsky_protocol.h ----
@@ -330,7 +392,13 @@ const _: () = {
     assert!(offset_of!(Actor, name) == 40);
     assert!(size_of::<Actors>() == 16 + 72 * MAX_ACTORS);
     assert!(offset_of!(Shared, actors) == 17320);
-    assert!(size_of::<Shared>() == 21952);
+    assert!(size_of::<HitPart>() == 32);
+    assert!(offset_of!(HitPart, kind) == 28);
+    assert!(size_of::<HitActor>() == 16);
+    assert!(offset_of!(Hitboxes, actors) == 32);
+    assert!(size_of::<Hitboxes>() == 32 + 16 * HB_MAX_ACTORS + 32 * HB_MAX_PARTS);
+    assert!(offset_of!(Shared, hitboxes) == 21952);
+    assert!(size_of::<Shared>() == 21952 + 8 + 16800);
     assert!(size_of::<Shared>() <= SLOTS_SIZE);
     assert!(size_of::<ColMsgHeader>() == 8);
     assert!(size_of::<ColClear>() == 8);

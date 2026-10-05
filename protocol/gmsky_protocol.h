@@ -19,7 +19,7 @@
 #define GMSKY_MAP_SIZE (GMSKY_RING_OFFSET + GMSKY_RING_BYTES)
 #define GMSKY_MAGIC 0x594B534Du      // "MSKY": layout initialized and ready
 #define GMSKY_MAGIC_INIT 0x54494E49u // "INIT": one side is initializing right now
-#define GMSKY_VERSION 10u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain; 8: collision ring; 9: view punch; 10: GmskyActors
+#define GMSKY_VERSION 11u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain; 8: collision ring; 9: view punch; 10: GmskyActors; 11: GmskyHitboxes
 #define GMSKY_HEARTBEAT_TIMEOUT_MS 2000u
 
 // GmskyPlayerState.flags
@@ -183,12 +183,65 @@ typedef struct GmskyActors {
     GmskyActor actors[GMSKY_MAX_ACTORS];
 } GmskyActors;
 
+// Skyrim -> Garry's Mod (Phase 3 step 3c-2, DESIGN.md "Hitboxes"). The per-bone body shapes of
+// the actors near the player (the ones Skyrim's arrows hit and the ragdoll is made of), nearest
+// first, living and dead, written every Skyrim frame. Garry's Mod units relative to the anchor.
+#define GMSKY_HB_MAX_ACTORS 24
+#define GMSKY_HB_MAX_PARTS 512
+#define GMSKY_HBK_CAPSULE 1u  // a, b = the two end points, r = radius (a sphere: a == b). Exact.
+#define GMSKY_HBK_BOX 2u      // a = min corner, b = max corner (world-aligned box around the shape)
+#define GMSKY_HBF_APPROX 0x1u // the shape isn't a capsule: its box is sent instead
+#define GMSKY_HBF_GEAR 0x2u   // on a bone that isn't body (a carried bow, weapon, shield, quiver)
+// GmskyHitPart.group: Garry's Mod's own hit groups (HITGROUP_*)
+#define GMSKY_HBG_GENERIC 0u
+#define GMSKY_HBG_HEAD 1u
+#define GMSKY_HBG_CHEST 2u
+#define GMSKY_HBG_STOMACH 3u
+#define GMSKY_HBG_LEFTARM 4u
+#define GMSKY_HBG_RIGHTARM 5u
+#define GMSKY_HBG_LEFTLEG 6u
+#define GMSKY_HBG_RIGHTLEG 7u
+#define GMSKY_HBG_GEAR 10u
+// GmskyHitActor.flags
+#define GMSKY_HBA_DEAD 0x1u
+#define GMSKY_HBA_IN_WORLD 0x2u  // its parts are in Skyrim's physics world (test 56: corpses, some NPCs)
+
+typedef struct GmskyHitPart {
+    float a[3];
+    float b[3];
+    float r;
+    uint8_t kind;   // GMSKY_HBK_*
+    uint8_t group;  // GMSKY_HBG_*
+    uint8_t flags;  // GMSKY_HBF_*
+    uint8_t bone;   // index of the part in the actor's collision walk (for logs and 3d)
+} GmskyHitPart;
+
+typedef struct GmskyHitActor {
+    uint32_t form_id;
+    uint16_t first_part;  // index into GmskyHitboxes.parts
+    uint16_t part_count;
+    uint32_t flags;       // GMSKY_HBA_*
+    uint32_t reserved0;
+} GmskyHitActor;
+
+typedef struct GmskyHitboxes {
+    uint32_t actor_count;
+    uint32_t part_count;
+    uint32_t origin_epoch;  // the GmskyOrigin.epoch these positions belong to (0 = none)
+    uint32_t reserved0;
+    uint64_t skyrim_frame;
+    int64_t qpc;            // when written (QueryPerformanceCounter), for the age in Garry's Mod
+    GmskyHitActor actors[GMSKY_HB_MAX_ACTORS];
+    GmskyHitPart parts[GMSKY_HB_MAX_PARTS];
+} GmskyHitboxes;
+
 GMSKY_DEFINE_SLOT(GmskyOriginSlot, GmskyOrigin);
 GMSKY_DEFINE_SLOT(GmskySkyrimStateSlot, GmskySkyrimState);
 GMSKY_DEFINE_SLOT(GmskyPlayerStateSlot, GmskyPlayerState);
 GMSKY_DEFINE_SLOT(GmskyInputSlot, GmskyInput);
 GMSKY_DEFINE_SLOT(GmskyTerrainSlot, GmskyTerrain);
 GMSKY_DEFINE_SLOT(GmskyActorsSlot, GmskyActors);
+GMSKY_DEFINE_SLOT(GmskyHitboxesSlot, GmskyHitboxes);
 
 typedef struct GmskyShared {
     GmskyHeader header;
@@ -198,6 +251,7 @@ typedef struct GmskyShared {
     GmskyInputSlot input;              // written by Skyrim
     GmskyTerrainSlot terrain;          // written by Skyrim
     GmskyActorsSlot actors;            // written by Skyrim (v10)
+    GmskyHitboxesSlot hitboxes;        // written by Skyrim (v11)
 } GmskyShared;
 
 // ---- Collision ring (Skyrim -> Garry's Mod; DESIGN.md re-plan step D; adapted from SkyCraft, MIT) ----
@@ -362,7 +416,13 @@ GMSKY_ASSERT(offsetof(GmskyActor, level) == 36);
 GMSKY_ASSERT(offsetof(GmskyActor, name) == 40);
 GMSKY_ASSERT(sizeof(GmskyActors) == 16 + 72 * GMSKY_MAX_ACTORS);
 GMSKY_ASSERT(offsetof(GmskyShared, actors) == 17320);
-GMSKY_ASSERT(sizeof(GmskyShared) == 21952);
+GMSKY_ASSERT(sizeof(GmskyHitPart) == 32);
+GMSKY_ASSERT(offsetof(GmskyHitPart, kind) == 28);
+GMSKY_ASSERT(sizeof(GmskyHitActor) == 16);
+GMSKY_ASSERT(offsetof(GmskyHitboxes, actors) == 32);
+GMSKY_ASSERT(sizeof(GmskyHitboxes) == 32 + 16 * GMSKY_HB_MAX_ACTORS + 32 * GMSKY_HB_MAX_PARTS);
+GMSKY_ASSERT(offsetof(GmskyShared, hitboxes) == 21952);
+GMSKY_ASSERT(sizeof(GmskyShared) == 21952 + 8 + 16800);
 GMSKY_ASSERT(sizeof(GmskyShared) <= GMSKY_SLOTS_SIZE);
 GMSKY_ASSERT(sizeof(GmskyColMsgHeader) == 8);
 GMSKY_ASSERT(sizeof(GmskyColClear) == 8);

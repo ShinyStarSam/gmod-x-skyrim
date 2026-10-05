@@ -67,7 +67,7 @@ Single-player and offline only.
 
 ## What works (verified in game, numbers in MODLOG.md)
 
-- **The link** (shared memory `Local\GmodSkyrim_v2`, protocol version 10 (since step 3b: the actors table): grids relative to the anchor, 16 MB collision ring, view punch), disconnect detection, coordinate
+- **The link** (shared memory `Local\GmodSkyrim_v2`, protocol version 11 (step 3b: actors; 3c-2: hitboxes): grids relative to the anchor, 16 MB collision ring, view punch), disconnect detection, coordinate
   conventions, scale 64 / 120.5 = 0.5311.
 - **Playing from the Skyrim window:** W/A/S/D, Shift, Space, Ctrl, mouse look, **V = Garry's
   Mod noclip** (17 launches in test 21), E activates Skyrim objects, Esc/~/J/M/F9 reach Skyrim.
@@ -142,8 +142,10 @@ multisampling; hook 0.001 ms per frame; no crash.
   **Phase 2 closed; Phase 3 (combat) planned** (`docs/DESIGN.md` "Phase 3 steps"). **Step 3a
   rebuilt after the user's feedback, not tested in game:** wheel / 1-6 / clicks go through Garry's
   Mod's own binds (HOLOHUD's weapon menu shows), Q = spawn menu with a cursor driven from Skyrim.
-  **3a works (tests 53-54).** **Step 3b built, not tested in game:** Skyrim's nearby actors reach
-  Garry's Mod (protocol v10, log only).
+  **3a works (tests 53-54).** **Step 3b works (test 55):** Skyrim's nearby actors reach Garry's Mod
+  (protocol v10, log only); distances agree exactly in both logs. **3c-1 works (test 56):**
+  people have 19 per-bone capsules, wolves 22, following the animation. **3c-2 built, not tested
+  in game:** stand-ins in Garry's Mod with Skyrim's hitboxes (protocol v11).
   Future (user): stamina / magicka bars and quest markers, locations, enemies in HOLOHUD.
 
 ## Evidence (tests 33-37)

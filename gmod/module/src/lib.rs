@@ -6,6 +6,7 @@
 
 mod capture;
 mod d3d;
+mod hitboxes;
 mod lua;
 mod present;
 mod window;
@@ -180,7 +181,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 31] = [
+    let funcs: [(&str, lua::CFn); 34] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -212,6 +213,9 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("SetClientInput", l_set_client_input),
         ("ClientInput", l_client_input),
         ("ReadActors", l_read_actors),
+        ("HitboxActors", l_hitbox_actors),
+        ("HitTrace", l_hit_trace),
+        ("HitPartAt", l_hit_part_at),
     ];
     for (name, f) in funcs {
         (a.pushnumber)(l, side as f64); // upvalue 1 = side
@@ -526,6 +530,134 @@ unsafe extern "C" fn l_read_actors(l: *mut State) -> c_int {
         }
         3
     })
+}
+
+/// Phase 3 step 3c-2: the newest NPC hitboxes from Skyrim (hitboxes.rs), shared by both sides.
+static HITBOXES: Mutex<Option<hitboxes::Store>> = Mutex::new(None);
+
+/// Runs f on the hitbox store after taking Skyrim's newest table, with the anchor; None if there
+/// is no table for the current origin.
+fn with_hitboxes<R>(f: impl FnOnce(&hitboxes::Store, [f64; 3]) -> R) -> Option<R> {
+    let (epoch, anchor) = {
+        let link = LINK.lock().unwrap_or_else(|e| e.into_inner());
+        (link.epoch, link.anchor)
+    };
+    let mut guard = HITBOXES.lock().unwrap_or_else(|e| e.into_inner());
+    let store = guard.get_or_insert_with(hitboxes::Store::default);
+    if let Ok(m) = mapping() {
+        let (slot, act) = (&m.shared().hitboxes, &m.shared().actors);
+        if slot.seq() != store.seq || act.seq() != store.actors_seq {
+            if let Some((t, seq)) = slot.read() {
+                let tab = act.read();
+                store.load(&t, seq, tab.as_ref().map(|(a, s)| (a, *s)));
+            }
+        }
+    }
+    if epoch == 0 || store.origin_epoch != epoch {
+        return None;
+    }
+    Some(f(store, anchor))
+}
+
+/// gmsky.HitboxActors(last_seq) -> seq, age_ms, list: the actors whose hitboxes Skyrim sent, each
+/// { id, flags, parts, lox, loy, loz, hix, hiy, hiz } (box around its parts, world units).
+/// false if nothing new since last_seq; nil if there is no table for the current origin.
+unsafe extern "C" fn l_hitbox_actors(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let last = (a.tonumber)(l, 1) as u32;
+        let pushed = with_hitboxes(|st, anchor| {
+            if st.seq == last {
+                (a.pushboolean)(l, 0);
+                return 1;
+            }
+            (a.pushnumber)(l, st.seq as f64);
+            let age = if st.qpc > 0 { qpc_ms(now_qpc() - st.qpc) } else { -1.0 };
+            (a.pushnumber)(l, age);
+            (a.createtable)(l, st.actors.len() as c_int, 0);
+            for (i, act) in st.actors.iter().enumerate() {
+                (a.createtable)(l, 0, 9);
+                let num = |key: &str, v: f64| {
+                    (a.pushnumber)(l, v);
+                    lua::set_field(a, l, -2, key);
+                };
+                num("id", act.id as f64);
+                num("flags", act.flags as f64);
+                num("parts", act.parts.len() as f64);
+                num("lox", act.lo[0] + anchor[0]);
+                num("loy", act.lo[1] + anchor[1]);
+                num("loz", act.lo[2] + anchor[2]);
+                num("hix", act.hi[0] + anchor[0]);
+                num("hiy", act.hi[1] + anchor[1]);
+                num("hiz", act.hi[2] + anchor[2]);
+                (a.rawseti)(l, -2, i as c_int + 1);
+            }
+            3
+        });
+        pushed.unwrap_or(0)
+    })
+}
+
+/// gmsky.HitTrace(id, sx, sy, sz, dx, dy, dz, ex, ey, ez [, gear]) -> fraction, nx, ny, nz, group,
+/// bone: where a trace from s (world units) along d first meets actor id's hitboxes. e = half size
+/// of a moving box, s its centre (0, 0, 0 = a line: tested against the body parts; a box: against
+/// the actor's fixed hull, none for corpses). gear = also hit gear (a carried bow). Nothing if it
+/// misses.
+unsafe extern "C" fn l_hit_trace(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let n = |i: c_int| (a.tonumber)(l, i);
+        let id = n(1) as u32;
+        let gear = (a.toboolean)(l, 11) != 0;
+        let hit = with_hitboxes(|st, anchor| {
+            let s = [n(2) - anchor[0], n(3) - anchor[1], n(4) - anchor[2]];
+            st.actor(id).and_then(|act| act.trace(s, [n(5), n(6), n(7)], [n(8), n(9), n(10)], gear))
+        })
+        .flatten();
+        match hit {
+            Some((f, nv, group, bone)) => {
+                (a.pushnumber)(l, f);
+                for v in nv {
+                    (a.pushnumber)(l, v);
+                }
+                (a.pushnumber)(l, group as f64);
+                (a.pushnumber)(l, bone as f64);
+                6
+            }
+            None => 0,
+        }
+    })
+}
+
+/// gmsky.HitPartAt(id, x, y, z) -> group, bone, distance: actor id's body part nearest to a point
+/// (world units), e.g. where damage landed. Nothing if there is no such actor.
+unsafe extern "C" fn l_hit_part_at(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let n = |i: c_int| (a.tonumber)(l, i);
+        let id = n(1) as u32;
+        let found = with_hitboxes(|st, anchor| {
+            st.actor(id).and_then(|act| act.part_at([n(2) - anchor[0], n(3) - anchor[1], n(4) - anchor[2]]))
+        })
+        .flatten();
+        match found {
+            Some((group, bone, d)) => {
+                (a.pushnumber)(l, group as f64);
+                (a.pushnumber)(l, bone as f64);
+                (a.pushnumber)(l, d);
+                3
+            }
+            None => 0,
+        }
+    })
+}
+
+/// QueryPerformanceCounter ticks to milliseconds.
+fn qpc_ms(ticks: i64) -> f64 {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn QueryPerformanceFrequency(freq: *mut i64) -> i32;
+    }
+    let mut f = 0i64;
+    unsafe { QueryPerformanceFrequency(&mut f) };
+    if f > 0 { ticks as f64 * 1000.0 / f as f64 } else { -1.0 }
 }
 
 /// gmsky.ShiftAnchor(dx, dy, dz) -> x, y, z: re-centre (DESIGN.md re-plan step C). Lua moves the
