@@ -54,7 +54,7 @@ Single-player and offline only.
 ## How to build and test
 
 - Rust (module, stub, harness, protocol): `cargo build --release`, then
-  `target\release\gmod_harness.exe` → `HARNESS PASSED` (101 checks); `cargo test --release` (ring and sweep unit tests). It runs our Lua in Garry's
+  `target\release\gmod_harness.exe` → `HARNESS PASSED` (107 checks); `cargo test --release` (ring and sweep unit tests). It runs our Lua in Garry's
   Mod's real `lua_shared.dll` with fake game objects (incl. the collision math and the ground
   entity's `TestCollision`); it does not run Garry's Mod's movement.
 - C++ layout test: `cmake --build build/protocol --config Release`, then
@@ -109,19 +109,15 @@ publishes the origin.
 
 ## The current problem
 
-**Resolved 2026-10-05 (tests 38, 39). No blocker.** HOLOHUD 2's alpha is now right in Garry's Mod
-(flat and curved visor). Two causes:
-- **Plates:** the "see-through glass" was a trick: HOLOHUD pasted a blurred, fully opaque copy of
-  the screen under each plate (`modules/render.lua` `BlurRect`), then black at 94/255 on top. That
-  is why the plate layer held alpha 255 and why the plates looked 0.368 see-through over flat grey.
-  Fix: the patch sets HOLOHUD's own setting `holohud2_r_blur 0` (saved). Plates now alpha 94.
-- **Glow:** its texture has alpha 255 almost everywhere. Fix: drawn with separate alpha blend
-  factors ZERO, ONE (keep the picture's alpha) instead of switching alpha writes off. Now adds
-  colour only.
-- Grey check (curved): one picture predicts the real frame over grey to 1.6 levels on average.
-- **Next:** step 2b (picture to shared memory), 2c (Skyrim draws it), then blur behind the plates
-  done in Skyrim from a plate mask (plan in `docs/DESIGN.md`, user's request).
-
+**None. Resolved 2026-10-05 in test 41.** The module finds Garry's Mod's Direct3D 9 device and
+hooks its `Present` (step 2b-1). Tests 32 and 40 failed because this `d3d9.dll` gives each device
+its own function table in ordinary memory, and the search only accepted tables inside `d3d9.dll`.
+Test 41: Ex device, pure + multithreaded; `Present` counted on every frame (= client frames);
+drawing thread = Lua's thread even with `mat_queue_mode -1`; back buffer `A8R8G8B8` 1280×720, no
+multisampling; hook 0.001 ms per frame; no crash.
+- **Next:** step 2b-2 (picture block + triple buffer), then 2b-3 (copy every frame), 2b-4
+  (Skyrim's window size); plan in `docs/DESIGN.md` "Step 2b in detail". Then 2c (Skyrim draws
+  it), then blur behind the plates done in Skyrim from a plate mask.
 ## Evidence (tests 33-37)
 
 Pictures and logs: `build/logs-ingame-test-33/` … `-37/` (`overlay/`). Reports:
@@ -140,6 +136,9 @@ percentile), = 94/255.
 
 ## What we've already tried
 
+- **Finding Garry's Mod's Direct3D 9 device (tests 32, 40; solved in 41: tables outside d3d9.dll):** scanning shaderapidx9.dll's data for a
+  direct pointer to it. Test 32: matched on `QueryInterface` + `GetRenderState`, none. Test 40:
+  matched on `QueryInterface` only, plain and Ex references: none (10 other Direct3D objects).
 - **Phase 2a, getting the overlay out of Garry's Mod (tests 25-37, MODLOG):**
   - `vm:DrawModel()` / `hands:DrawModel()` / `render.RenderHUD` into a render target from
     `PostRender`: nothing drawn (test 25).
@@ -204,6 +203,8 @@ For the HUD's alpha (in the order I'd suggest):
   (per-tick state, input, noclip), `client.lua`, `terrain.lua` (grids → ground, holds, lift),
   `field.lua` (triangle store, swept test, `gmsky_field` entity, `gmsky_test_field`),
   `gmod/autorun/gmsky_autoload.lua`. Phase 2a: `overlay.lua` (`gmsky_test_overlay`), `overlay2d.lua`
-  (`gmsky_test_alpha2d`), `gmod/module/src/d3d.rs` (`gmsky.D3DState`, read only).
+  (`gmsky_test_alpha2d`), `gmod/module/src/d3d.rs` (`gmsky.D3DState`, read only, and the device
+  search). Phase 2b: `liveoverlay.lua` (`gmsky_overlay_probe`), `gmod/module/src/present.rs`
+  (the `Present` hook).
 - Tests: `gmod/harness/src/main.rs` (78 checks), `protocol/test/`.
 - Tools: `tools/overlay_preview.py`, `tools/alpha2d_report.py`, `tools/launch_gmod.ps1`, `tools/install_gmod_stubs.ps1`, `tools/install_gmod_autoload.ps1`.

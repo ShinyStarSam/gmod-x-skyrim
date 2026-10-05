@@ -754,6 +754,7 @@ planned would not be enough.
   shared memory block sized for the largest picture, so the 16 MB collision block stays as it is).
   Skyrim publishes its window size; Garry's Mod draws at that size. Harness: the triple buffer
   never hands out a half-written picture. Logs: copy ms, frames written, slot swaps.
+  Detailed plan: "Step 2b in detail" below.
 - **2c. Skyrim draws it.** Present hook (as SkyCraft), upload, full-screen triangle, premultiplied
   alpha; skipped while a Skyrim menu is open or the puppet is off; Skyrim's first-person arms and
   weapon hidden (as SkyCraft). Logs: frames drawn, picture age in frames (latency), upload ms.
@@ -839,6 +840,95 @@ updates"; keep the curve if not too hard).**
 - **Test (35):** `gmsky_test_alpha2d hh nopatches` with `holohud2_r_3d 0`, then with the visor on
   (`holohud2_r_3d 4`). The report's grey check must now show small errors (HOLOHUD's own alpha
   matches the alpha the black/grey pair implies) and no "alpha everywhere".
+
+### Step 2b in detail (planned 2026-10-05)
+
+Goal: every Garry's Mod frame, its finished picture (hands, weapon, HUD on a transparent
+background, as in tests 30-39) lands in shared memory, where Skyrim (step 2c) can pick up the
+newest whole picture at any moment.
+
+**Read in SkyCraft first** (`fabric/.../client/FrameExporter.java`, `skse/src/Link.cpp`
+`AcquireOverlayFrame`, `protocol/skycraft_protocol.h` overlay slots): the picture is copied off the
+graphics card into one of a few "staging" copies, and only shipped once that copy has finished
+(about a frame later), so the game never waits for the graphics card. Then it goes into one of
+**three picture slots**: the writer always has a private slot to fill, the reader always has a
+whole one to read, and a single number (which slot is "in the middle", plus a "new picture" bit)
+is swapped atomically between them. Neither side ever waits for the other.
+
+**What is different for Garry's Mod: where to take the picture.** Two facts decide it:
+- The copy needs Garry's Mod's Direct3D 9 **device** (the object every draw goes through). Lua
+  doesn't have it. Test 32's search for it failed: it found 10 objects that look like devices (a
+  function table in `d3d9.dll`) but compared them with a plain device's functions only. Most
+  likely Garry's Mod made a Direct3D 9**Ex** device ("Ex": the Vista-and-later version, which
+  Source uses when it can), whose functions differ. **Not verified.**
+- By default Source draws on a second thread (`mat_queue_mode -1`): Lua's hooks (`DrawOverlay`)
+  run *before* the real drawing happens, on another thread. Copying from a Lua hook would copy the
+  wrong frame, from the wrong thread. Only `mat_queue_mode 0` (slower) would make that right.
+
+So the copy happens in a **hook on the device's `Present`** (the call that hands a finished frame
+to Windows; SkyCraft hooks the same call on Skyrim's side). It runs on the thread that really
+draws, exactly once per finished frame, whatever `mat_queue_mode` is. The hook is installed by
+changing one entry of the device's function table (in Garry's Mod's own memory; nothing on disk
+changes; this `d3d9.dll` gives every device its own copy of the table, found after test 40). Garry's Mod runs single-player with
+`-insecure` (anti-cheat off through the game's own switch), so this touches no anti-cheat
+(AGENTS.md rule 5). Our module is never unloaded once loaded (the stub never frees it), so the
+hook can't point at freed code.
+
+**Sub-steps, each tested on its own:**
+- **2b-1. Find the device, hook `Present`, count only.** The device search also accepts an Ex
+  device: it learns an Ex device's functions from a throwaway Ex device (made on a hidden 16 × 16
+  window and released at once, like the plain null device), and asks each candidate whether it is a
+  device only if its functions match one of the two. A failed search is not repeated for 10 s
+  (test 32 repeated it every call: 150 ms stalls), and logs every candidate. The hook replaces
+  `Present` (and `PresentEx` on an Ex device) and does nothing but count: frames, which thread
+  (compared with Lua's thread), the back buffer's format, size and multisampling (the "back
+  buffer" is the picture being presented). Console: `gmsky_overlay_probe` (client). Logged every
+  5 s with the client status. Unit test: the same search and hook on a real hidden device on this
+  PC, plain and Ex. **Decides:** whether the device is found, whether `Present` runs (Source might
+  present through a swap chain object instead), and the back buffer's format (has it an alpha
+  channel? multisampled?).
+- **After test 40 (device still not found):** the device's function table is *not* inside
+  `d3d9.dll`: Windows' `d3d9.dll` gives each device its own copy in ordinary memory (unit test on
+  this PC). Tests 32 and 40 only accepted tables inside `d3d9.dll`, so they skipped the device.
+  Two routes now, in one build: (a) the direct scan also accepts a table outside the DLL if its
+  `QueryInterface` is a real device's; (b) if (a) finds nothing, the Direct3D objects Source keeps
+  (textures, surfaces) are asked for the device that made them (`GetDevice`; user's choice).
+- **Test 41: 2b-1 works.** Found by route (a). Ex device, pure, multithreaded. `Present` (not
+  `PresentEx`) once per frame; on this PC the drawing thread is Lua's thread even with
+  `mat_queue_mode -1`. Back buffer `A8R8G8B8`, no multisampling: alpha is there, no resolve needed.
+- **2b-2. The picture block and the triple buffer** (no game needed). A second shared memory
+  block `Local\GmodSkyrim_overlay_v1` with its own magic and version (the 16 MB link block and
+  `GMSKY_VERSION` stay as they are): a control part (SkyCraft's swapped number; frames published;
+  Skyrim's window size, written by Skyrim), three slot headers (width, height, pixel format, frame
+  number, the precise clock at capture, so Skyrim can log the picture's age), and three pixel slots
+  for up to 3840 × 2160 × 4 bytes (about 100 MB of the page file in total; Windows only uses memory
+  for the pages written). Each slot also has room for the quarter-size plate mask of the planned
+  blur (unused until then, so the blur needs no layout change). C header + Rust copy, layout
+  asserted in both. Unit test: a writer thread and a reader thread hammering the triple buffer;
+  every picture the reader gets must be whole (all of it from one frame). `tools/overlay_read.py`
+  opens the block and saves the newest picture as a PNG with its numbers.
+- **2b-3. Copy every frame.** Lua's live overlay mode (`gmsky_overlay 1`, client console
+  variable): every frame, what the tests did for one frame: clear to transparent at the view
+  model, depth-in-alpha off, alpha writes forced from `PreDrawHUD` (`gmsky.alphaForced` for the
+  HOLOHUD patch), all reset in `PostRender`. The `Present` hook then: copies the back buffer into
+  a picture of our own on the graphics card (`StretchRect`, which also resolves multisampling),
+  asks the graphics card to tell us when that is done (an "event query"), and in a later frame,
+  once it is done, copies it to normal memory (`GetRenderTargetData` into a system-memory surface)
+  and from there into the writer's slot, then swaps. Three copies in flight, as SkyCraft. Logs
+  every 5 s: frames written, frames skipped (all copies busy), copy ms (graphics card to memory,
+  memory to slot), slot swaps. Test: `python tools\overlay_read.py` while Garry's Mod runs gives a
+  PNG with the hands and HUD and a frame number that keeps rising.
+- **2b-4. Skyrim's window size.** The Skyrim plugin opens the picture block and writes its back
+  buffer size there each frame (read in its own `Present` path in 2c; for now from the renderer's
+  screen size). Garry's Mod logs both sizes and whether they match. Making Garry's Mod draw at that
+  size automatically is left to 2d (it means changing Garry's Mod's window size); until then the
+  user sets Garry's Mod's resolution to Skyrim's, and 2c scales if they differ.
+
+**Unknowns, measured in 2b-1 / 2b-3:** the back buffer's format (if it is `X8R8G8B8`, there is no
+alpha in it and the copy would have to come from Source's own render target instead); whether
+`StretchRect` from the back buffer is allowed (it needs the back buffer to be a render target,
+which it always is, and the same format); the cost of a 1280 × 720 copy (3.7 MB, expected
+~1-3 ms on the render thread).
 
 ## 13. Repo layout
 

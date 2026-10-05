@@ -6,6 +6,7 @@
 
 mod d3d;
 mod lua;
+mod present;
 mod shapes;
 
 use gmsky_protocol::shm::{now_ms, now_qpc, Mapping, Side};
@@ -166,7 +167,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 21] = [
+    let funcs: [(&str, lua::CFn); 23] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -188,6 +189,8 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("WriteLogFile", l_write_log_file),
         ("D3DState", l_d3d_state),
         ("ReadGridFile", l_read_grid_file),
+        ("OverlayHook", l_overlay_hook),
+        ("OverlayStatus", l_overlay_status),
     ];
     for (name, f) in funcs {
         (a.pushnumber)(l, side as f64); // upvalue 1 = side
@@ -682,6 +685,23 @@ unsafe extern "C" fn l_d3d_state(l: *mut State) -> c_int {
     guarded(l, |a, _| {
         lua::push_str(a, l, &d3d::state());
         1
+    })
+}
+
+/// gmsky.OverlayHook() -> line for the log. Step 2b-1: finds Garry's Mod's Direct3D 9 device and
+/// hooks its Present (present.rs). Safe to call again (does nothing once hooked).
+unsafe extern "C" fn l_overlay_hook(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        lua::push_str(a, l, &present::install());
+        1
+    })
+}
+
+/// gmsky.OverlayStatus() -> nil if not hooked, otherwise the Present hook's numbers since the last call.
+unsafe extern "C" fn l_overlay_status(l: *mut State) -> c_int {
+    guarded(l, |a, _| match present::status() {
+        Some(s) => { lua::push_str(a, l, &s); 1 }
+        None => 0,
     })
 }
 

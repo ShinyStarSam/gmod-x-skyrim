@@ -11,6 +11,8 @@ gmsky.Include("field")
 gmsky.Include("overlay")
 -- Phase 2a after test 31: why 2D drawing writes no alpha (gmsky_test_alpha2d).
 gmsky.Include("overlay2d")
+-- Phase 2 step 2b: the live overlay (gmsky_overlay_probe).
+gmsky.Include("liveoverlay")
 
 local frames = 0
 hook.Add("Think", "gmsky_count_frames", function()

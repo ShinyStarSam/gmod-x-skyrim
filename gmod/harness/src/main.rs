@@ -171,6 +171,8 @@ HARNESS_PLY = ply
 engine = { TickCount = function() return t end, TickInterval = function() return 0.015 end }
 function CurTime() return HARNESS_TIME or 0 end
 function SysTime() return os.clock() end
+function ScrW() return 1280 end
+function ScrH() return 720 end
 function HARNESS_ADVANCE() t = t + 1 end
 "#;
 
@@ -610,6 +612,12 @@ fn main() {
             // 2D alpha test (idea 1): with no game graphics loaded, D3DState says so instead of crashing.
             let r = lua.run(lc, "return gmsky.D3DState()");
             check(r == Ok(Some("not found: shaderapidx9.dll is not loaded".into())), &format!("D3DState without the game: {r:?}"));
+            // Step 2b-1: without the game's graphics the Present hook isn't installed, says why,
+            // and its status stays nil (so the 5 s status timer logs nothing).
+            let r = lua.run(lc, "return gmsky.OverlayHook()");
+            check(r == Ok(Some("hook NOT installed, device not found: shaderapidx9.dll is not loaded".into())), &format!("OverlayHook without the game: {r:?}"));
+            let r = lua.run(lc, "concommand._c.gmsky_overlay_probe(nil, 'gmsky_overlay_probe', {}) timer.Run('gmsky_liveoverlay_status') return tostring((gmsky.OverlayStatus()))");
+            check(r == Ok(Some("nil".into())), &format!("gmsky_overlay_probe and its status timer without the game: {r:?}"));
             // Patched HOLOHUD 2 copy (tools/build_holohud.py), if built: its render.lua with our
             // patch appended compiles in Garry's Mod's Lua (compiled only, not run).
             let holo = root.join("build").join("holohud2_gmsky").join("lua").join("holohud2").join("render.lua");
@@ -719,6 +727,9 @@ fn main() {
     check(client_log.contains("ran gmod/lua/gmsky/overlay.lua") && client_log.contains("graphics: ") && client_log.contains(" modules loaded; Vulkan "),
           "gmod_client.log: overlay.lua runs on the client and logs the graphics DLLs");
     check(client_log.contains("ran gmod/lua/gmsky/overlay2d.lua"), "gmod_client.log: overlay2d.lua runs on the client");
+    check(client_log.contains("ran gmod/lua/gmsky/liveoverlay.lua")
+          && client_log.contains("overlay probe (") && client_log.contains("mat_queue_mode ?, screen 1280x720): hook NOT installed"),
+          "gmod_client.log: liveoverlay.lua runs on the client and the probe logs why it couldn't hook");
     let server_log = std::fs::read_to_string(log_dir.join("gmod_server.log")).unwrap_or_default();
     check(server_log.contains("input from Skyrim: ON") && server_log.contains("input from Skyrim: OFF, holding yaw=38.4 pitch=6.7"),
           "gmod_server.log: input ON and OFF logged");
