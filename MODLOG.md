@@ -1163,3 +1163,31 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 **Result:** console: the posted ~ opened it every time ("visible after 0.01 s"), closed back to Skyrim. Corpses: AR2-type hits (8 damage) arrived with force 3,926 (at × 3) → 99.7 kg·m/s → 14-30 m/s on the 2-7 kg part hit; a killing shot threw Sigrid's body (1,195.6 kg·m/s, capped at 30 m/s). Many single-part pushes reach the 30 m/s cap at × 3.
 **Changed:** `gmsky_ragdoll_force` default 1 → **3** (the user's choice). README, STATUS: Phase 3 done.
 **Next:** Phase 4 (DESIGN.md §12), planned first.
+## 2026-10-05 Phase 4 planned; step 4a (world audit) logging built
+
+**Committed first:** 3d-2 and the console fix as `be12648`.
+**Planned (DESIGN.md "Phase 4 steps"):** most of Phase 4's list already works from Phase 1 (real collision shapes, interiors, load doors, floating origin; tests 22-23). Never tested: fast travel, the cities' own worldspaces, a dungeon with many doors, combat / respawn around doors, waiting, and water (Garry's Mod doesn't know Skyrim's water). 4a is one guided play run, logs only; 4b water and swimming; more steps from 4a's findings.
+**Changed:** `Probe.cpp`: a `WORLD` log line once a second (interior / exterior, cell and worldspace names, water surface height at the player and the feet above / below it, swimming, puppet on / off).
+**Tested how:** plugin built without warnings. **Not tested in game.**
+**Next:** in-game test 66 (log folder numbers now run one ahead of the test numbers, so the audit takes 66 to match), the audit route.
+## 2026-10-05 In-game test 66 (step 4a, world audit): fine; T didn't open Wait; no swimming
+
+**Tested how:** the user walked the route: Whiterun, Warmaiden's, fast travel to Riverwood, slept in the Sleeping Giant Inn (T didn't open the Wait menu), Riverwood's river, Bleak Falls Temple. User: "It was just fine"; "Cant swim underwater obviously, gmod doesnt know its water so its treated as air". Logs: `build/logs-ingame-test-66/`.
+**Result:** 10 location changes and one "Skyrim moved the player" (the fast travel), each followed by the puppet back on in 16-25 ms; ground holds released after 2-5 ticks; during the fast travel's loading screen Skyrim stopped for ~1 s, Garry's Mod's hold let go ("Skyrim not connected", 78 ticks), then the new origin put the player right. 4 re-centres. Water: Skyrim switched its player to swimming with the feet 61-191 units under the logged surface; the logged surface was the cell's water level (-250 in all of Riverwood), not necessarily the river's own.
+**Next:** the menu keys; 4b.
+## 2026-10-05 Skyrim's T, Tab, I, P, F5 reach Skyrim; step 4b built: swimming in Skyrim's water
+
+**Changed (keys):** `Input.cpp`: T (wait), Tab (Skyrim's main menu), I (inventory), P (magic) and F5 (quicksave) reach Skyrim's menus, like Esc, ~, J, M, F9.
+**Changed (4b, DESIGN.md "4b. Water and swimming"):** protocol **v15**: `GmskySkyrimState.reserved0` → `water_z` (Garry's Mod units relative to the anchor), flag `GMSKY_SF_WATER` 0x2. `Probe.cpp`: every frame Skyrim's own water height for the player (`TESObjectREFR::GetWaterHeight`: the "relevant water height", else the cell's) is sent; the `WORLD` line now shows it next to the character controller's and the cell's. Module `gmsky.WaterZ()`. New `gmod/lua/gmsky/water.lua` (both sides): Source's levels (feet / waist / eyes); from waist deep a `Move` hook runs Source's `WaterMove` re-written in Lua (no gravity, swim where you look, Jump up, sink 60 units/s with no keys, 0.8 × walking speed, `sv_friction` / `sv_accelerate`, a sliding hull move against Skyrim's collision; Jump facing a bank climbs out at 300 units/s); logs SWIMMING / out of the water and a status part.
+**Found while testing:** commit `be12648` left one harness check failing: changing `gmsky_ragdoll_force`'s default to 3 made the hit event's force 900, and I didn't re-run the harness before that commit. The check now expects 900.
+**Tested how:** harness PASSED (183; new: the surface from Skyrim, sinking with no keys at 7.2 units/s after one tick, Jump swimming up, Garry's Mod's own movement above the water, waist / feet levels, no water when Skyrim has none, the log lines); module 14 + protocol 8 unit tests; plugin built without warnings. **Not tested in game.**
+**Not sure:** whether Skyrim's water height is right in every river (the `WORLD` line compares three sources); how Skyrim's own swimming (it may float its player) mixes with the puppet; whether Skyrim's drowning reaches Garry's Mod.
+**Next:** in-game test 67.
+## 2026-10-05 In-game test 67 (menu keys, step 4b swimming): works; W + Space barely rises
+
+**Tested how:** user pressed T and the other menu keys, swam in Riverwood's river, drowned a little. User: "it worked just fine!", but "I can't hold space to go up and forward at the same time"; asked for `gmsky_overlay 1` at start-up. Logs: `build/logs-ingame-test-67/`.
+**Result:** swimming from waist deep every time (surface -39.5 Garry's Mod units = Skyrim's -250; feet down to 87 under it), bobbing at the surface (level 2 ↔ 1), resting on the river bottom with no keys. The three water heights agree: sent -250.0, cell's -250.0, the character controller's -3.6 (the same surface in Havok units, × 0.0143). Drowning reached Garry's Mod through 3e: "other" hurts of ~12 every 0.5 s, 100 → 5. **The bug:** with W + Space (buttons 0x11) the player moved ~160 units/s forward but rose only ~30 units/s.
+**Cause:** Garry's Mod's command asks for "full" speed as 10,000 units/s; Source's own movement first scales the keys down to the top speed (`CheckParameters`), my `WaterMove` copy didn't, so W's 10,000 swamped Jump's 200 up.
+**Changed:** `water.lua`: the keys are scaled to the top speed first (W + Space now swims at 45°: 113 forward and 113 up of 160); Source's extra lift for swimming forward while looking up added. `liveoverlay.lua`: `gmsky_overlay` defaults to **1** (on at every start; the user's request; `gmsky_overlay 0` turns it off for the session).
+**Tested how:** harness PASSED (185; new: W + Space gives equal forward and up speed (17.0 / 17.0 after one tick); the overlay is on by default; the harness itself keeps it off except in its overlay checks). **Not tested in game.**
+**Next:** in-game test 68.

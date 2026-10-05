@@ -9,7 +9,8 @@
 -- Console (client): gmsky_overlay_probe   installs the hook (once; harmless to repeat).
 -- Log (every 5 s once installed): logs/gmod_client.log, lines starting "present hook:".
 --
--- Step 2b-3: gmsky_overlay 1 (client console variable, off at every start) sends every frame to
+-- Step 2b-3: gmsky_overlay 1 (client console variable; on at every start since test 67, the
+-- user's request; `gmsky_overlay 0` turns it off for the session) sends every frame to
 -- the overlay picture block for Skyrim: each frame is prepared as tests 30-39 did for one frame
 -- (cleared to transparent where the view model starts, or at PreDrawHUD if there is no view
 -- model, Source's depth-in-alpha off, alpha writes forced for the HUD; gmsky.alphaForced for the
@@ -21,7 +22,7 @@ local gmsky = gmsky
 local L = gmsky.liveoverlay or {}
 gmsky.liveoverlay = L
 
-L.cvar = L.cvar or CreateConVar("gmsky_overlay", "0", 0,
+L.cvar = L.cvar or CreateConVar("gmsky_overlay", "1", 0,
 	"1 = send Garry's Mod's hands, weapon and HUD to Skyrim every frame (step 2b-3)")
 -- This frame: cleared yet, alpha forced, which hooks ran (for the one-time order log).
 L.frame = L.frame or {}

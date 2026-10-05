@@ -158,6 +158,9 @@ multisampling; hook 0.001 ms per frame; no crash.
   its own window (works, test 64).
   **3d-2 works (tests 63-64):** shooting corpses pushes the ragdoll with Garry's Mod's force × 3;
   blasts throw limbs apart. F1 console works (test 64). **Phase 3 is done.**
+  **Phase 4:** 4a world audit done (test 66: cities, interiors, fast travel, dungeon fine). Skyrim's
+  T / Tab / I / P / F5 now reach Skyrim. **4b swimming works (test 67);** W + Space fix and `gmsky_overlay`
+  on by default built, not tested in game (test 68).
   Future (user): stamina / magicka bars and quest markers, locations, enemies in HOLOHUD.
 
 ## Evidence (tests 33-37)

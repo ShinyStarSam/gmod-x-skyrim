@@ -9,6 +9,8 @@ gmsky.Include("terrain")
 gmsky.Include("field")
 -- Phase 3 step 3c-2: the NPC stand-ins (their traces, for movement prediction and bullet effects).
 gmsky.Include("standins")
+-- Phase 4 step 4b: swimming in Skyrim's water (movement prediction).
+gmsky.Include("water")
 -- Phase 2a: the overlay experiment (gmsky_test_overlay).
 gmsky.Include("overlay")
 -- Phase 2a after test 31: why 2D drawing writes no alpha (gmsky_test_alpha2d).

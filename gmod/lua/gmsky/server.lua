@@ -23,6 +23,8 @@ gmsky.Include("standins")
 gmsky.Include("hurt")
 -- Phase 3 step 3f: dying respawns you at the last calm spot.
 gmsky.Include("respawn")
+-- Phase 4 step 4b: swimming in Skyrim's water (both sides).
+gmsky.Include("water")
 if GetPlayer() and T then T.home = T.MeasureRoom(GetPlayer():GetPos() + Vector(0, 0, 40)) end
 local anchored = 0 -- the origin epoch Garry's Mod is anchored to
 local inputOn = false -- input comes from Skyrim's window right now
@@ -271,6 +273,7 @@ timer.Create("gmsky_status", 1, 0, function()
 	if gmsky.standins then terrain = terrain .. gmsky.standins.Status(ply) end
 	if gmsky.hurt then terrain = terrain .. gmsky.hurt.Status() end
 	if gmsky.respawn then terrain = terrain .. gmsky.respawn.Status() end
+	if gmsky.water then terrain = terrain .. gmsky.water.Status() end
 	gmsky.Log(string.format("tick=%d %s skyrim=%s epoch=%d skyrim_frame=%d writes/s=%d%s%s%s",
 		engine.TickCount(), where, connected and "CONNECTED" or "not connected", epoch, skyrimFrame,
 		writes - lastWrites, input, err and (" error=" .. err) or "", terrain) .. (jump.total > 0 and string.format(" | jumps %d", jump.total) or ""))

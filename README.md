@@ -26,7 +26,8 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
 
 - **Playing from the Skyrim window** (tested in game 2026-10-04, Phase 1 step 1): W/A/S/D, Shift
   (sprint) and the mouse move and turn the player with Garry's Mod's movement; E opens doors,
-  containers and talks to people in Skyrim; Esc, ~, J, M, F9 open Skyrim's menus, and input goes
+  containers and talks to people in Skyrim; Esc, ~, J, M, F9 (and, not tested yet, T, Tab, I, P,
+  F5) open Skyrim's menus, and input goes
   back to Skyrim while a menu is open or the Skyrim window isn't in front. Garry's Mod runs at
   full speed in the background (start it with `tools/launch_gmod.ps1`). The view doesn't snap
   after menus. Mouse look: Skyrim shows the mouse movement before Garry's Mod has applied it,
@@ -74,7 +75,7 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   `garrysmod/maps`.
 
 - **Garry's Mod's hands, weapon and HUD inside Skyrim's window** (Phase 2, tested in game
-  2026-10-05, tests 42-50): type `gmsky_overlay 1` in Garry's Mod's console.
+  2026-10-05, tests 42-50): on at every start (`gmsky_overlay 0` in Garry's Mod's console turns it off).
   - Garry's Mod's hands, weapon, HUD (the patched HOLOHUD 2, see `tools/build_holohud.py`), menus
     and console are drawn over Skyrim's world every frame, 7-9 ms old, with correct transparency
     (blended in linear light; checked by snapshot, `gmsky_overlay_shot`).
@@ -107,6 +108,9 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
 - **Shooting corpses** (Phase 3, test 64): Skyrim's ragdolls are pushed with Garry's Mod's own
   damage force × 3 (`gmsky_ragdoll_force`), at the spot hit; explosions throw the limbs apart;
   killing shots and blasts throw the body as it falls.
+- **Swimming** (Phase 4, test 67): Skyrim's rivers and lakes are water in Garry's Mod too: from
+  waist deep you swim with Source's own water movement (swim where you look, Space up, sink
+  slowly, climb out at a bank); Skyrim shows you underwater, and drowning hurts you.
 - **F1 opens Garry's Mod's console** (test 64) in Garry's Mod's own window over Skyrim's; close it
   with ~ or Esc (or click back into Skyrim).
 

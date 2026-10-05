@@ -181,7 +181,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 42] = [
+    let funcs: [(&str, lua::CFn); 43] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -224,6 +224,7 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("SkyrimFlags", l_skyrim_flags),
         ("ConsoleWindow", l_console_window),
         ("ConsoleKey", l_console_key),
+        ("WaterZ", l_water_z),
     ];
     for (name, f) in funcs {
         (a.pushnumber)(l, side as f64); // upvalue 1 = side
@@ -1157,6 +1158,25 @@ unsafe extern "C" fn l_console_window(l: *mut State) -> c_int {
     guarded(l, |a, _| {
         let pid = mapping().map(|m| m.shared().header.skyrim_pid.load(std::sync::atomic::Ordering::Acquire)).unwrap_or(0);
         lua::push_str(a, l, &window::console_front((a.toboolean)(l, 1) != 0, pid));
+        1
+    })
+}
+
+/// gmsky.WaterZ() -> z: the water surface where Skyrim's player is, in Garry's Mod's world units
+/// (step 4b); nothing when there is no water, or Skyrim's origin isn't the one we're anchored to.
+unsafe extern "C" fn l_water_z(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let Ok(m) = mapping() else { return 0 };
+        let (epoch, anchor) = {
+            let link = LINK.lock().unwrap_or_else(|e| e.into_inner());
+            (link.epoch, link.anchor)
+        };
+        let origin = m.shared().origin.read().map(|(o, _)| o.epoch).unwrap_or(0);
+        let Some((k, _)) = m.shared().skyrim_state.read() else { return 0 };
+        if epoch == 0 || origin != epoch || k.flags & gmsky_protocol::SF_WATER == 0 {
+            return 0;
+        }
+        (a.pushnumber)(l, anchor[2] + k.water_z as f64);
         1
     })
 }

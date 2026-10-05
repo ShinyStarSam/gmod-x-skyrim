@@ -19,7 +19,7 @@
 #define GMSKY_MAP_SIZE (GMSKY_RING_OFFSET + GMSKY_RING_BYTES)
 #define GMSKY_MAGIC 0x594B534Du      // "MSKY": layout initialized and ready
 #define GMSKY_MAGIC_INIT 0x54494E49u // "INIT": one side is initializing right now
-#define GMSKY_VERSION 14u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain; 8: collision ring; 9: view punch; 10: GmskyActors; 11: GmskyHitboxes; 12: hit test; 13: hit events; 14: hurt events
+#define GMSKY_VERSION 15u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain; 8: collision ring; 9: view punch; 10: GmskyActors; 11: GmskyHitboxes; 12: hit test; 13: hit events; 14: hurt events; 15: water_z
 #define GMSKY_HEARTBEAT_TIMEOUT_MS 2000u
 
 // GmskyPlayerState.flags
@@ -78,9 +78,10 @@ typedef struct GmskySkyrimState {
     float height;       // player capsule / bound height, Skyrim units
     uint32_t cell_form_id;
     uint32_t flags;     // GMSKY_SF_*
-    uint32_t reserved0;
+    float water_z;      // water surface where the player is, Garry's Mod units relative to the anchor (if GMSKY_SF_WATER; v15)
 } GmskySkyrimState;
 #define GMSKY_SF_IN_COMBAT 0x1u  // someone is fighting the player (step 3f: no calm spot now)
+#define GMSKY_SF_WATER 0x2u      // water_z is valid: there is water here (step 4b)
 
 // Garry's Mod -> Skyrim. The authoritative player, in Garry's Mod local units.
 typedef struct GmskyPlayerState {

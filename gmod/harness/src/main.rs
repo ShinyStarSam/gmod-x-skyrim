@@ -88,7 +88,8 @@ FCVAR_REPLICATED = 8192
 -- HARNESS_CVARS[name] overrides a convar's value. The step B ground tests run on the ray grid;
 -- the step D tests switch gmsky_ground to shapes.
 -- gmsky_overlay_hidewindow 0: the harness never asks to move a window (step 2d-2).
-HARNESS_CVARS = { gmsky_ground = "grid", gmsky_overlay_hidewindow = "0" }
+-- gmsky_overlay 0: the overlay (on by default since test 67) runs only where a check turns it on.
+HARNESS_CVARS = { gmsky_ground = "grid", gmsky_overlay_hidewindow = "0", gmsky_overlay = "0" }
 function CreateConVar(name, default)
 	local function v() local o = HARNESS_CVARS[name] if o ~= nil then return o end return default end
 	return { GetFloat = function() return tonumber(v()) end, GetBool = function() return tonumber(v()) ~= 0 end,
@@ -636,7 +637,7 @@ fn main() {
                 check(head >= 1 && e.form_id == 0xFF00ABCD && (e.damage - 450.0).abs() < 1e-3 && (e.gmod_damage - 75.0).abs() < 1e-3
                         && e.group == 1 && e.kind == gmsky_protocol::HITK_BULLET && e.dmg_type == 2 && e.origin_epoch == 1
                         && (e.pos[0] + 5.0).abs() < 1e-3 && e.pos[1].abs() < 1e-3 && (e.pos[2] - 64.0).abs() < 1e-3
-                        && (e.dir[0] - 1.0).abs() < 1e-6 && (e.force - 300.0).abs() < 1e-3,
+                        && (e.dir[0] - 1.0).abs() < 1e-6 && (e.force - 900.0).abs() < 1e-3,
                     &format!("hit event for Skyrim: head {head}, {e:?}"));
                 // An explosion: no body part, x3 only.
                 lua.run(ls, "local ax, ay, az = gmsky.Anchor() HARNESS_SI:OnTakeDamage({ \
@@ -715,6 +716,45 @@ fn main() {
                 st.flags = 0;
                 st.frame = 7;
                 sky.shared().skyrim_state.write(&st);
+            }
+            // Step 4b: Skyrim's water. The harness plays Skyrim: a surface 100 units above the
+            // anchor; Source's water movement takes over from waist deep (sinks with no keys, Jump
+            // swims up), and not above the water.
+            {
+                let mut st = gmsky_protocol::SkyrimState::default();
+                st.frame = 8;
+                st.flags = gmsky_protocol::SF_WATER;
+                st.water_z = 100.0;
+                sky.shared().skyrim_state.write(&st);
+                lua.run(ls, "FrameTime = function() return 0.015 end \
+                    util.TraceHull = function(t) return { Hit = false, HitPos = t.endpos, Fraction = 1 } end \
+                    local function A() return { Forward = function() return Vector(1, 0, 0) end, Right = function() return Vector(0, -1, 0) end } end \
+                    function HARNESS_MV(z, jump, fmove) local ax, ay, az = gmsky.Anchor() local m = { o = Vector(ax, ay, az + z), v = Vector(0, 0, 0) } \
+                        function m:GetOrigin() return self.o end function m:SetOrigin(o) self.o = o end \
+                        function m:GetVelocity() return self.v end function m:SetVelocity(v) self.v = v end \
+                        function m:GetMoveAngles() return A() end function m:GetForwardSpeed() return fmove or 0 end \
+                        function m:GetSideSpeed() return 0 end function m:GetUpSpeed() return 0 end \
+                        function m:GetMaxSpeed() return 200 end function m:KeyDown(k) return jump and k == IN_JUMP end return m end").unwrap();
+                let r = lua.run(ls, "local held = gmsky.terrain and gmsky.terrain.holding if gmsky.terrain then gmsky.terrain.holding = false end                     local ax, ay, az = gmsky.Anchor() local w = gmsky.WaterZ() \
+                    local m = HARNESS_MV(0, false) local took = hook.Run('Move', HARNESS_PLY, m) \
+                    local j = HARNESS_MV(0, true) hook.Run('Move', HARNESS_PLY, j) \
+                    local dry = HARNESS_MV(120, true) local tookDry = hook.Run('Move', HARNESS_PLY, dry)                     if gmsky.terrain then gmsky.terrain.holding = held end \
+                    return string.format('%.1f %s %.1f %.1f %s %d %d', w - az, tostring(took), m.v.z, j.v.z, tostring(tookDry), \
+                        gmsky.water.Level(HARNESS_PLY, az + 50, w), gmsky.water.Level(HARNESS_PLY, az + 70, w))");
+                check(r == Ok(Some("100.0 true -7.2 24.0 nil 2 1".into())),
+                    &format!("water: surface from Skyrim; under water: sinks with no keys, Jump swims up; above: Garry's Mod's own movement; waist / feet levels: {r:?}"));
+                // After test 67: W (10,000 asked, as Garry's Mod sends it) + Space swims up and forward alike.
+                let r = lua.run(ls, "local held = gmsky.terrain and gmsky.terrain.holding if gmsky.terrain then gmsky.terrain.holding = false end                     local m = HARNESS_MV(0, true, 10000) hook.Run('Move', HARNESS_PLY, m)                     if gmsky.terrain then gmsky.terrain.holding = held end return string.format('%.1f %.1f', m.v.x, m.v.z)");
+                check(r == Ok(Some("17.0 17.0".into())),
+                    &format!("water: W + Space swims forward and up at the same speed (keys scaled to the top speed first): {r:?}"));
+                let r = lua.run(ls, "return gmsky.water.Status()");
+                check(r.as_ref().map_or(false, |v| v.as_deref().map_or(false, |v| v.contains("water surface z") && v.contains("swam 3 ticks"))),
+                    &format!("water: status line: {r:?}"));
+                st.flags = 0;
+                st.frame = 9;
+                sky.shared().skyrim_state.write(&st);
+                let r = lua.run(ls, "return tostring((gmsky.WaterZ()))");
+                check(r == Ok(Some("nil".into())), &format!("water: none when Skyrim says no water: {r:?}"));
             }
             // Step 3c-3: gmsky_hitbox_test round trip. The harness plays Skyrim: it answers every ray
             // as "missed", so the report must show Garry's Mod's hits as "only Garry's Mod".
@@ -957,6 +997,8 @@ fn main() {
             check(r == Ok(Some("hook NOT installed, device not found: shaderapidx9.dll is not loaded".into())), &format!("OverlayHook without the game: {r:?}"));
             let r = lua.run(lc, "concommand._c.gmsky_overlay_probe(nil, 'gmsky_overlay_probe', {}) timer.Run('gmsky_liveoverlay_status') return tostring((gmsky.OverlayStatus()))");
             check(r == Ok(Some("nil".into())), &format!("gmsky_overlay_probe and its status timer without the game: {r:?}"));
+            let r = lua.run(lc, "local saved = HARNESS_CVARS.gmsky_overlay HARNESS_CVARS.gmsky_overlay = nil                 local on = gmsky.liveoverlay.cvar:GetBool() HARNESS_CVARS.gmsky_overlay = saved return tostring(on)");
+            check(r == Ok(Some("true".into())), &format!("gmsky_overlay is on by default (the user, after test 67): {r:?}"));
             // Step 2b-3: gmsky_overlay 1 prepares each frame (a fake render library records the
             // calls): cleared once where the view model starts (or at the HUD without one), alpha
             // forced for the HUD, everything set back after the frame; nothing when it is off.
@@ -1116,6 +1158,8 @@ fn main() {
     check(server_log.contains("respawn: a fight started; calm spot kept from 1.0 s ago") && server_log.contains("DIED (killed by ?)")
             && server_log.contains("last calm spot 5.0 s ago") && server_log.contains("RESPAWN at the last calm spot (5.0 s before dying)"),
           "gmod_server.log: fight, death and respawn logged");
+    check(server_log.contains("water: SWIMMING at feet z") && server_log.contains("water: out of the water at feet z"),
+          "gmod_server.log: into and out of the water logged");
     check(server_log.contains("actor near: Bandit 0001A2B3 lvl 9 (hostile fighting)") && server_log.contains("actors: table dropped (2 actors)"),
           "gmod_server.log: actors appearing and the dropped table logged");
     check(server_log.contains("attack from Garry's Mod's own binds") && server_log.contains("attack from Skyrim's buttons")

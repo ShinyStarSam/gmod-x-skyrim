@@ -1278,6 +1278,59 @@ traces is enough for bullets and the crowbar, the same way the ground is answere
   window part worked. *Fix:* the module posts Garry's Mod's own console key (~, `toggleconsole` by
   default) to its window (a Windows key message to that one window), once, after it is in front.
 
+### Phase 4 steps: the full world (planned 2026-10-05, after Phase 3)
+
+Goal (§12 table): real Havok shapes, interiors, load doors, floating origin across the whole map.
+**Already built and tested in Phase 1:** Skyrim's exact collision shapes streamed to Garry's Mod
+(test 23: buildings, interiors, stairs, doors refreshed every second), a new origin on every
+location change or when Skyrim moves the player itself (load doors in test 23), the floating
+origin (re-centres, test 22: 109,000 Skyrim units in one direction). **Never tested:** fast
+travel, Whiterun / Solitude / Markarth / Riften / Windhelm (their own worldspaces), a dungeon with
+many load doors, combat and respawn inside and right after doors, sleeping / waiting, and **water**:
+Garry's Mod knows nothing of Skyrim's water, so the player probably walks on the bottom of rivers
+and lakes while Skyrim's player is put there too (not checked).
+
+**Steps:**
+- **4a. World audit (one guided play run, logs only).** New Skyrim log line once a second:
+  `WORLD interior/exterior '<cell>' in '<worldspace>' | water surface z / none, feet above / below
+  it | swimming yes/no | puppet on/off`. The route: walk into Whiterun (city worldspace), into a
+  house and out, fast travel by the map to Riverwood, wait an hour (T), walk into the river until
+  under water, into Bleak Falls Barrow (dungeon, several load doors) and fight in it, die once in
+  it. From the logs: every origin change and how long the puppet waited, holds, jumps, re-centres,
+  the collision stream after each door, water depths. Each problem found becomes its own step.
+- **4a done (test 66, the user: "It was just fine"):** Whiterun (own worldspace), Warmaiden's,
+  fast travel to Riverwood, the Sleeping Giant Inn (slept in a bed), Bleak Falls Temple: 10
+  location changes, the puppet back 16-25 ms after each; ground holds released in 2-5 ticks; the
+  fast travel's loading screen stopped Skyrim for ~1 s, Garry's Mod's hold let go ("Skyrim not
+  connected") and the new origin put the player right. **Found:** T (wait) didn't reach Skyrim:
+  only Esc, ~, J, M, F9 did. *Fixed:* T, Tab, I, P and F5 reach Skyrim too (Garry's Mod has no use
+  for them in single-player). **Water:** "can't swim, Garry's Mod treats it as air"; Skyrim itself
+  switched its player to swimming when the feet were 61-191 units under the surface. The logged
+  surface was the cell's water level (-250 everywhere in Riverwood), not necessarily the river's.
+- **4b. Water and swimming (planned 2026-10-05).**
+  - *Skyrim:* every frame, the water surface where the player is: Skyrim's own "relevant water
+    height" for the player (rivers, lakes, pools; it is what Skyrim swims by), else the cell's water
+    level (CommonLib `TESObjectREFR::GetWaterHeight`). Sent in `GmskySkyrimState` (protocol v15:
+    `reserved0` becomes `water_z`, Garry's Mod units relative to the anchor; flag
+    `GMSKY_SF_WATER` 0x2 when there is water). The `WORLD` line logs it next to the character
+    controller's own water height and the cell's, to compare.
+  - *Garry's Mod (new `gmod/lua/gmsky/water.lua`, both sides for prediction; module
+    `gmsky.WaterZ()`):* how deep the player is, as Source counts it (1 = feet, 2 = waist, 3 =
+    eyes under). From waist deep, a `Move` hook replaces Garry's Mod's movement with Source's own
+    water movement (`CGameMovement::WaterMove`, re-written in Lua): no gravity; you swim where you
+    look; Jump swims up; with no keys you sink slowly (60 units/s); speed 0.8 x walking speed;
+    water friction (`sv_friction`) and acceleration (`sv_accelerate`); the move slides along
+    Skyrim's collision with hull traces. Waist out of the water: Garry's Mod's own movement again
+    (gravity), so you bob at the surface. Jump at the surface facing a bank climbs out (Source's
+    water jump). Falling into deep water: no fall damage (the landing never happens).
+  - Skyrim: its player is where Garry's Mod's is, so Skyrim swims, draws the underwater view and
+    counts breath itself; drowning damage reaches Garry's Mod through step 3e (as "other").
+  - Logs: Garry's Mod: entering / leaving the water (level, surface, depth), per second time
+    swimming and the deepest; Skyrim: the `WORLD` line.
+  - Test: walk into Riverwood's river: you sink slowly, swim where you look, Space swims up, you
+    climb out on the bank; Skyrim shows you underwater; staying under long enough hurts you.
+- Further steps from what 4a finds.
+
 **Hitboxes: how bullets hit Skyrim's NPCs (planned 2026-10-05, the user asked for this plan before 3c).**
 
 *What counts as "the right hitbox".* Skyrim's own projectiles (arrows, bolts, spells) hit an NPC's

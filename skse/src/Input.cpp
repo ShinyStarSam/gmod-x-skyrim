@@ -1,6 +1,7 @@
 // Phase 1 step 1: input bridge. Skyrim keeps keyboard focus. While the puppet is on, Skyrim's
 // window is in front and no Skyrim menu has the input, keyboard and mouse go to Garry's Mod
-// (GmskyInput slot) instead of Skyrim's own player. Skyrim keeps Esc, ~, J, M, F9, and E for
+// (GmskyInput slot) instead of Skyrim's own player. Skyrim keeps Esc, ~, J, M, F9, T, Tab, I, P,
+// F5 (its menus, wait and quicksave; T to F5 after test 66), and E for
 // activating doors, people and containers. V toggles Garry's Mod's noclip (step 3e). 1-6 and the
 // mouse wheel choose Garry's Mod's weapon, Q opens its spawn menu (Phase 3 step 3a). F1 opens
 // Garry's Mod's console in its own window (after test 62). Approach and hooks adapted from SkyCraft (MIT).
@@ -19,13 +20,19 @@ namespace gmsky::Input
 		constexpr uint32_t kDikJ = 0x24;        // journal
 		constexpr uint32_t kDikM = 0x32;        // map
 		constexpr uint32_t kDikF9 = 0x43;       // quickload
+		constexpr uint32_t kDikT = 0x14;        // wait (after test 66)
+		constexpr uint32_t kDikTab = 0x0F;      // Skyrim's main menu (skills, items, map, magic)
+		constexpr uint32_t kDikI = 0x17;        // inventory
+		constexpr uint32_t kDikP = 0x19;        // magic
+		constexpr uint32_t kDikF5 = 0x3F;       // quicksave
 		constexpr uint32_t kDikE = 0x12;        // Skyrim activate
 		constexpr uint32_t kDikV = 0x2F;        // Garry's Mod noclip (its default key)
 		constexpr uint32_t kDikF1 = 0x3B;       // Garry's Mod's console
 
 		bool IsSkyrimMenuKey(uint32_t a_code)
 		{
-			return a_code == kDikEscape || a_code == kDikConsole || a_code == kDikJ || a_code == kDikM || a_code == kDikF9;
+			return a_code == kDikEscape || a_code == kDikConsole || a_code == kDikJ || a_code == kDikM || a_code == kDikF9 || a_code == kDikT ||
+			       a_code == kDikTab || a_code == kDikI || a_code == kDikP || a_code == kDikF5;
 		}
 
 		// Garry's Mod's default keys.
@@ -253,8 +260,8 @@ namespace gmsky::Input
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		// MenuControls opens Skyrim's menus. While input goes to Garry's Mod, only Esc, ~, J, M
-		// and F9 reach it. (Same re-linking trick as SkyCraft: pass it a list of just those events.)
+		// MenuControls opens Skyrim's menus. While input goes to Garry's Mod, only Skyrim's menu keys
+		// (IsSkyrimMenuKey) reach it. (Same re-linking trick as SkyCraft: pass it a list of just those events.)
 		struct MenuControlsHook
 		{
 			static RE::BSEventNotifyControl thunk(RE::MenuControls* a_this, RE::InputEvent* const* a_event, RE::BSTEventSource<RE::InputEvent*>* a_source)

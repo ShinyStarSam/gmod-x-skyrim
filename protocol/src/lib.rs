@@ -16,7 +16,7 @@ pub const RING_BYTES: usize = 16 << 20;
 pub const MAP_SIZE: usize = RING_OFFSET + RING_BYTES;
 pub const MAGIC: u32 = 0x594B_534D;
 pub const MAGIC_INIT: u32 = 0x5449_4E49;
-pub const VERSION: u32 = 14; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain; 8: collision ring; 9: view punch; 10: Actors; 11: Hitboxes; 12: hit test; 13: hit events; 14: hurt events
+pub const VERSION: u32 = 15; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain; 8: collision ring; 9: view punch; 10: Actors; 11: Hitboxes; 12: hit test; 13: hit events; 14: hurt events; 15: water_z
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
 
 pub const PF_ON_GROUND: u32 = 0x1;
@@ -119,7 +119,8 @@ pub struct SkyrimState {
     pub height: f32,
     pub cell_form_id: u32,
     pub flags: u32,
-    pub reserved0: u32,
+    /// Water surface where the player is, Garry's Mod units relative to the anchor (if SF_WATER).
+    pub water_z: f32,
 }
 
 #[repr(C)]
@@ -404,6 +405,8 @@ impl HitEvents {
 
 /// SkyrimState.flags: someone is fighting the player (Phase 3 step 3f).
 pub const SF_IN_COMBAT: u32 = 0x1;
+/// SkyrimState.flags: water_z is valid (Phase 4 step 4b).
+pub const SF_WATER: u32 = 0x2;
 
 /// Skyrim's NPCs hurting the player (Phase 3 step 3e): a ring of events, see gmsky_protocol.h.
 pub const HURT_MAX: usize = 32;

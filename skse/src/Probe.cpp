@@ -103,6 +103,26 @@ namespace gmsky::Probe
 			logger::info("SKYRIM frame={} pos=({:.1f}, {:.1f}, {:.1f}) heading={:.1f} pitch={:.1f} height={:.1f} camera-minus-feet={:.1f} cell={:08X} ws={:08X} | {}",
 				g_frame, a_pos.x, a_pos.y, a_pos.z, heading, pitch, height, eye,
 				cell ? cell->GetFormID() : 0, ws ? ws->GetFormID() : 0, move);
+			// Phase 4a (world audit): where the player is, and water there (Garry's Mod knows nothing of
+			// Skyrim's water yet).
+			if (cell) {
+				// Step 4b: the height sent to Garry's Mod (the player's water height) next to the
+				// character controller's and the cell's, to compare.
+				const auto valid = [](float a_z) { return a_z > -1.0e6f && a_z < 1.0e6f; };
+				const auto show = [&](float a_z) { return valid(a_z) ? fmt::format("{:.1f}", a_z) : std::string("none"); };
+				const float water = a_player->GetWaterHeight();
+				float cellWater = 0.0f;
+				if (!cell->GetWaterHeight(a_pos, cellWater)) {
+					cellWater = -1.0e9f;
+				}
+				auto* controller = a_player->GetCharController();
+				const auto* state = a_player->AsActorState();
+				logger::info("WORLD {} '{}' in '{}' | water sent {} ({}) | controller's {} cell's {} | swimming {} | puppet {}",
+					cell->IsInteriorCell() ? "interior" : "exterior", cell->GetFullName(), ws ? ws->GetFullName() : "-", show(water),
+					valid(water) ? fmt::format("feet {:.1f} {} it", std::abs(a_pos.z - water), a_pos.z < water ? "below" : "above") : std::string("-"),
+					controller ? show(controller->waterHeight) : std::string("-"), show(cellWater),
+					state && state->IsSwimming() ? "yes" : "no", Puppet::IsActive() ? "on" : "off");
+			}
 			if (height > 0.0f) {
 				logger::info("  scale check: gmod standing eye 64 / skyrim camera-minus-feet {:.1f} = {:.4f}; gmod hull 72 / skyrim height {:.1f} = {:.4f}; current guess {:.4f}",
 					eye, eye > 0.0f ? 64.0 / eye : 0.0, height, 72.0 / height, kGmodPerSkyrim);
@@ -208,6 +228,12 @@ namespace gmsky::Probe
 		s.height = a_player->GetHeight();
 		s.cell_form_id = cell ? cell->GetFormID() : 0;
 		s.flags = Combat::PlayerInCombat() ? GMSKY_SF_IN_COMBAT : 0u;
+		// Step 4b: the water surface where the player is (Skyrim's own "relevant water height" for
+		// the player, else the cell's water level), for Garry's Mod's swimming.
+		if (const float water = a_player->GetWaterHeight(); water > -1.0e6f && water < 1.0e6f && g_origin.epoch != 0) {
+			s.flags |= GMSKY_SF_WATER;
+			s.water_z = float((double(water) - g_origin.skyrim_origin[2]) * kGmodPerSkyrim);
+		}
 		SlotWrite(link.Shared().skyrim_state, s);
 
 		if (g_needOrigin && cell) {
