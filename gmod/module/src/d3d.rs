@@ -197,6 +197,11 @@ fn reference_functions(d3d9: &Image) -> (Vec<(&'static str, usize)>, String) {
 /// 1 = HAL, a real one) on a hidden window, gives it (object, function table) to `f`, and
 /// releases everything again. `ex`: made through Direct3DCreate9Ex / CreateDeviceEx.
 fn with_device<R>(d3d9: &Image, dev_type: u32, ex: bool, f: impl FnOnce(usize, usize) -> R) -> Result<R, String> {
+    with_device_sized(d3d9, dev_type, ex, (16, 16, 0), f)
+}
+
+/// The same, with the back buffer's (width, height, format; format 0 = the desktop's).
+fn with_device_sized<R>(d3d9: &Image, dev_type: u32, ex: bool, (bw, bh, bf): (u32, u32, u32), f: impl FnOnce(usize, usize) -> R) -> Result<R, String> {
     #[repr(C)]
     struct PresentParams {
         width: u32, height: u32, format: u32, count: u32, multisample: u32, quality: u32, swap_effect: u32,
@@ -233,7 +238,7 @@ fn with_device<R>(d3d9: &Image, dev_type: u32, ex: bool, f: impl FnOnce(usize, u
         let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
         let hwnd = CreateWindowExW(0, class.as_ptr(), class.as_ptr(), 0, 0, 0, 16, 16,
             std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
-        let mut pp = PresentParams { width: 16, height: 16, format: 0, count: 1, multisample: 0, quality: 0,
+        let mut pp = PresentParams { width: bw, height: bh, format: bf, count: 1, multisample: 0, quality: 0,
             swap_effect: 1, window: hwnd, windowed: 1, auto_depth: 0, depth_format: 0, flags: 0, refresh: 0, interval: 0 };
         let mut dev = 0usize;
         // Software vertex processing, keep this thread's FPU mode, no window changes; plain
@@ -547,6 +552,17 @@ pub(crate) mod tests {
         let d3d9 = image("d3d9.dll").expect("d3d9.dll image");
         with_device(&d3d9, 1, ex, f).expect("test device")
     }
+
+    /// A real hidden device with a w x h back buffer of `format` (21 = A8R8G8B8, like Garry's Mod's).
+    pub(crate) fn with_test_device_sized<R>(ex: bool, w: u32, h: u32, format: u32, f: impl FnOnce(usize, usize) -> R) -> R {
+        let name: Vec<u16> = "d3d9.dll\0".encode_utf16().collect();
+        assert!(!unsafe { LoadLibraryW(name.as_ptr()) }.is_null());
+        let d3d9 = image("d3d9.dll").expect("d3d9.dll image");
+        with_device_sized(&d3d9, 1, ex, (w, h, format), f).expect("test device")
+    }
+
+    /// Tests that use the module's global hook / capture state take this, so they don't run at once.
+    pub(crate) static GLOBAL_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// The function numbers and structures used on Garry's Mod's device, tried on a null device
     /// on this PC (without the game, so not the scan itself).

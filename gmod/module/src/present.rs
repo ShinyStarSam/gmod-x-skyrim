@@ -29,13 +29,20 @@ const PRESENT: usize = 17;
 const GET_BACK_BUFFER: usize = 18;
 /// IDirect3DDevice9Ex::PresentEx
 const PRESENT_EX: usize = 121;
+const RESET: usize = 16;
+/// IDirect3DDevice9Ex::ResetEx
+const RESET_EX: usize = 132;
 
+type ResetFn = unsafe extern "system" fn(usize, *mut c_void) -> i32;
+type ResetExFn = unsafe extern "system" fn(usize, *mut c_void, *mut c_void) -> i32;
 type PresentFn = unsafe extern "system" fn(usize, *const c_void, *const c_void, *mut c_void, *const c_void) -> i32;
 type PresentExFn = unsafe extern "system" fn(usize, *const c_void, *const c_void, *mut c_void, *const c_void, u32) -> i32;
 
 /// The functions the hook replaced (0 = not hooked).
 static ORIG_PRESENT: AtomicUsize = AtomicUsize::new(0);
 static ORIG_PRESENT_EX: AtomicUsize = AtomicUsize::new(0);
+static ORIG_RESET: AtomicUsize = AtomicUsize::new(0);
+static ORIG_RESET_EX: AtomicUsize = AtomicUsize::new(0);
 /// The function table that was patched, and Garry's Mod's device.
 static HOOKED_TABLE: AtomicUsize = AtomicUsize::new(0);
 static DEVICE: AtomicUsize = AtomicUsize::new(0);
@@ -86,6 +93,8 @@ unsafe fn on_present(dev: usize, ex: bool) {
         THREAD_CHANGES.fetch_add(1, Relaxed);
     }
     back_buffer(dev);
+    // Step 2b-3: the picture into the overlay block (when switched on).
+    crate::capture::on_present(dev);
     let dt = (qpc() - t0).max(0) as u64;
     HOOK_TICKS.fetch_add(dt, Relaxed);
     HOOK_TICKS_MAX.fetch_max(dt, Relaxed);
@@ -127,6 +136,23 @@ unsafe extern "system" fn present_hook(dev: usize, src: *const c_void, dst: *con
     orig(dev, src, dst, wnd, dirty)
 }
 
+/// Step 2b-3: our pictures on the graphics card are released before a reset.
+unsafe extern "system" fn reset_hook(dev: usize, pp: *mut c_void) -> i32 {
+    if dev == DEVICE.load(Relaxed) {
+        let _ = catch_unwind(AssertUnwindSafe(|| crate::capture::on_reset()));
+    }
+    let orig: ResetFn = std::mem::transmute(ORIG_RESET.load(Acquire));
+    orig(dev, pp)
+}
+
+unsafe extern "system" fn reset_ex_hook(dev: usize, pp: *mut c_void, mode: *mut c_void) -> i32 {
+    if dev == DEVICE.load(Relaxed) {
+        let _ = catch_unwind(AssertUnwindSafe(|| crate::capture::on_reset()));
+    }
+    let orig: ResetExFn = std::mem::transmute(ORIG_RESET_EX.load(Acquire));
+    orig(dev, pp, mode)
+}
+
 unsafe extern "system" fn present_ex_hook(dev: usize, src: *const c_void, dst: *const c_void, wnd: *mut c_void, dirty: *const c_void, flags: u32) -> i32 {
     let _ = catch_unwind(AssertUnwindSafe(|| on_present(dev, true)));
     let orig: PresentExFn = std::mem::transmute(ORIG_PRESENT_EX.load(Acquire));
@@ -164,11 +190,17 @@ unsafe fn install_on(device: usize, table: usize, ex: bool) -> Result<String, St
     let orig = patch(table, PRESENT, present_hook as PresentFn as usize)?;
     ORIG_PRESENT.store(orig, Release);
     let mut line = format!("Present hook installed (table entry {PRESENT})");
+    ORIG_RESET.store(patch(table, RESET, reset_hook as ResetFn as usize)?, Release);
+    line += &format!(", Reset (entry {RESET})");
     if ex {
         match patch(table, PRESENT_EX, present_ex_hook as PresentExFn as usize) {
             Ok(o) => {
                 ORIG_PRESENT_EX.store(o, Release);
                 line += &format!(" and PresentEx (entry {PRESENT_EX})");
+                if let Ok(o) = patch(table, RESET_EX, reset_ex_hook as ResetExFn as usize) {
+                    ORIG_RESET_EX.store(o, Release);
+                    line += &format!(", ResetEx (entry {RESET_EX})");
+                }
             }
             Err(e) => line += &format!("; PresentEx not hooked: {e}"),
         }
@@ -184,7 +216,8 @@ unsafe fn uninstall_locked() {
         return;
     }
     // Only if the entry is still ours (something else may have hooked over us since).
-    for (i, ours, orig) in [(PRESENT, present_hook as PresentFn as usize, &ORIG_PRESENT), (PRESENT_EX, present_ex_hook as PresentExFn as usize, &ORIG_PRESENT_EX)] {
+    for (i, ours, orig) in [(PRESENT, present_hook as PresentFn as usize, &ORIG_PRESENT), (PRESENT_EX, present_ex_hook as PresentExFn as usize, &ORIG_PRESENT_EX),
+                            (RESET, reset_hook as ResetFn as usize, &ORIG_RESET), (RESET_EX, reset_ex_hook as ResetExFn as usize, &ORIG_RESET_EX)] {
         let o = orig.load(Acquire);
         if o != 0 && *((table + i * 8) as *const usize) == ours {
             let _ = patch(table, i, o);
@@ -223,7 +256,8 @@ pub fn status() -> Option<String> {
         if draw_thread == lua_thread { "SAME as" } else { "not" }, THREAD_CHANGES.load(Relaxed),
         d3d::format_name(BB_FORMAT.load(Relaxed)), BB_W.load(Relaxed), BB_H.load(Relaxed), BB_MS.load(Relaxed),
         BB_CHANGES.load(Relaxed), BB_FAILS.load(Relaxed),
-        if frames > 0 { qpc_ms(dticks) / frames as f64 } else { 0.0 }, qpc_ms(HOOK_TICKS_MAX.swap(0, Relaxed))))
+        if frames > 0 { qpc_ms(dticks) / frames as f64 } else { 0.0 }, qpc_ms(HOOK_TICKS_MAX.swap(0, Relaxed)))
+        + "; " + &crate::capture::status(qpc_ms))
 }
 
 #[cfg(test)]
@@ -234,6 +268,7 @@ mod tests {
     /// hook, is counted, the back buffer is read, and the original runs (it returns success).
     #[test]
     fn hooks_present_on_a_real_device() {
+        let _one_at_a_time = d3d::tests::GLOBAL_STATE.lock().unwrap_or_else(|e| e.into_inner());
         for ex in [false, true] {
             let line = d3d::tests::with_test_device(ex, |dev, vt| unsafe {
                 let before = PRESENTS.load(Relaxed) + PRESENTS_EX.load(Relaxed);

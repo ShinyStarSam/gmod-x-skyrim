@@ -618,6 +618,34 @@ fn main() {
             check(r == Ok(Some("hook NOT installed, device not found: shaderapidx9.dll is not loaded".into())), &format!("OverlayHook without the game: {r:?}"));
             let r = lua.run(lc, "concommand._c.gmsky_overlay_probe(nil, 'gmsky_overlay_probe', {}) timer.Run('gmsky_liveoverlay_status') return tostring((gmsky.OverlayStatus()))");
             check(r == Ok(Some("nil".into())), &format!("gmsky_overlay_probe and its status timer without the game: {r:?}"));
+            // Step 2b-3: gmsky_overlay 1 prepares each frame (a fake render library records the
+            // calls): cleared once where the view model starts (or at the HUD without one), alpha
+            // forced for the HUD, everything set back after the frame; nothing when it is off.
+            let frame_lua = r#"
+                HARNESS_RENDER = {}
+                local function rec(name) return function(...) HARNESS_RENDER[#HARNESS_RENDER + 1] = name .. "(" .. table.concat((function(...) local t = {} for i = 1, select('#', ...) do t[i] = tostring((select(i, ...))) end return t end)(...), ",") .. ")" end end
+                render = { SetWriteDepthToDestAlpha = rec("depthAlpha"), Clear = rec("Clear"), OverrideAlphaWriteEnable = rec("alphaWrite") }
+                local function frame(viewmodel)
+                    hook.Run("PreRender")
+                    if viewmodel then hook.Run("PreDrawViewModel") hook.Run("PreDrawPlayerHands") end
+                    hook.Run("PreDrawHUD")
+                    hook.Run("PostRender")
+                    hook.Run("DrawOverlay")
+                end
+                local out = {}
+                for _, step in ipairs({ { "1", true }, { "1", false }, { "0", true } }) do
+                    HARNESS_CVARS.gmsky_overlay = step[1]
+                    HARNESS_RENDER = {}
+                    frame(step[2])
+                    out[#out + 1] = table.concat(HARNESS_RENDER, " ") .. " | forced=" .. tostring(gmsky.alphaForced)
+                end
+                hook.Run("PreRender")
+                return table.concat(out, " / ")
+            "#;
+            let r = lua.run(lc, frame_lua);
+            let want = "depthAlpha(false) Clear(0,0,0,0,true,true) alphaWrite(true,true) depthAlpha(true) alphaWrite(false) | forced=false / \
+                        depthAlpha(false) Clear(0,0,0,0,true,true) alphaWrite(true,true) depthAlpha(true) alphaWrite(false) | forced=false /  | forced=false";
+            check(r == Ok(Some(want.into())), &format!("gmsky_overlay 1 prepares each frame, 0 leaves it alone: {r:?}"));
             // Patched HOLOHUD 2 copy (tools/build_holohud.py), if built: its render.lua with our
             // patch appended compiles in Garry's Mod's Lua (compiled only, not run).
             let holo = root.join("build").join("holohud2_gmsky").join("lua").join("holohud2").join("render.lua");
@@ -730,6 +758,10 @@ fn main() {
     check(client_log.contains("ran gmod/lua/gmsky/liveoverlay.lua")
           && client_log.contains("overlay probe (") && client_log.contains("mat_queue_mode ?, screen 1280x720): hook NOT installed"),
           "gmod_client.log: liveoverlay.lua runs on the client and the probe logs why it couldn't hook");
+    check(client_log.contains("live overlay ON (mat_queue_mode ?, screen 1280x720): hook NOT installed")
+          && client_log.contains("live overlay first frame: cleared at view model, hook order PostRender, DrawOverlay")
+          && client_log.contains("live overlay OFF"),
+          "gmod_client.log: gmsky_overlay on / first frame / off logged");
     let server_log = std::fs::read_to_string(log_dir.join("gmod_server.log")).unwrap_or_default();
     check(server_log.contains("input from Skyrim: ON") && server_log.contains("input from Skyrim: OFF, holding yaw=38.4 pitch=6.7"),
           "gmod_server.log: input ON and OFF logged");

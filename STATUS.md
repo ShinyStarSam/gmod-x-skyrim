@@ -54,15 +54,16 @@ Single-player and offline only.
 ## How to build and test
 
 - Rust (module, stub, harness, protocol): `cargo build --release`, then
-  `target\release\gmod_harness.exe` → `HARNESS PASSED` (107 checks); `cargo test --release` (ring and sweep unit tests). It runs our Lua in Garry's
+  `target\release\gmod_harness.exe` → `HARNESS PASSED` (109 checks); `cargo test --release` (ring and sweep unit tests). It runs our Lua in Garry's
   Mod's real `lua_shared.dll` with fake game objects (incl. the collision math and the ground
   entity's `TestCollision`); it does not run Garry's Mod's movement.
 - C++ layout test: `cmake --build build/protocol --config Release`, then
   `build\protocol\Release\protocol_test.exe` → `PROTOCOL TEST PASSED`.
 - Skyrim plugin: `cmake --build --preset release` (in `skse\`; copies the DLL into Skyrim). After
   adding a new `.cpp`, run `cmake --preset default` first (sources are globbed).
-- In game: launch as in Setup, play, then copy `logs\` to `build\logs-ingame-test-N\` before
-  the next launch. Garry's Mod-only collision test: `gmsky_test_field` in its console.
+- In game: launch as in Setup, play. **Claude saves the logs** after each test
+  (`tools\save_logs.ps1` → `build\logs-ingame-test-N\`); `tools\launch_gmod.ps1` also saves
+  unsaved logs before a launch. Garry's Mod-only collision test: `gmsky_test_field` in its console.
 
 ## What works (verified in game, numbers in MODLOG.md)
 
@@ -118,7 +119,10 @@ multisampling; hook 0.001 ms per frame; no crash.
 - **2b-2 done (no game needed):** the picture block `Local\GmodSkyrim_overlay_v1` with a triple
   buffer whose slots can never overlap, even across restarts; unit-tested (20,000 pictures, all
   whole; the test was shown to fail on a broken rule). `fake_overlay` + `tools\overlay_read.py`.
-- **Next:** 2b-3 (copy every frame), 2b-4
+- **2b-3 works (test 42):** `gmsky_overlay 1` prepares every frame and the `Present` hook copies
+  it into the block (`gmod/module/src/capture.rs`): every frame published, 0 failures, ~1.1 ms per
+  frame; picture right (hands solid, HOLOHUD plates 94, world gone).
+- **Next:** 2b-4
   (Skyrim's window size); plan in `docs/DESIGN.md` "Step 2b in detail". Then 2c (Skyrim draws
   it), then blur behind the plates done in Skyrim from a plate mask.
 ## Evidence (tests 33-37)

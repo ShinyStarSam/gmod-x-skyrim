@@ -4,6 +4,7 @@
 //! `gmsky` table of functions, then runs gmod/lua/gmsky/<server|client>.lua from this project.
 //! Logs: logs/gmod_server.log, logs/gmod_client.log
 
+mod capture;
 mod d3d;
 mod lua;
 mod present;
@@ -167,7 +168,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 23] = [
+    let funcs: [(&str, lua::CFn); 25] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -191,6 +192,8 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("ReadGridFile", l_read_grid_file),
         ("OverlayHook", l_overlay_hook),
         ("OverlayStatus", l_overlay_status),
+        ("OverlayEnable", l_overlay_enable),
+        ("OverlayPrepared", l_overlay_prepared),
     ];
     for (name, f) in funcs {
         (a.pushnumber)(l, side as f64); // upvalue 1 = side
@@ -702,6 +705,24 @@ unsafe extern "C" fn l_overlay_status(l: *mut State) -> c_int {
     guarded(l, |a, _| match present::status() {
         Some(s) => { lua::push_str(a, l, &s); 1 }
         None => 0,
+    })
+}
+
+/// gmsky.OverlayEnable(on): step 2b-3, start / stop copying each prepared frame into the overlay
+/// picture block (capture.rs; needs gmsky.OverlayHook first).
+unsafe extern "C" fn l_overlay_enable(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        capture::enable((a.toboolean)(l, 1) != 0);
+        0
+    })
+}
+
+/// gmsky.OverlayPrepared(): Lua prepared this frame for Skyrim (cleared behind the view model,
+/// alpha forced); the next Present copies it.
+unsafe extern "C" fn l_overlay_prepared(l: *mut State) -> c_int {
+    guarded(l, |_, _| {
+        capture::mark_prepared();
+        0
     })
 }
 

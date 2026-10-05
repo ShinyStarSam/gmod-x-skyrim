@@ -21,6 +21,15 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $exe = Join-Path $GmodDir "gmod_win64.exe"
+# Safety net: the module starts its logs afresh on launch. If the last run's logs weren't saved
+# (tools\save_logs.ps1 writes logs\.saved_as), save them now under the next test number.
+$projectLogs = Join-Path (Split-Path -Parent $PSScriptRoot) "logs"
+$client = Join-Path $projectLogs "gmod_client.log"
+$marker = Join-Path $projectLogs ".saved_as"
+if ((Test-Path $client) -and (-not (Test-Path $marker) -or (Get-Item $client).LastWriteTime -gt (Get-Item $marker).LastWriteTime)) {
+    Write-Output "The last run's logs weren't saved yet; saving them first."
+    & (Join-Path $PSScriptRoot "save_logs.ps1")
+}
 # +fps_max_nofocus 300: Garry's Mod caps itself at 20 fps while Skyrim's window is in front, which
 # makes the view choppy (in-game test 4). This 64-bit build has no engine_no_focus_sleep.
 $gameArgs = @("-insecure", "-windowed", "-w", "1280", "-h", "720", "-console", "+fps_max_nofocus", "300")

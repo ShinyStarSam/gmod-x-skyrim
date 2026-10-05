@@ -921,6 +921,15 @@ hook can't point at freed code.
   every 5 s: frames written, frames skipped (all copies busy), copy ms (graphics card to memory,
   memory to slot), slot swaps. Test: `python tools\overlay_read.py` while Garry's Mod runs gives a
   PNG with the hands and HUD and a frame number that keeps rising.
+  Details added before building (2026-10-05):
+  - Lua marks each frame it prepared (`gmsky.OverlayPrepared()` in `PostRender`); the hook copies
+    only marked frames, so a frame drawn without the preparation (overlay just switched on, a
+    loading screen) never reaches Skyrim. If no view model was drawn (no weapon, a camera), the
+    clear happens at `PreDrawHUD` instead, so the world is never sent.
+  - The hook also replaces the device's `Reset` / `ResetEx` (a resolution change): our pictures
+    on the graphics card are released first, as Direct3D 9 requires, and made again at the new
+    size on the next frame.
+  - New code in `gmod/module/src/capture.rs`; `present.rs` only calls it.
 - **2b-4. Skyrim's window size.** The Skyrim plugin opens the picture block and writes its back
   buffer size there each frame (read in its own `Present` path in 2c; for now from the renderer's
   screen size). Garry's Mod logs both sizes and whether they match. Making Garry's Mod draw at that
