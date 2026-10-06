@@ -2527,6 +2527,22 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
   stair-ramp flag for this (`gmsky.TrisInfo`). **Then**, from the numbers, the fix; if it is the
   ramps, SkyCraft's rule in Source terms (one way: ramps in their own mesh that only the player
   collides with, from above).
+- **S2f. Skyrim's stair ramps reach Garry's Mod (planned 2026-10-06 after test 123).** Test 123:
+  most "stuck" readings were on stairs (blocked by the steep risers at the feet, often not "on
+  ground", so Source never steps up), and **not one stair ramp has ever arrived** in any test.
+  Two reasons in `skse/src/Collision.cpp`: (1) ramp bodies made of boxes, capsules or convex shapes
+  lose the mark when `Triangulate` turns them into triangles (SkyCraft keeps it: a separate job,
+  every triangle marked; ours differs by mistake); (2) a ramp can be a child inside a bigger
+  container shape with its own layer; we (and SkyCraft) only read the whole body's layer. Fix:
+  boxes, capsules and convexes carry the mark into their triangles (as SkyCraft); and for every
+  container child, `hkpShapeContainer::GetCollisionFilterInfo(key)` is asked, and a child on layer
+  `kStairHelper` is marked (beyond SkyCraft). Logged once a second in `skyrim.log`: ramp bodies,
+  ramp children, ramp triangles sent; once per new layer: which layers container children carry.
+  **In Garry's Mod, for this step, ramps are ordinary solid triangles in the chunks**, so stairs
+  become ramps; **differs from SkyCraft**, where they are floor only (never wall or ceiling,
+  skipped by bullets). That rule is a later step if the numbers show ramps blocking or bullets
+  stopping on them. Test: the same stairs; expect the stored ramp count above 0, STUCK on stairs
+  gone or rare, "ground" true on stairs.
 - **S3. Props, ragdolls and grenades on it.** Mostly free once S2 works. Added: a prop moving into
   a chunk that isn't built yet is frozen for that moment and released with its speed (like the
   player's hold; InfMap2 doesn't need this because it makes its terrain itself, instantly; we

@@ -1907,3 +1907,21 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 - #3, #16: in the air, no triangle within 24 units, falling slowly; not explained.
 - The cage: nothing logged (walking through isn't "stuck").
 **Why no stair ramps arrive (read in `skse/src/Collision.cpp`):** (1) a ramp body made of boxes or convex shapes is turned into triangles by `Triangulate` with flags 0, so the ramp mark is lost; only triangle shapes keep it. **SkyCraft** collects ramp bodies into a separate job and marks all their triangles (`helperTris`); ours differs, by mistake. (2) Both SkyCraft and we check the layer of the whole body only; Havok can also give each child of a container its own layer (`hkpShapeContainer::GetCollisionFilterInfo(key)`), where ramps inside a building's mesh would be. Not verified which of the two is the case.
+## 2026-10-06 S2f: Skyrim's stair ramps are sent marked (not tested in game)
+
+**Changed:** `skse/src/Collision.cpp` only.
+- Boxes, capsules and convex shapes (and the box fallback) remember whether they belong to a stair-ramp body; `Triangulate` marks their triangles `GMSKY_TRI_STAIR_HELPER` (as SkyCraft's separate `helperTris`; before, only triangle shapes kept the mark).
+- `ChildRamp`: for every child of a container shape (MOPP trees, lists, compressed meshes, ...), Havok's per-child filter info (`hkpShapeContainer::GetCollisionFilterInfo(key)`) is read; a child on layer `kStairHelper` (31) is collected as a ramp. Each layer seen on a container child is logged once ("a container child carries its own layer N"). **Beyond SkyCraft** (it reads only the body's layer).
+- `skyrim.log` COLLISION line: "stair ramps: N bodies, N container children, N triangles sent".
+- In Garry's Mod nothing changed: ramps are ordinary solid triangles in the chunks (stairs become ramps). **Differs from SkyCraft**, where they are floor only (never wall or ceiling, skipped by bullets).
+**Why:** test 123 (above). Plan: `docs/DESIGN.md` S2f.
+**Tested how:** `cmake --build --preset release` (no warnings; copied into Skyrim's `Data\SKSE\Plugins`). **Not tested in game.** Not sure: that ramps are on layer 31 in the bodies or children we read; that `GetCollisionFilterInfo` is cheap enough on big compressed meshes (harvest time is logged).
+## 2026-10-06 In-game test 124 (S2f): fell through the world: the new per-child layer read faulted on every container; fixed (not tested)
+
+**Logs:** `build/logs-ingame-test-124/`. No crash dump.
+**Tested how:** user: "I fall through the world".
+**Result:**
+- `skyrim.log`: **7,078 faults** (up to 881 a second; test 123: 0) "faulted reading a Havok shape (type 8 / 9 / 10)", and only **19,105 triangles sent** (test 123: 2,301,909): every body whose walk reached a container child faulted and was skipped, so most ground never arrived.
+- Stair ramps **did** arrive from whole ramp bodies: up to 7 bodies and 68 marked triangles a second (the box/convex fix works); 0 from container children (every such read faulted).
+- **Cause:** CommonLib's `hkpShapeContainer::GetCollisionFilterInfo` returns the class `CFilter`; MSVC returns a class from a member function through a hidden pointer, so Havok's real function (which returns a plain 32-bit number) received that pointer as the shape key and read out of bounds.
+**Fixed (not tested in game):** `skse/src/Collision.cpp`: the child's filter info is read through the container's function table slot 4 called as returning `uint32_t` (slot 5, `GetChildShape`, already works through CommonLib), inside its own fault guard (`GuardedFilterInfo`): a fault now loses only the ramp mark, never the body. The COLLISION line also counts "child layer reads faulted". Plugin rebuilt (no warnings).
