@@ -1925,3 +1925,18 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 - Stair ramps **did** arrive from whole ramp bodies: up to 7 bodies and 68 marked triangles a second (the box/convex fix works); 0 from container children (every such read faulted).
 - **Cause:** CommonLib's `hkpShapeContainer::GetCollisionFilterInfo` returns the class `CFilter`; MSVC returns a class from a member function through a hidden pointer, so Havok's real function (which returns a plain 32-bit number) received that pointer as the shape key and read out of bounds.
 **Fixed (not tested in game):** `skse/src/Collision.cpp`: the child's filter info is read through the container's function table slot 4 called as returning `uint32_t` (slot 5, `GetChildShape`, already works through CommonLib), inside its own fault guard (`GuardedFilterInfo`): a fault now loses only the ramp mark, never the body. The COLLISION line also counts "child layer reads faulted". Plugin rebuilt (no warnings).
+
+## 2026-10-06 `gmsky_ground physics` is the default (not tested in game)
+
+**Changed:** `gmod/lua/gmsky/terrain.lua`: `gmsky_ground` defaults to `physics` (was `shapes`); `shapes` and `grid` stay selectable. No saved value in Garry's Mod's `cfg` overrides it.
+**Why:** user: "gmsky_ground physics should just be default by now".
+**Tested how:** `gmod_harness.exe`: HARNESS PASSED.
+## 2026-10-06 In-game test 125: ground back (0 faults), physics on by default; ramps arrive but are rare; stuck in the ground after spawning; stairs still catch
+
+**Logs:** `build/logs-ingame-test-125/`. No crash.
+**Tested how:** user: "When spawning and entering buildings and fast travel I get stuck in the ground (probably my feet spawning IN the ground rather than on) also, stairs still are not ramps."
+**Result:**
+- **0 faults**, 0 child layer reads faulted, 836,030 triangles sent: the S2f fix works. Physics mode was on from the first status line without the command (the new default works).
+- Stair ramps: **34 ramp bodies and 326 ramp triangles in the whole session; 0 ramp children.** Container children carry layers 1, 2, 3, 10, 13, never 31. So most of Skyrim's stairs have **no** ramp (Skyrim's own character steps up them itself): ramps can't fix most stairs.
+- 9 STUCK readings. **#1, #2, #6, #7, #8: the player's box inside the ground** (`here: starts inside gmsky_chunk`), four of them at (0, 0, 15.9) = right where a new origin put the player (4 new origins: load, doors, fast travel). Garry's Mod's 32-unit box is wider than Skyrim's capsule, and the player is put exactly at Skyrim's foot position. **#3, #4, #5, #9: stairs**: blocked at the feet by slanted risers (normal z 0.18-0.37), **on ground false** every time (Source steps up only from the ground).
+- **SkyCraft's rule** (`TriCollider.java`): ground is sampled under a small round footprint (not the whole box), steep surfaces below step height don't block a grounded player, and in the air a walkable surface up to 0.3 blocks above the feet still catches you. Source's movement does none of these with a box on stair edges.

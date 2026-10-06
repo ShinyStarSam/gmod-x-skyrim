@@ -129,8 +129,8 @@ if SERVER then
 	T.recentreAt = CreateConVar("gmsky_recentre_at", "8000", FCVAR_ARCHIVE,
 		"Re-centre (move the player and the anchor back to the middle of the map) once the player is this far from it along x, y or z; 0 = never")
 	T.recentres = T.recentres or 0
-	T.groundMode = CreateConVar("gmsky_ground", "shapes", FCVAR_ARCHIVE,
-		"shapes = Skyrim's real collision shapes, traced (step D); physics = the same shapes as physics chunks (step S2); grid = Skyrim's ray grid (step B)")
+	T.groundMode = CreateConVar("gmsky_ground", "physics", FCVAR_ARCHIVE,
+		"physics (default since test 124) = Skyrim's collision shapes as physics chunks (step S2); shapes = the same shapes, traced (step D); grid = Skyrim's ray grid (step B)")
 	-- Skyrim is asked for its shapes in shapes and physics mode.
 	function T.ShapesMode() return T.groundMode:GetString() ~= "grid" end
 	function T.PhysicsMode() return T.groundMode:GetString() == "physics" end

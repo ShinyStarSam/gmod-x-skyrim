@@ -139,10 +139,10 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   `tools\launch_gmod.ps1 -Width W -Height H` with Skyrim's size (both are 1280×720 so far).
 - Ending noclip more than ~2,100 Garry's Mod units under Skyrim's ground holds you in place;
   press V again.
-- Garry's Mod's physics props and ragdolls fall through Skyrim's ground in the default ground
-  mode (it is only answered to traces, not to Garry's Mod's physics engine). The experimental
-  `gmsky_ground physics` mode fixes that (props land, no crash in test 121), but can hold the
-  player in the air for seconds when running far (fix built, not tested in game).
+- The ground is now Garry's Mod physics (`gmsky_ground physics`, the default since test 124):
+  props land on it (tests 118-123). Not yet right: the player gets stuck on stairs and sometimes
+  inside the ground (test 123; a stair-ramp fix is built, not tested in game). `gmsky_ground
+  shapes` switches back to the older traced ground (props fall through it).
 - Everything else in [docs/DESIGN.md](docs/DESIGN.md) §12.
 
 ## Credits
