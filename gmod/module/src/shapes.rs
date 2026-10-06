@@ -75,11 +75,16 @@ const RISER_MAX: f64 = 20.0;
 const NOSE_MIN_LEN: f64 = 2.0;
 const RUN_MIN: f64 = 3.0; // two noses are 3-48 units apart across them
 const RUN_MAX: f64 = 48.0;
-const WALKABLE: f64 = 1.02; // rise / run at most this: Source walks up to normal z 0.7 (45.6 degrees)
+const WALKABLE: f64 = 1.0; // strips rise / run at most this (45 degrees): Source walks up to normal
+                           // z 0.7 (45.6 degrees); a steeper step gets a strip this steep and a lip
+                           // at its top (test 133: a strip-less steep step left walls beside it)
+const LIP_MAX: f64 = 3.0; // ... up to this lip; steeper still: no partner (test 133: a fan-shaped
+                          // step 60 degrees steep made a twisted strip with a 5-unit lip)
 const FLUSH: f64 = 1.0; // a ramp end within this of the surface it meets counts as flush
 const TREAD_NZ: f64 = 0.9; // a tread: a stair triangle this flat (normal z, either side)
 const LOOK_OUT: f64 = 1.5; // the surface just beyond an edge is looked at this far out
 const SAME: f64 = 0.75; // ... a surface within this of the edge's height continues the tread
+const INSIDE: f64 = 0.5; // ... and this far inside, nothing may lie within step height above
 const TILT: f64 = 0.2; // a nose may rise this much per unit of its length (test 132: the stone
                        // stairs' steps rise 2-3 units along their 30-unit width), plus a unit
 
@@ -98,7 +103,8 @@ pub struct Ramps {
     /// within FLUSH of the nose's height.
     pub tops: usize,
     pub tops_off: usize,
-    /// The steepest strip, in degrees.
+    /// The steepest step a strip was laid over (rise over run), in degrees; over 45 the strips
+    /// there are 45 degrees with a lip at the top.
     pub steepest: f64,
     /// Fingerprint of `tris` (to 1/16 unit).
     pub hash: u64,
@@ -114,6 +120,7 @@ struct NoseStats {
     short: usize,       // under NOSE_MIN_LEN
     continues: usize,   // the surface just beyond is at the same height (inside a tread)
     covered: usize,     // something within step height above just beyond (the back of a tread)
+    under: usize,       // something within step height above just inside (a box's bottom face)
     noses: usize,
 }
 
@@ -203,7 +210,9 @@ impl<'a> Heights<'a> {
 /// unit of length in height: test 132's stone steps are tilted), at least 2 long, and where,
 /// just beyond it (LOOK_OUT out, at a quarter, half and three quarters along),
 /// the surface does not continue at the same height and nothing lies within step height above,
-/// at two of the three points at least. The same edge from two triangles counts once.
+/// at two of the three points at least, and nothing lies within step height above just inside
+/// it either (test 133: steps built from stacked boxes; a box's bottom face has an edge right
+/// under its top face's edge). The same edge from two triangles counts once.
 fn find_noses(stairs: &[&Tri], all: &Heights, st: &mut NoseStats) -> Vec<Nose> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -251,6 +260,15 @@ fn find_noses(stairs: &[&Tri], all: &Heights, st: &mut NoseStats) -> Vec<Nose> {
                 st.covered += 1;
                 continue;
             }
+            let under = [0.25, 0.5, 0.75].iter().filter(|&&f| {
+                let z = za + (zb - za) * f;
+                let (x, y) = (a[0] + (b[0] - a[0]) * f - o[0] * INSIDE, a[1] + (b[1] - a[1]) * f - o[1] * INSIDE);
+                all.highest(x, y, z + SAME, z + RISER_MAX).is_some()
+            });
+            if under.count() >= 2 {
+                st.under += 1;
+                continue;
+            }
             let q = |p: [f64; 2], z: f64| ((p[0] * 4.0).round() as i64, (p[1] * 4.0).round() as i64, (z * 4.0).round() as i64);
             let (qa, qb) = (q(a, za), q(b, zb));
             if !seen.insert((qa.min(qb), qa.max(qb))) {
@@ -270,7 +288,8 @@ const UNPAIRED: [&str; 5] = ["no nose 1-20 units higher within reach", "higher n
 /// For each nose: the next nose up (index, run across = signed distance along its `p`), or the
 /// stage its best candidate failed at (index into UNPAIRED): 1-20 units higher, parallel within
 /// ~25 degrees, 3-48 units across, overlapping it sideways by more than a unit; of those the
-/// nearest across, if it is no steeper than Source can walk.
+/// nearest across (a further nose would make the strip cut through the step in between), if
+/// a strip at WALKABLE leaves a lip of at most LIP_MAX.
 fn pair_noses(noses: &[Nose]) -> Vec<Result<(usize, f64), usize>> {
     let cell = |p: [f64; 2]| ((p[0] / RUN_MAX).floor() as i64, (p[1] / RUN_MAX).floor() as i64);
     let mut grid: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
@@ -316,10 +335,8 @@ fn pair_noses(noses: &[Nose]) -> Vec<Result<(usize, f64), usize>> {
                     }
                 }
             }
-            // Only the nearest one: a further nose would make the strip cut through the step
-            // in between. Too steep to walk: no partner.
             match best {
-                Some((j, dz, run)) if dz <= run.abs() * WALKABLE => Ok((j, run)),
+                Some((j, dz, run)) if dz <= run.abs() * WALKABLE + LIP_MAX => Ok((j, run)),
                 _ => Err(stage),
             }
         })
@@ -614,13 +631,95 @@ impl Store {
         let mut out = Ramps::default();
         let noses = find_noses(&stairs, &all, &mut NoseStats::default());
         let up = pair_noses(&noses);
-        // Uphill direction of each nose that a lower nose pairs with (from that pair).
+        // Test 133 (curved flights): a step's nose comes in several straight pieces meeting at
+        // bends. Pieces that share a corner: `ends` finds them; at a shared corner both strips
+        // cross the step in the same direction (the average of both pieces' uphill), and climb
+        // to the step above's nose pieces themselves, bends included, so neighbouring strips
+        // meet exactly instead of leaving a slot at every bend.
+        let key = |p: [f64; 2], z: f64| ((p[0] * 16.0).round() as i64, (p[1] * 16.0).round() as i64, (z * 16.0).round() as i64);
+        let mut ends: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+        for (i, n) in noses.iter().enumerate() {
+            ends.entry(key(n.a, n.za)).or_default().push(i);
+            ends.entry(key(n.b, n.zb)).or_default().push(i);
+        }
+        // A step's whole nose: nose j and the pieces joined to it end to end (at most 8).
+        let chain = |j: usize| {
+            let mut got = vec![j];
+            let mut k = 0;
+            while k < got.len() && got.len() < 8 {
+                let n = &noses[got[k]];
+                for (p, z) in [(n.a, n.za), (n.b, n.zb)] {
+                    for &m in ends.get(&key(p, z)).map(|v| v.as_slice()).unwrap_or(&[]) {
+                        if !got.contains(&m) && (noses[m].dir[0] * n.dir[0] + noses[m].dir[1] * n.dir[1]).abs() > 0.7 {
+                            got.push(m);
+                        }
+                    }
+                }
+                k += 1;
+            }
+            got
+        };
+        // Uphill direction of each nose with a step below it: a lower nose that pairs with any
+        // piece of its step's nose and lies below this piece, side by side with it (test 133: a
+        // middle piece nobody paired with was taken for the bottom step and got a strip down
+        // through the steps below).
         let mut uphill: Vec<Option<[f64; 2]>> = vec![None; noses.len()];
         for (i, u) in up.iter().enumerate() {
             if let Ok((j, run)) = *u {
-                uphill[j] = Some([noses[i].p[0] * run.signum(), noses[i].p[1] * run.signum()]);
+                let d = [noses[i].p[0] * run.signum(), noses[i].p[1] * run.signum()];
+                for m in chain(j) {
+                    let (n, l) = (&noses[m], &noses[i]);
+                    let (ta, tb) = (n.along(l.a), n.along(l.b));
+                    if ta.max(tb).min(n.len) - ta.min(tb).max(0.0) <= 1.0 {
+                        continue;
+                    }
+                    let p = n.p;
+                    let sign = if p[0] * d[0] + p[1] * d[1] < 0.0 { -1.0 } else { 1.0 };
+                    uphill[m].get_or_insert([p[0] * sign, p[1] * sign]);
+                }
             }
         }
+        let up_of = |i: usize| match up[i] {
+            Ok((_, run)) => Some([noses[i].p[0] * run.signum(), noses[i].p[1] * run.signum()]),
+            Err(_) => uphill[i],
+        };
+        // Which way to cross from nose i's end p (height z): uphill, shared with the pieces
+        // meeting it there.
+        let cross = |i: usize, p: [f64; 2], z: f64| -> Option<[f64; 2]> {
+            let mut d = up_of(i)?;
+            let own = d;
+            for &k in ends.get(&key(p, z)).map(|v| v.as_slice()).unwrap_or(&[]) {
+                if let Some(u) = up_of(k).filter(|u| k != i && u[0] * own[0] + u[1] * own[1] > 0.5) {
+                    d = [d[0] + u[0], d[1] + u[1]];
+                }
+            }
+            let l = (d[0] * d[0] + d[1] * d[1]).sqrt();
+            Some([d[0] / l, d[1] / l])
+        };
+        // Where the line from e going d first meets the chain's pieces (None: it passes its ends).
+        let hit = |e: [f64; 2], d: [f64; 2], pieces: &[usize]| {
+            let mut best: Option<(f64, [f64; 3])> = None;
+            for &m in pieces {
+                let n = &noses[m];
+                let den = d[0] * n.dir[1] - d[1] * n.dir[0];
+                if den.abs() < 1e-6 {
+                    continue;
+                }
+                let (wx, wy) = (n.a[0] - e[0], n.a[1] - e[1]);
+                let t = (wx * n.dir[1] - wy * n.dir[0]) / den; // along d
+                let w = (wx * d[1] - wy * d[0]) / den; // along the piece, from a
+                if t > 0.0 && t < 2.0 * RUN_MAX && w >= -0.01 && w <= n.len + 0.01 && best.map_or(true, |b| t < b.0) {
+                    best = Some((t, [e[0] + d[0] * t, e[1] + d[1] * t, n.z_at(w)]));
+                }
+            }
+            best.map(|b| b.1)
+        };
+        // The slope a bottom nose's strip climbs at (rise over run, at most WALKABLE).
+        let slope = |m: usize| {
+            let (j, run) = up[m].ok()?;
+            let dz = noses[j].z_at(noses[j].along(noses[m].mid)) - noses[m].z;
+            Some(dz.min(run.abs() * WALKABLE) / run.abs())
+        };
         for (i, s) in noses.iter().enumerate() {
             if !owned(s) {
                 continue;
@@ -646,20 +745,50 @@ impl Store {
                 [u.a[0] + u.dir[0] * t, u.a[1] + u.dir[1] * t, u.z_at(t)]
             };
             let (a, b) = ([s.a[0], s.a[1], s.za], [s.b[0], s.b[1], s.zb]);
-            let (a2, b2) = (onto(a), onto(b));
-            out.tris.push(tri9(a, b, b2));
-            out.tris.push(tri9(a, b2, a2));
+            let (da, db) = (cross(i, s.a, s.za).unwrap(), cross(i, s.b, s.zb).unwrap());
+            let pieces = chain(j);
+            let (a2, b2) = (hit(s.a, da, &pieces).unwrap_or_else(|| onto(a)), hit(s.b, db, &pieces).unwrap_or_else(|| onto(b)));
+            // The step above's bends between a2 and b2 (sideways along this nose), in order.
+            let side = |p: [f64; 2]| s.along(p);
+            let (ta, tb) = (side([a2[0], a2[1]]), side([b2[0], b2[1]]));
+            let mut top = vec![(ta, a2)];
+            for &m in &pieces {
+                let n = &noses[m];
+                for (p, z) in [(n.a, n.za), (n.b, n.zb)] {
+                    let t = side(p);
+                    if t > ta + 0.05 && t < tb - 0.05 && !top.iter().any(|q| (q.0 - t).abs() < 0.05) {
+                        top.push((t, [p[0], p[1], z]));
+                    }
+                }
+            }
+            top.push((tb, b2));
+            top.sort_by(|x, y| x.0.total_cmp(&y.0));
+            // Steeper than WALKABLE: the top edge comes down to that slope, leaving a lip below
+            // the step above (Source steps up the lip like a small step).
+            let lip = (dz - run.abs() * WALKABLE).max(0.0);
+            for p in &mut top {
+                p.1[2] -= lip;
+            }
+            // A fan from a over the first half of the top edge, from b over the rest, and one
+            // triangle a-b-(the top point where they switch).
+            let m = (0..top.len()).min_by(|&x, &y| (top[x].0 - s.len * 0.5).abs().total_cmp(&(top[y].0 - s.len * 0.5).abs())).unwrap();
+            for k in 0..top.len() - 1 {
+                out.tris.push(tri9(if k < m { a } else { b }, top[k].1, top[k + 1].1));
+            }
+            out.tris.push(tri9(a, b, top[m].1));
             out.strips += 1;
             out.steepest = out.steepest.max(dz.atan2(run.abs()).to_degrees());
             if uphill[i].is_none() {
                 // The bottom step: down at the same slope, each end until it meets the floor
-                // below (flush with it); no floor within RUN_MAX: it ends in the air there.
-                let k = dz / run.abs();
-                let away = [-s.p[0] * run.signum(), -s.p[1] * run.signum()];
-                let end = |e: [f64; 3], out: &mut Ramps| {
+                // below (flush with it); no floor within RUN_MAX: it ends in the air there. A
+                // corner shared with the next piece gets the same bottom point from both strips
+                // (the gentlest of their slopes; worked out from the corner alone, so the same in
+                // neighbouring chunks too).
+                let end = |e: [f64; 3], d: [f64; 2], out: &mut Ramps| {
+                    let k = ends.get(&key([e[0], e[1]], e[2])).into_iter().flatten().filter_map(|&m| slope(m)).fold(f64::INFINITY, f64::min);
                     for step in 1..=(RUN_MAX as i32) {
-                        let d = step as f64;
-                        let (x, y, zr) = (e[0] + away[0] * d, e[1] + away[1] * d, e[2] - d * k);
+                        let t = step as f64;
+                        let (x, y, zr) = (e[0] - d[0] * t, e[1] - d[1] * t, e[2] - t * k);
                         if let Some(f) = all.highest(x, y, zr - RISER_MAX, e[2] - 0.5) {
                             if f >= zr {
                                 return [x, y, f];
@@ -667,9 +796,9 @@ impl Store {
                         }
                     }
                     out.bottoms_floating += 1;
-                    [e[0] + away[0] * RUN_MAX, e[1] + away[1] * RUN_MAX, e[2] - RUN_MAX * k]
+                    [e[0] - d[0] * RUN_MAX, e[1] - d[1] * RUN_MAX, e[2] - RUN_MAX * k]
                 };
-                let (a0, b0) = (end(a, &mut out), end(b, &mut out));
+                let (a0, b0) = (end(a, da, &mut out), end(b, db, &mut out));
                 out.tris.push(tri9(a0, b0, b));
                 out.tris.push(tri9(a0, b, a));
                 out.bottoms += 1;
@@ -727,8 +856,8 @@ impl Store {
         if reasons.is_empty() {
             reasons.push("none".into());
         }
-        format!("ramp check: {} stair triangles here, {} of them treads with {} edges: {} not level, {} under 2 long, {} inside a tread, {} at a tread's back (covered above), {} noses; noses here: {} paired, unpaired: {}",
-            st.tris, st.treads, st.edges, st.not_level, st.short, st.continues, st.covered, st.noses, paired, reasons.join(", "))
+        format!("ramp check: {} stair triangles here, {} of them treads with {} edges: {} not level, {} under 2 long, {} inside a tread, {} at a tread's back (covered above), {} under a surface (a box's bottom), {} noses; noses here: {} paired, unpaired: {}",
+            st.tris, st.treads, st.edges, st.not_level, st.short, st.continues, st.covered, st.under, st.noses, paired, reasons.join(", "))
     }
 
     /// Where region (0, 0, 0) starts and the region size (Garry's Mod units, relative to the
@@ -1206,7 +1335,18 @@ mod tests {
         // No floor in front: the bottom strip ends in the air at 48 units (both ends counted).
         let r = store_with(&stairs_msg(gmsky_protocol::TRI_STAIRS, 10.0, 12.0, false)).ramps_in_box([-136.0; 3], [136.0; 3]);
         assert_eq!((r.bottoms, r.bottoms_floating), (1, 2));
-        // Steps steeper than Source can walk (rise 15, run 6): no strips at all.
+        // Steps a little steeper than Source can walk (rise 14, run 12): strips at 45 degrees,
+        // each 2 below the next nose at its top (a lip Source steps up).
+        let r = store_with(&stairs_msg(gmsky_protocol::TRI_STAIRS, 14.0, 12.0, true)).ramps_in_box([-136.0; 3], [136.0; 3]);
+        assert_eq!(r.strips, 3);
+        assert!((r.steepest - (14.0f64 / 12.0).atan().to_degrees()).abs() < 1e-6, "steepest {}", r.steepest);
+        for t in &r.tris {
+            let (u, v) = ([t[3] - t[0], t[4] - t[1], t[5] - t[2]], [t[6] - t[0], t[7] - t[1], t[8] - t[2]]);
+            let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            let nz = n[2].abs() / (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            assert!(nz > 0.707 - 1e-6, "a strip steeper than 45 degrees: {t:?}");
+        }
+        // Much steeper (rise 15, run 6: a 9-unit lip): no strips at all.
         let r = store_with(&stairs_msg(gmsky_protocol::TRI_STAIRS, 15.0, 6.0, true)).ramps_in_box([-136.0; 3], [136.0; 3]);
         assert_eq!((r.strips, r.tris.len()), (0, 0));
         // Test 130 (big stone stairs: risers without a level top edge): only the treads are
@@ -1225,10 +1365,112 @@ mod tests {
         assert_eq!((p.noses, p.tris.len()), (0, 0));
     }
 
+    /// For working on a dump: what a walking player stands on around `at`, 4-unit cells, found by
+    /// walking out from the spot (each cell: the highest surface at most a step above its
+    /// neighbour). Map 1: r = ramp on top, S = stair surface with no ramp, o = other surface,
+    /// ! = a Skyrim surface more than half a unit above the ramp under it. Map 2: the biggest
+    /// height jump to a neighbouring cell beyond a 45-degree slope, in units (. = smooth).
+    fn print_walk_map(s: &Store, ramp: &[Tri], lo: [f64; 3], hi: [f64; 3], at: [f64; 3]) {
+        let e = walk(s, ramp, lo, hi, at, 4.0, 16);
+        println!("    walk map around the spot (x across, y up the page, 4 units a cell; @ = the spot):");
+        for j in (-16..=16).rev() {
+            let mut l1 = String::new();
+            let mut l2 = String::new();
+            for i in -16..=16 {
+                let Some(&(z, c)) = e.get(&(i, j)) else {
+                    l1.push(' ');
+                    l2.push(' ');
+                    continue;
+                };
+                l1.push(if (i, j) == (0, 0) { '@' } else { c });
+                let jump = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().filter_map(|(di, dj)| e.get(&(i + di, j + dj))).map(|n| (n.0 - z).abs() - 4.0).fold(0.0, f64::max);
+                l2.push(if jump < 1.0 { '.' } else if jump < 9.5 { char::from(b'0' + jump.round() as u8) } else { 'X' });
+            }
+            println!("      {l1}   {l2}");
+        }
+        if std::env::var("GMSKY_DUMP_HEIGHTS").is_ok() {
+            println!("    heights relative to the spot (4-unit cells, ±10 cells; lower case = ramp on top):");
+            for j in (-10..=10).rev() {
+                let row: String = (-10..=10).map(|i| match e.get(&(i, j)) {
+                    Some(&(z, c)) => format!("{:>4}{}", (z - at[2]).round() as i64, if c == 'r' || c == '!' { 'r' } else { ' ' }),
+                    None => "    _".to_string(),
+                }).collect();
+                println!("      {row}");
+            }
+        }
+    }
+
+    /// Bumps a walking player meets on the ramps within 48 units of `at`: neighbouring 1-unit
+    /// cells, both on a ramp or a stair surface (not the stairs' sides, where a ramp meets a wall
+    /// or the floor beside it), more than 2 units apart in height (steeper than 60 degrees).
+    /// Returns (bumps, of them 6+ units, of them within 24 units, cells walked).
+    fn bumps(s: &Store, ramp: &[Tri], lo: [f64; 3], hi: [f64; 3], at: [f64; 3]) -> (usize, usize, usize, usize) {
+        let e = walk(s, ramp, lo, hi, at, 1.0, 48);
+        let (mut n, mut big, mut near) = (0, 0, 0);
+        for (&(i, j), &(z, c)) in &e {
+            for (di, dj) in [(1, 0), (0, 1)] {
+                if let Some(&(z2, c2)) = e.get(&(i + di, j + dj)) {
+                    if (z2 - z).abs() > 2.0 && c != 'o' && c2 != 'o' {
+                        n += 1;
+                        near += (i * i + j * j < 24 * 24) as usize;
+                        if std::env::var("GMSKY_DUMP_BUMPS").is_ok() {
+                            println!("      bump at ({:.0}, {:.0}) {c}{c2}: {z:.1} -> {z2:.1}", at[0] + i as f64, at[1] + j as f64);
+                        }
+                        big += ((z2 - z).abs() >= 6.0) as usize;
+                    }
+                }
+            }
+        }
+        (n, big, near, e.len())
+    }
+
+    /// What a walking player stands on around `at`, cells of `c` units out to `n` cells, found by
+    /// walking out from the spot (each cell: the highest surface at most a step above its
+    /// neighbour): (height, r = ramp on top, S = stair surface with no ramp, o = other surface,
+    /// ! = a Skyrim surface more than half a unit above the ramp under it).
+    fn walk(s: &Store, ramp: &[Tri], lo: [f64; 3], hi: [f64; 3], at: [f64; 3], c: f64, n: i64) -> HashMap<(i64, i64), (f64, char)> {
+        let (stairs, others) = s.gather(lo, hi, 0.0);
+        let sky = Heights::new(stairs.iter().chain(others.iter()).copied().collect());
+        let stair = Heights::new(stairs.clone());
+        let rmp = Heights::new(ramp.iter().collect());
+        let mut e: HashMap<(i64, i64), (f64, char)> = HashMap::new();
+        let top = |x: f64, y: f64, zmin: f64, zmax: f64| {
+            let (zs, zr) = (sky.highest(x, y, zmin, zmax), rmp.highest(x, y, zmin, zmax));
+            let z = zs.into_iter().chain(zr).fold(None, |m: Option<f64>, z| Some(m.map_or(z, |m| m.max(z))))?;
+            let c = match (zs, zr) {
+                (Some(a), Some(r)) if a > r + 0.5 => '!',
+                (_, Some(_)) => 'r',
+                _ if stair.highest(x, y, z - 0.01, z + 0.01).is_some() => 'S',
+                _ => 'o',
+            };
+            Some((z, c))
+        };
+        let mut queue = std::collections::VecDeque::new();
+        if let Some(t) = top(at[0], at[1], at[2] - 60.0, at[2] + 2.0) {
+            e.insert((0, 0), t);
+            queue.push_back((0i64, 0i64));
+        }
+        while let Some((i, j)) = queue.pop_front() {
+            let z0 = e[&(i, j)].0;
+            for (di, dj) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let (a, b) = (i + di, j + dj);
+                if a.abs() > n || b.abs() > n || e.contains_key(&(a, b)) {
+                    continue;
+                }
+                if let Some(t) = top(at[0] + a as f64 * c, at[1] + b as f64 * c, z0 - 40.0, z0 + 18.0) {
+                    e.insert((a, b), t);
+                    queue.push_back((a, b));
+                }
+            }
+        }
+        e
+    }
+
     /// Test 132's dumps (logs/tris/*.txt, real Skyrim triangles; game data, so never in the repo):
     /// run by hand with GMSKY_DUMPS=<folder> and `--ignored --nocapture`. For each dump: the ramps
     /// made from it, the ramp check, and whether a ramp lies under the player's box at the spot the
-    /// dump was taken at (the dump box's middle across, 48 above its bottom).
+    /// dump was taken at (the dump box's middle across, 48 above its bottom), and the bumps a walking
+    /// player meets there (GMSKY_DUMP_MAP=<part of a name>: as maps too).
     #[test]
     #[ignore]
     fn ramps_on_real_dumps() {
@@ -1255,7 +1497,8 @@ mod tests {
                 msg[40 + i * 40 + 36..40 + i * 40 + 40].copy_from_slice(&f.to_le_bytes());
             }
             let s = store_with(&msg);
-            let r = s.ramps_in_box(lo, hi);
+            // Noses a step below the box: in the game the chunk below lays their strips.
+            let r = s.ramps_in_box([lo[0], lo[1], lo[2] - RISER_MAX], hi);
             let (px, py, pz) = ((lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, lo[2] + 48.0);
             let ramp: Vec<Tri> = r.tris.iter().filter_map(|t| Tri::new(*t)).collect();
             // Under the player's 32-unit box (centre, corners, edge middles), not just its centre.
@@ -1273,11 +1516,25 @@ mod tests {
                 let noses = find_noses(&stairs, &all, &mut NoseStats::default());
                 let up = pair_noses(&noses);
                 for (i, n) in noses.iter().enumerate() {
-                    if (n.mid[0] - px).abs() < 40.0 && (n.mid[1] - py).abs() < 40.0 {
+                    if (n.mid[0] - px).abs() < 70.0 && (n.mid[1] - py).abs() < 70.0 {
                         println!("    nose {i}: ({:.1}, {:.1}, {:.1}) - ({:.1}, {:.1}, {:.1}) -> {:?}", n.a[0], n.a[1], n.za, n.b[0], n.b[1], n.zb,
                             up[i].map(|(j, run)| format!("nose {j} run {run:.1}")).map_err(|e| UNPAIRED[e]));
                     }
                 }
+            }
+            if let Some(q) = std::env::var("GMSKY_PROBE").ok().filter(|_| std::env::var("GMSKY_DUMP_DETAIL").map_or(false, |d| path.to_string_lossy().contains(&d))) {
+                let q: Vec<f64> = q.split(',').map(|v| v.parse().unwrap()).collect();
+                for (k, t) in ramp.iter().enumerate() {
+                    let one = Heights::new(vec![t]);
+                    if let Some(z) = one.highest(q[0], q[1], -1e9, 1e9) {
+                        println!("    probe ({}, {}): ramp triangle {k} at {z:.1}: {:?}", q[0], q[1], t.v.map(|v| (v * 10.0).round() / 10.0));
+                    }
+                }
+            }
+            let (nb, big, near, cells) = bumps(&s, &ramp, lo, hi, [px, py, pz]);
+            println!("    bumps on ramps/stairs within 48 units (1-unit cells, over 2 units high, not at the sides): {nb} ({big} of 6+ units, {near} within 24 units) over {cells} cells walked");
+            if std::env::var("GMSKY_DUMP_MAP").map_or(false, |d| path.to_string_lossy().contains(&d)) {
+                print_walk_map(&s, &ramp, lo, hi, [px, py, pz]);
             }
             println!("    {}; stair triangles within 16 of the spot: {}", s.ramp_check([px - 48.0, py - 48.0, pz - 24.0], [px + 48.0, py + 48.0, pz + 40.0]), feet.0.len());
         }

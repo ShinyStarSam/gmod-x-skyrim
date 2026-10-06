@@ -2676,6 +2676,33 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
      (`ramps_on_real_dumps`, run by hand with `GMSKY_DUMPS=<folder>`) builds the ramps from each
      dump and reports whether a ramp lies under the player's box; the dumps stay in `build/`
      (game data, never in the repo).
+     *After test 133* (stone stairs work in game; the user dumped 5 rough spots, plus 10 STUCK
+     dumps): the offline test now also walks each dump like a player (from the spot, 1-unit
+     cells, each the highest surface within a step of its neighbour) and counts **bumps**: two
+     neighbouring cells on ramp or stair surfaces more than 2 units apart (the stairs' sides,
+     where a ramp meets a wall or the floor beside it, don't count). Four causes, each fixed:
+     1. *Slots at bends.* A curved flight's step edge is several straight pieces meeting at bends.
+        Each strip used to climb straight across to the next step's line, so neighbouring strips
+        left a slot at every bend (5-8 deep: "very bumpy"). Now pieces that share a corner cross
+        the step in the same direction there (the average of both pieces' uphill), and climb to
+        the step above's edge itself, bends included (the pieces joined end to end, up to 8).
+     2. *Middle pieces taken for the bottom step.* A step-edge piece no lower nose happened to
+        pair with got a strip down to the floor, straight through the steps below. Now a piece has
+        a step below it when a paired lower nose lies under it, side by side (the pair may go to
+        another piece of the same step edge).
+     3. *Stacked boxes.* Some steps are closed boxes; a box's bottom face is flat and its edge
+        lies right under the top face's edge, so it was taken for a nose and left a 6.6-unit wall
+        at the top of a flight ("small lump at end"). A nose now also needs nothing within step
+        height above it just inside (0.5 units in).
+     4. *Steps just too steep.* A step a little steeper than Source walks (45.6 degrees) got no
+        strip, and the step above then got a bottom strip down through it. Now such a step gets a
+        45-degree strip whose top stops short of the step above by a lip of at most 3 units
+        (Source steps up a lip like a small step); steeper still: no partner, as before.
+     Shared bottom corners get one bottom point, worked out from the corner alone (the same in
+     neighbouring chunks). Near the user's 15 spots the bumps went from 40-120 each (committed
+     test 133 code) to 0 (one dump 4, one 1; both at a flight's side); what is left is at
+     flights' sides and ends (steps of different lengths, a fan-shaped bottom step), away from
+     where the player walks up. Test 132's dumps also improved (e.g. 527 to 479, 280 to 190).
   **Differs from SkyCraft:** SkyCraft makes no ramps. It uses Skyrim's own invisible ramps (few:
   test 125 found 34 bodies) as floor only, and its own collider walks stairs (small footprint).
   The material read is SkyCraft's code used for a new purpose. **Not known:** whether Garry's Mod

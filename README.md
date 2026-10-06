@@ -140,9 +140,13 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
 - Ending noclip more than ~2,100 Garry's Mod units under Skyrim's ground holds you in place;
   press V again.
 - The ground is now Garry's Mod physics (`gmsky_ground physics`, the default since test 124):
-  props land on it (tests 118-123). Not yet right: the player gets stuck on stairs and sometimes
-  inside the ground (test 123; a stair-ramp fix is built, not tested in game). `gmsky_ground
-  shapes` switches back to the older traced ground (props fall through it).
+  props land on it (tests 118-123). `gmsky_ground shapes` switches back to the older traced
+  ground (props fall through it).
+- Stairs: invisible ramps are laid over Skyrim's staircases (found by Skyrim's stair materials),
+  so the player walks up and down smoothly; the big stone stairs work (test 133). Not yet right:
+  props, grenades and bullets hit the ramps too (they should be for the player only); rough spots
+  on curved flights, stacked-box steps and steps just too steep to walk are fixed but **not
+  tested in game** (checked offline on test 133's triangle dumps).
 - Everything else in [docs/DESIGN.md](docs/DESIGN.md) §12.
 
 ## Credits
