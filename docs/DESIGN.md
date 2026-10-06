@@ -2579,8 +2579,8 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
   count "propped on step edges" as standing: the box rests on Skyrim's ground and walkable Skyrim
   ground is within the step height under the small footprint. **Differs from SkyCraft:** its body
   may overlap steps below step height; our box can't, so it stands on the edges instead.
-- **S2i. Stairs as player-only ramps (PROPOSED 2026-10-06 after test 127, waiting for the
-  user).** User after test 127: S2h's rules don't feel right; "if we can detect where stairs are,
+- **S2i. Stairs as player-only ramps (proposed 2026-10-06 after test 127; S2i-1 approved and
+  built 2026-10-06, not tested in game).** User after test 127: S2h's rules don't feel right; "if we can detect where stairs are,
   can we generate ramp-like player only collision shapes? That way it'll be smooth." Test 127:
   S2h's step-up still almost never succeeded. **Finding stairs:** Skyrim gives every collision
   triangle a material, and stairs have their own (`StoneStairs`, `WoodStairs`, `SnowStairs`,
@@ -2594,6 +2594,14 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
      player. *Test:* the same stairs; *pass:* the stuck spots have stair triangles. If they
      don't, plan B is finding stairs by shape (a run of steep risers 2-18 units high with
      flat treads between).
+     *As built:* `skse/src/Collision.cpp` `FlagsFor`: SkyCraft's material read (the body's shape
+     at the key of its first container level; a MOPP tree's mesh has one material per triangle),
+     for every triangle, box, capsule and hull. Stair materials: the six above plus
+     `GlassStairs`. Unlike SkyCraft, the whole read (its `userData` too) is inside the fault
+     guard, so a bad read loses only the mark. `skyrim.log` COLLISION line: "stair materials: N
+     triangles sent, N material reads faulted"; each stair material logged once when first seen.
+     Garry's Mod: the `shapes:` status line counts "stair material" triangles stored; each STUCK
+     line counts stair-material triangles within 24 units (height range, how many flat / steep).
   2. **S2i-2, ramps in Garry's Mod:** a stair riser's top edge is a step's "nose". Each nose is
      joined to the next nose uphill (up to 48 units away, 2-18 units higher) by a flat strip, so
      the ramp touches every step's nose like a board laid on the stairs; the lowest nose's

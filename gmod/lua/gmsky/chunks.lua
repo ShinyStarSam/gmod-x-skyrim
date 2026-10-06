@@ -446,15 +446,24 @@ if SERVER then
 	end
 
 	-- Skyrim's triangles around the player, sorted into kinds, heights relative to the feet.
+	-- The flags (GMSKY_TRI_*): 1 = one of Skyrim's stair ramps, 2 = a stair material (S2i-1;
+	-- counted on their own, whatever their kind).
 	local function TrisText(ply, a)
 		if not gmsky.TrisInfo then return "no gmsky.TrisInfo" end
 		local p, mins, maxs = ply:GetPos() - a, ply:OBBMins(), ply:OBBMaxs()
 		local lo, hi = p + mins - Vector(24, 24, 8), p + maxs + Vector(24, 24, 8)
 		local list, n = gmsky.TrisInfo(lo.x, lo.y, lo.z, hi.x, hi.y, hi.z, 4000)
 		local step, head = ply:GetStepSize(), maxs.z
-		local k = { ramps = 0, rampLo = math.huge, rampHi = -math.huge, walls = 0, highWalls = 0, floors = 0, steps = 0, ledges = 0, ceil = 0, ceilLo = math.huge }
+		local k = { ramps = 0, rampLo = math.huge, rampHi = -math.huge, walls = 0, highWalls = 0, floors = 0, steps = 0, ledges = 0, ceil = 0, ceilLo = math.huge,
+			stairs = 0, stairLo = math.huge, stairHi = -math.huge, stairFloors = 0, stairWalls = 0 }
 		for i = 1, n * 6, 6 do
-			local zlo, zhi, nz, ramp = list[i] - p.z, list[i + 1] - p.z, list[i + 4], list[i + 5] == 1
+			local zlo, zhi, nz, flags = list[i] - p.z, list[i + 1] - p.z, list[i + 4], list[i + 5]
+			local ramp = bit.band(flags, 1) ~= 0
+			if bit.band(flags, 2) ~= 0 then
+				k.stairs = k.stairs + 1
+				k.stairLo, k.stairHi = math.min(k.stairLo, zlo), math.max(k.stairHi, zhi)
+				if nz >= 0.7 then k.stairFloors = k.stairFloors + 1 elseif nz > -0.7 then k.stairWalls = k.stairWalls + 1 end
+			end
 			if ramp then
 				k.ramps = k.ramps + 1
 				k.rampLo, k.rampHi = math.min(k.rampLo, zlo), math.max(k.rampHi, zhi)
@@ -469,8 +478,9 @@ if SERVER then
 				if zhi > step and zlo < head then k.highWalls = k.highWalls + 1 end
 			end
 		end
-		return string.format("Skyrim triangles within 24 units: %d; stair ramps %d%s; walls %d (%d from above step height %.0f to head height %.0f); floors %d (%d between 0.5 and step height above the feet, %d higher but below the head); ceilings %d%s",
-			n, k.ramps, k.ramps > 0 and string.format(" (z %.0f to %.0f above the feet)", k.rampLo, k.rampHi) or "", k.walls, k.highWalls, step, head,
+		return string.format("Skyrim triangles within 24 units: %d; stair ramps %d%s; stair material %d%s; walls %d (%d from above step height %.0f to head height %.0f); floors %d (%d between 0.5 and step height above the feet, %d higher but below the head); ceilings %d%s",
+			n, k.ramps, k.ramps > 0 and string.format(" (z %.0f to %.0f above the feet)", k.rampLo, k.rampHi) or "",
+			k.stairs, k.stairs > 0 and string.format(" (z %.0f to %.0f above the feet; %d flat, %d steep)", k.stairLo, k.stairHi, k.stairFloors, k.stairWalls) or "", k.walls, k.highWalls, step, head,
 			k.floors, k.steps, k.ledges, k.ceil, k.ceil > 0 and string.format(" (lowest %.0f above the feet)", k.ceilLo) or "")
 	end
 

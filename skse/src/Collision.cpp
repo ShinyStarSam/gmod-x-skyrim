@@ -5,8 +5,9 @@
 // trees, lists, meshes, triangles, boxes, capsules, convex hulls, transforms; offsets as SkyCraft
 // found them on 1.7.104), the guarded reads, the triangles made from boxes / capsules / hulls,
 // the 1 s refresh near the player and the per-frame limits. Changed for Garry's Mod: everything
-// stays Z-up in Skyrim units (no Minecraft axis swap), only triangles are sent (no voxels,
-// digging or materials), regions are ordered by where the player is going (velocity look-ahead),
+// stays Z-up in Skyrim units (no Minecraft axis swap), only triangles are sent (no voxels or
+// digging; of the materials only "is it a stair material", S2i-1, read with SkyCraft's
+// Dig.cpp ShapeMaterial / GuardedMaterial), regions are ordered by where the player is going (velocity look-ahead),
 // and the triangles are converted to Garry's Mod units relative to the anchor like the grids.
 #include "Collision.h"
 
@@ -55,19 +56,19 @@ namespace gmsky::Collision
 			float c[3];
 			float axis[3][3];
 			float half[3];
-			bool helper{ false };  // part of a stair ramp (its triangles get GMSKY_TRI_STAIR_HELPER)
+			uint32_t flags{ 0 };  // GMSKY_TRI_* for the triangles made from it
 		};
 		struct Capsule
 		{
 			float a[3], b[3];
 			float r;
-			bool helper{ false };
+			uint32_t flags{ 0 };
 		};
 		struct Convex
 		{
 			std::vector<std::array<float, 4>> planes;  // n.p + d <= 0 inside, Skyrim units
 			float lo[3], hi[3];
-			bool helper{ false };
+			uint32_t flags{ 0 };
 		};
 		struct Job
 		{
@@ -80,6 +81,7 @@ namespace gmsky::Collision
 			std::vector<Capsule> capsules;
 			std::vector<Convex> convexes;
 			bool helper{ false };  // collecting a stair helper body right now
+			const RE::hkpShape* top{ nullptr };  // the body's own shape (its material, S2i-1)
 		};
 		struct Body
 		{
@@ -248,13 +250,78 @@ namespace gmsky::Collision
 		uint32_t g_secRampBodies = 0, g_secRampChildren = 0, g_secFilterFaults = 0;
 		std::unordered_set<int> g_loggedChildLayers;
 		std::atomic<uint64_t> g_wRampTris{ 0 };
+		// S2i-1: triangles sent with a stair material, material reads that faulted, and every stair
+		// material seen (logged once each).
+		std::atomic<uint64_t> g_wStairTris{ 0 };
+		uint32_t g_secMaterialFaults = 0;
+		std::unordered_set<uint32_t> g_loggedStairMaterials;
 		std::atomic<uint64_t> g_wTris{ 0 }, g_wBytes{ 0 }, g_wRegions{ 0 }, g_wFullWaits{ 0 }, g_wDropped{ 0 }, g_wUs{ 0 };
 		std::atomic<int64_t> g_playerRegionTris{ -1 };
 		std::atomic<int> g_prx{ INT_MIN }, g_pry{ INT_MIN }, g_prz{ INT_MIN };
 
 		float SkyPerHavok() { return RE::bhkWorld::GetWorldScaleInverse(); }
 
-		void Collect(const RE::hkpShape* a_shape, const float* a_xf, const float a_lo[3], const float a_hi[3], Job& a_job, int a_depth);
+		void Collect(const RE::hkpShape* a_shape, const float* a_xf, const float a_lo[3], const float a_hi[3], Job& a_job, int a_depth, RE::hkpShapeKey a_key);
+
+		// ---- S2i-1: stair materials ----
+		// Every Havok triangle has a Skyrim material; stairs have their own. Adapted from SkyCraft
+		// (MIT) Dig.cpp ShapeMaterial / GuardedMaterial: the material of the body's shape at the key
+		// of its first container level (a MOPP tree's mesh has one material per triangle). Unlike
+		// SkyCraft the whole read is inside the fault guard (userData too): a bad read loses only the
+		// mark, never the body (test 124's lesson).
+		const char* StairMaterialName(RE::MATERIAL_ID a_id)
+		{
+			using M = RE::MATERIAL_ID;
+			switch (a_id) {
+			case M::kStoneStairs: return "StoneStairs";
+			case M::kWoodStairs: return "WoodStairs";
+			case M::kSnowStairs: return "SnowStairs";
+			case M::kGlassStairs: return "GlassStairs";
+			case M::kStoneStairsBroken: return "StoneStairsBroken";
+			case M::kStoneAsStairs: return "StoneAsStairs";
+			case M::kWoodAsStairs: return "WoodAsStairs";
+			default: return nullptr;
+			}
+		}
+
+		bool GuardedShapeMaterial(const RE::hkpShape* a_top, RE::hkpShapeKey a_key, RE::MATERIAL_ID& a_out)
+		{
+			__try {
+				const RE::hkpShape* shape = a_top;
+				if (shape && shape->type == RE::hkpShapeType::kMOPP) {
+					if (const auto* child = static_cast<const RE::hkpMoppBvTreeShape*>(shape)->child.childShape; child && child->userData) {
+						shape = child;
+					}
+				}
+				if (!shape || !shape->userData) {
+					a_out = a_top && a_top->userData ? a_top->userData->materialID : RE::MATERIAL_ID::kNone;
+					return true;
+				}
+				const auto id = shape->userData->GetMaterialID(a_key);
+				a_out = id != RE::MATERIAL_ID::kNone ? id : shape->userData->materialID;
+				return true;
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				return false;
+			}
+		}
+
+		// GMSKY_TRI_* for a piece of the body being collected (a_key as in SkyCraft's FlagsFor).
+		uint32_t FlagsFor(const Job& a_job, RE::hkpShapeKey a_key)
+		{
+			uint32_t flags = a_job.helper ? GMSKY_TRI_STAIR_HELPER : 0;
+			RE::MATERIAL_ID id = RE::MATERIAL_ID::kNone;
+			if (!GuardedShapeMaterial(a_job.top, a_key, id)) {
+				++g_secMaterialFaults;
+				return flags;
+			}
+			if (const char* name = StairMaterialName(id)) {
+				flags |= GMSKY_TRI_STAIRS;
+				if (g_loggedStairMaterials.insert(static_cast<uint32_t>(id)).second) {
+					logger::info("COLLISION stair material seen: {} ({})", name, static_cast<uint32_t>(id));
+				}
+			}
+			return flags;
+		}
 
 		// A container's child can carry its own layer (Havok's per-key filter info), e.g. a stair ramp
 		// inside a building's mesh (S2f; SkyCraft reads only the whole body's layer). Marks the job
@@ -296,7 +363,7 @@ namespace gmsky::Collision
 			return was;
 		}
 
-		void EmitAabbFallback(const RE::hkpShape* a_shape, const float* a_xf, Job& a_job)
+		void EmitAabbFallback(const RE::hkpShape* a_shape, const float* a_xf, Job& a_job, RE::hkpShapeKey a_key)
 		{
 			RE::hkAabb box;
 			a_shape->GetAabbImpl(*reinterpret_cast<const RE::hkTransform*>(a_xf), 0.0f, box);
@@ -306,7 +373,7 @@ namespace gmsky::Collision
 				return;
 			}
 			Obb obb{};
-			obb.helper = a_job.helper;
+			obb.flags = FlagsFor(a_job, a_key);
 			for (int i = 0; i < 3; ++i) {
 				obb.c[i] = (lo[i] + hi[i]) * 0.5f;
 				obb.half[i] = (hi[i] - lo[i]) * 0.5f;
@@ -316,7 +383,7 @@ namespace gmsky::Collision
 			a_job.boxes.push_back(obb);
 		}
 
-		void Collect(const RE::hkpShape* a_shape, const float* a_xf, const float a_lo[3], const float a_hi[3], Job& a_job, int a_depth)
+		void Collect(const RE::hkpShape* a_shape, const float* a_xf, const float a_lo[3], const float a_hi[3], Job& a_job, int a_depth, RE::hkpShapeKey a_key)
 		{
 			if (!a_shape || a_depth > 8 || a_job.tris.size() > kMaxTris) {
 				return;
@@ -354,7 +421,7 @@ namespace gmsky::Collision
 					for (uint32_t i = 0; i < found; ++i) {
 						RE::hkpShapeBuffer buffer;
 						const bool was = ChildRamp(container, keys[i], a_job);
-						Collect(container->GetChildShape(keys[i], buffer), a_xf, a_lo, a_hi, a_job, a_depth + 1);
+						Collect(container->GetChildShape(keys[i], buffer), a_xf, a_lo, a_hi, a_job, a_depth + 1, a_depth == 0 ? keys[i] : a_key);
 						a_job.helper = was;
 					}
 					return;
@@ -368,7 +435,7 @@ namespace gmsky::Collision
 				{
 					const auto* container = a_shape->GetContainer();
 					if (!container) {
-						EmitAabbFallback(a_shape, a_xf, a_job);
+						EmitAabbFallback(a_shape, a_xf, a_job, a_key);
 						return;
 					}
 					int guard = 0;
@@ -384,7 +451,7 @@ namespace gmsky::Collision
 						HkAabbToSky(box, k, lo, hi);
 						if (Overlaps(lo, hi, a_lo, a_hi)) {
 							const bool was = ChildRamp(container, key, a_job);
-							Collect(child, a_xf, a_lo, a_hi, a_job, a_depth + 1);
+							Collect(child, a_xf, a_lo, a_hi, a_job, a_depth + 1, a_depth == 0 ? key : a_key);
 							a_job.helper = was;
 						}
 					}
@@ -399,7 +466,7 @@ namespace gmsky::Collision
 						HkToSky(w, k, tri.v + v * 3);
 					}
 					if (Finite(tri.v, 9)) {
-						tri.flags = a_job.helper ? GMSKY_TRI_STAIR_HELPER : 0;
+						tri.flags = FlagsFor(a_job, a_key);
 						a_job.tris.push_back(tri);
 					}
 					return;
@@ -409,7 +476,7 @@ namespace gmsky::Collision
 					const float* half = Vec(a_shape, 0x30);
 					const float radius = Field<float>(a_shape, 0x20);
 					Obb obb{};
-					obb.helper = a_job.helper;
+					obb.flags = FlagsFor(a_job, a_key);
 					const float zero[3] = { 0, 0, 0 };
 					float centre[3];
 					XfPoint(a_xf, zero, centre);
@@ -428,7 +495,7 @@ namespace gmsky::Collision
 				{
 					const float radius = Field<float>(a_shape, 0x20);
 					Capsule cap{};
-					cap.helper = a_job.helper;
+					cap.flags = FlagsFor(a_job, a_key);
 					float w[3];
 					const float zero[3] = { 0, 0, 0 };
 					XfPoint(a_xf, type == T::kCapsule ? Vec(a_shape, 0x30) : zero, w);
@@ -446,11 +513,11 @@ namespace gmsky::Collision
 					const auto& planes = *reinterpret_cast<const RE::hkArray<RE::hkVector4>*>(reinterpret_cast<const uint8_t*>(a_shape) + 0x78);
 					const float radius = Field<float>(a_shape, 0x20);
 					if (planes.size() <= 0 || planes.size() > 512) {
-						EmitAabbFallback(a_shape, a_xf, a_job);
+						EmitAabbFallback(a_shape, a_xf, a_job, a_key);
 						return;
 					}
 					Convex cvx{};
-					cvx.helper = a_job.helper;
+					cvx.flags = FlagsFor(a_job, a_key);
 					RE::hkAabb box;
 					a_shape->GetAabbImpl(*reinterpret_cast<const RE::hkTransform*>(a_xf), 0.0f, box);
 					HkAabbToSky(box, k, cvx.lo, cvx.hi);
@@ -478,12 +545,12 @@ namespace gmsky::Collision
 						std::memcpy(local + 12, Vec(a_shape, 0x40), sizeof(float) * 3);
 					}
 					if (!child || !XfLooksValid(local)) {
-						EmitAabbFallback(a_shape, a_xf, a_job);
+						EmitAabbFallback(a_shape, a_xf, a_job, a_key);
 						return;
 					}
 					alignas(16) float composed[16];
 					XfCompose(a_xf, local, composed);
-					Collect(child, composed, a_lo, a_hi, a_job, a_depth + 1);
+					Collect(child, composed, a_lo, a_hi, a_job, a_depth + 1, a_key);
 					return;
 				}
 			case T::kTransform:
@@ -492,12 +559,12 @@ namespace gmsky::Collision
 					alignas(16) float local[16];
 					std::memcpy(local, Vec(a_shape, 0x50), sizeof(local));
 					if (!child || !XfLooksValid(local)) {
-						EmitAabbFallback(a_shape, a_xf, a_job);
+						EmitAabbFallback(a_shape, a_xf, a_job, a_key);
 						return;
 					}
 					alignas(16) float composed[16];
 					XfCompose(a_xf, local, composed);
-					Collect(child, composed, a_lo, a_hi, a_job, a_depth + 1);
+					Collect(child, composed, a_lo, a_hi, a_job, a_depth + 1, a_key);
 					return;
 				}
 			default:
@@ -505,7 +572,7 @@ namespace gmsky::Collision
 					logger::info("COLLISION shape type {} handled as its bounding box (convex={})", static_cast<int>(type), a_shape->IsConvex());
 				}
 				if (a_shape->IsConvex()) {
-					EmitAabbFallback(a_shape, a_xf, a_job);
+					EmitAabbFallback(a_shape, a_xf, a_job, a_key);
 				}
 				return;
 			}
@@ -567,13 +634,14 @@ namespace gmsky::Collision
 			const float lo[3] = { a_rx * kRegionSize - kQueryMargin, a_ry * kRegionSize - kQueryMargin, a_rz * kRegionSize - kQueryMargin };
 			const float hi[3] = { (a_rx + 1) * kRegionSize + kQueryMargin, (a_ry + 1) * kRegionSize + kQueryMargin, (a_rz + 1) * kRegionSize + kQueryMargin };
 			static constexpr CollectFn collect = [](const RE::hkpShape* a_shape, const float* a_xf, const float* a_lo, const float* a_hi, void* a_job) {
-				Collect(a_shape, a_xf, a_lo, a_hi, *static_cast<Job*>(a_job), 0);
+				Collect(a_shape, a_xf, a_lo, a_hi, *static_cast<Job*>(a_job), 0, RE::HK_INVALID_SHAPE_KEY);
 			};
 			for (const auto& body : g_bodies) {
 				if (!Overlaps(body.lo, body.hi, lo, hi)) {
 					continue;
 				}
 				job.helper = body.helper;
+				job.top = body.shape;
 				g_secRampBodies += body.helper;
 				if (!GuardedCall(collect, body.shape, body.xf, lo, hi, &job)) {
 					++g_secFaults;
@@ -617,11 +685,11 @@ namespace gmsky::Collision
 				quad(corner[1], corner[3], corner[7], corner[5]);
 			};
 			for (const auto& b : a_src.boxes) {
-				flags = b.helper ? GMSKY_TRI_STAIR_HELPER : 0;
+				flags = b.flags;
 				box(b.c, b.axis, b.half);
 			}
 			for (const auto& cap : a_src.capsules) {
-				flags = cap.helper ? GMSKY_TRI_STAIR_HELPER : 0;
+				flags = cap.flags;
 				float ab[3];
 				Sub(cap.b, cap.a, ab);
 				const float len = std::sqrt(Dot(ab, ab));
@@ -646,7 +714,7 @@ namespace gmsky::Collision
 			}
 			// Convex hull from planes: clip a big square on each plane by all the other planes.
 			for (const auto& cvx : a_src.convexes) {
-				flags = cvx.helper ? GMSKY_TRI_STAIR_HELPER : 0;
+				flags = cvx.flags;
 				const float ex = cvx.hi[0] - cvx.lo[0], ey = cvx.hi[1] - cvx.lo[1], ez = cvx.hi[2] - cvx.lo[2];
 				const float diag = std::sqrt(ex * ex + ey * ey + ez * ez) + 1.0f;
 				const float mid[3] = { (cvx.lo[0] + cvx.hi[0]) * 0.5f, (cvx.lo[1] + cvx.hi[1]) * 0.5f, (cvx.lo[2] + cvx.hi[2]) * 0.5f };
@@ -744,6 +812,7 @@ namespace gmsky::Collision
 				o.flags = t.flags;
 				out.push_back(o);
 				g_wRampTris += (t.flags & GMSKY_TRI_STAIR_HELPER) != 0;
+				g_wStairTris += (t.flags & GMSKY_TRI_STAIRS) != 0;
 				if (out.size() >= kMaxTris) {
 					break;
 				}
@@ -984,13 +1053,13 @@ namespace gmsky::Collision
 		}
 		const int window = (2 * kRadius + 1) * (2 * kRadius + 1) * (kBelow + kAbove + 1);
 		const int64_t here = g_playerRegionTris.load();
-		logger::info("COLLISION {}: harvested {} regions in {:.1f} ms over {} frames (slowest frame {:.2f} ms, gathering bodies {:.1f} ms, {} bodies), {} faults | sent {} regions, {} triangles, {:.0f} KB, worker {:.1f} ms, {} queued, ring {:.0f} KB behind, {} full waits, {} dropped | stair ramps: {} bodies, {} container children, {} triangles sent, {} child layer reads faulted | window {}/{} regions sent; player's region ({}, {}, {}): {}",
+		logger::info("COLLISION {}: harvested {} regions in {:.1f} ms over {} frames (slowest frame {:.2f} ms, gathering bodies {:.1f} ms, {} bodies), {} faults | sent {} regions, {} triangles, {:.0f} KB, worker {:.1f} ms, {} queued, ring {:.0f} KB behind, {} full waits, {} dropped | stair ramps: {} bodies, {} container children, {} triangles sent, {} child layer reads faulted | stair materials: {} triangles sent, {} material reads faulted | window {}/{} regions sent; player's region ({}, {}, {}): {}",
 			g_streaming ? fmt::format("epoch {}", g_colEpoch.load()) : "stopped (" + g_stopReason + ")",
 			g_secRegions, g_secHarvestMs, g_secFrames, g_worstFrameMs, g_secGatherMs, g_lastBodies, g_secFaults,
 			g_wRegions.exchange(0), g_wTris.exchange(0), g_wBytes.exchange(0) / 1024.0, g_wUs.exchange(0) / 1000.0, queued,
 			Link::Get().RingPending() / 1024.0, g_wFullWaits.exchange(0), g_wDropped.exchange(0),
-			g_secRampBodies, g_secRampChildren, g_wRampTris.exchange(0), g_secFilterFaults, known, window, prx, pry, prz, here < 0 ? std::string("not sent yet") : fmt::format("{} triangles at its last send", here));
-		g_secRegions = g_secFaults = g_secFrames = g_secRampBodies = g_secRampChildren = g_secFilterFaults = 0;
+			g_secRampBodies, g_secRampChildren, g_wRampTris.exchange(0), g_secFilterFaults, g_wStairTris.exchange(0), g_secMaterialFaults, known, window, prx, pry, prz, here < 0 ? std::string("not sent yet") : fmt::format("{} triangles at its last send", here));
+		g_secRegions = g_secFaults = g_secFrames = g_secRampBodies = g_secRampChildren = g_secFilterFaults = g_secMaterialFaults = 0;
 		g_secHarvestMs = g_secGatherMs = g_worstFrameMs = 0.0;
 	}
 }

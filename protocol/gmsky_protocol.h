@@ -401,6 +401,7 @@ typedef struct GmskyColRegion {
 } GmskyColRegion;
 
 #define GMSKY_TRI_STAIR_HELPER 0x1u  // one of Skyrim's invisible ramps over stairs
+#define GMSKY_TRI_STAIRS 0x2u        // S2i-1: the triangle's Skyrim material is a stair material
 
 typedef struct GmskyColTri {
     float v[9];       // three corners, Garry's Mod units relative to the anchor

@@ -1975,3 +1975,22 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 **Changed:** `window.rs`: an ended Skyrim is never watched again (unit test extended); `end_process` ends Garry's Mod's own process. `lib.rs`: `gmsky.EndProcess()`. `server.lua`: if Garry's Mod is still running 5 s after the close message, the process is ended (logged first). Garry's Mod's own shutdown is skipped then: settings typed in its console that session may not be saved. Lua can't run `exit` (Garry's Mod's blocked-commands list, wiki "Blocked ConCommands").
 **Tested how:** `cargo test --release -p gmsky-module skyrim_exited` passed; `cargo build --release`; harness PASSED. **Not tested in game.**
 **Next:** stairs: S2i (DESIGN.md), waiting for the user.
+
+## 2026-10-06 S2i-1: stair triangles are found by Skyrim's material and logged (built; not tested in game)
+
+**Changed:** `protocol/gmsky_protocol.h` + `protocol/src/lib.rs`: new triangle flag `GMSKY_TRI_STAIRS` (0x2). `skse/src/Collision.cpp`: every triangle (and every box, capsule and hull turned into triangles) gets its Skyrim material read the way SkyCraft reads it (`Dig.cpp` `ShapeMaterial` / `GuardedMaterial`, `Collision.cpp` `FlagsFor`: the body's shape at the key of its first container level); a stair material (`StoneStairs`, `WoodStairs`, `SnowStairs`, `GlassStairs`, `StoneStairsBroken`, `StoneAsStairs`, `WoodAsStairs`) sets the flag. The COLLISION line in `skyrim.log` adds "stair materials: N triangles sent, N material reads faulted"; each stair material is logged once when first seen. `gmod/module/src/shapes.rs`: the store keeps the whole flags word (was only "ramp yes/no"), counts stair-material triangles; `gmsky.TrisInfo` returns the flags. `lib.rs`: `shapes:` status line "(N stair helper, N stair material) stored". `gmod/lua/gmsky/chunks.lua`: every STUCK line adds "stair material N (z lo to hi above the feet; N flat, N steep)". THIRD-PARTY-NOTICES credit. DESIGN.md S2i *as built*.
+**Why:** S2i step 1 (DESIGN.md): before building ramps, find out whether Skyrim's stairs can be found by material at all.
+**Differs from SkyCraft:** SkyCraft reads materials for digging (which block a triangle turns into); here only "is it a stair material". SkyCraft's read is guarded only around `GetMaterialID`; ours guards the whole read (test 124's lesson: a fault must never lose the body).
+**Tested how:** `cmake --build --preset release` in `skse/` (no warnings; copied into Skyrim's `Data\SKSE\Plugins`); `cargo test --release -p gmsky-module tris_info` (test extended: both flags kept, counted): passed; `cargo test -p gmsky-protocol`: 12 passed; `cargo build --release`; `gmod_harness.exe`: HARNESS PASSED (the STUCK line is not exercised there: no physics). **Not tested in game.** Not sure: that stair triangles carry a stair material (the in-game test answers it); that reading the material for every triangle is cheap enough (harvest time is in the COLLISION line, compare with test 127).
+**Next:** in-game test on the same stairs, then S2i-2 if the stuck spots have stair-material triangles, else plan B (find stairs by shape).
+
+## 2026-10-06 In-game test 128 (S2i-1): Skyrim's stairs do carry stair materials; no ramps yet (expected)
+
+**Logs:** `build/logs-ingame-test-128/`. No crash.
+**Tested how:** user walked stairs. User: "the ramps were not there or were not smooth enough to be considered ramps". S2i-1 builds no ramps (logging only; ramps are S2i-2), so that is expected.
+**Result:**
+- `skyrim.log`: four stair materials seen: StoneStairs, WoodStairs, StoneStairsBroken, StoneAsStairs. Stair-material triangles sent nearly every second (typically 100-1,000 a second while streaming), **0 material reads faulted**.
+- Cost: harvest 0.140 ms per region (test 127: 0.158), so reading every triangle's material costs nothing measurable.
+- Garry's Mod: **0 STUCK readings** this run, so the pass check ("the stuck spots have stair triangles") could not be made. The S2h stairs rules (still on) stepped a few times (up to 11.6 units).
+- The `shapes:` status line with the stair-material count is not printed in physics mode, so Garry's Mod's stored count is not in the log (not checked).
+**Conclusion:** finding stairs by material works where Skyrim uses a stair material. **Not known:** whether every staircase does.

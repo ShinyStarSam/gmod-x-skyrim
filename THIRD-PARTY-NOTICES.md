@@ -18,7 +18,9 @@ memory) and adapts parts of its Skyrim plugin. Thank you to chasmlol.
     land rescue (from SkyCraft's `DigPhysics.cpp`).
   - `skse/src/Collision.cpp`: streaming Skyrim's Havok collision around the player region by
     region (layer list, shape decoding and the offsets SkyCraft found, guarded reads, triangles
-    from boxes / capsules / convex hulls, refresh near the player, per-frame limits).
+    from boxes / capsules / convex hulls, refresh near the player, per-frame limits); and each
+    triangle's Skyrim material at its key (SkyCraft's `Dig.cpp` `ShapeMaterial` /
+    `GuardedMaterial` and `Collision.cpp` `FlagsFor`), used here to mark stair triangles (S2i-1).
   - `skse/src/Link.cpp` `RingWrite`, `protocol/src/shm.rs` `ring_write` / `ring_read`,
     `protocol/gmsky_protocol.h` "Collision ring": the byte ring with pad messages.
   - `gmod/module/src/shapes.rs`, `gmod/lua/gmsky/field.lua`: the idea of feeding Skyrim's exact

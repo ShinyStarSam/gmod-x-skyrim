@@ -1015,8 +1015,8 @@ unsafe extern "C" fn l_tris_info(l: *mut State) -> c_int {
         });
         (a.createtable)(l, (tris.len() * 6) as c_int, 0);
         let mut i = 1;
-        for (lo, hi, nv, helper) in &tris {
-            for v in [*lo, *hi, nv[0], nv[1], nv[2], *helper as u8 as f64] {
+        for (lo, hi, nv, flags) in &tris {
+            for v in [*lo, *hi, nv[0], nv[1], nv[2], *flags as f64] {
                 (a.pushnumber)(l, v);
                 (a.rawseti)(l, -2, i);
                 i += 1;
@@ -1122,8 +1122,8 @@ unsafe extern "C" fn l_shapes_status(l: *mut State) -> c_int {
                 },
                 None => String::new(),
             };
-            let line = format!("shapes: {} regions, {} triangles ({} stair helper) stored, collision epoch {} origin epoch {}{} | in: {} messages, {} regions, {} triangles, {:.0} KB, {} ignored, {} evicted, ring {:.0} KB behind | sweeps {} hits {} triangles tested {} Rust {:.2} ms (slowest {:.0} us)",
-                st.regions(), st.tris(), st.stair_helpers(), st.col_epoch, st.origin_epoch, here,
+            let line = format!("shapes: {} regions, {} triangles ({} stair helper, {} stair material) stored, collision epoch {} origin epoch {}{} | in: {} messages, {} regions, {} triangles, {:.0} KB, {} ignored, {} evicted, ring {:.0} KB behind | sweeps {} hits {} triangles tested {} Rust {:.2} ms (slowest {:.0} us)",
+                st.regions(), st.tris(), st.stair_helpers(), st.stairs(), st.col_epoch, st.origin_epoch, here,
                 s.messages, s.regions_in, s.tris_in, s.bytes as f64 / 1024.0, s.ignored, s.evicted, pending as f64 / 1024.0,
                 s.sweeps, s.hits, s.tested, s.us / 1000.0, s.worst_us);
             if reset {

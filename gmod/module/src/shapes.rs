@@ -29,8 +29,9 @@ struct Tri {
     n: [f64; 3],
     lo: [f64; 3],
     hi: [f64; 3],
-    /// One of Skyrim's invisible stair ramps (collision layer kStairHelper).
-    helper: bool,
+    /// GMSKY_TRI_* as Skyrim sent them: one of its invisible stair ramps (collision layer
+    /// kStairHelper), a stair material (S2i-1).
+    flags: u32,
 }
 
 impl Tri {
@@ -48,7 +49,7 @@ impl Tri {
             lo[k] = v[k].min(v[3 + k]).min(v[6 + k]);
             hi[k] = v[k].max(v[3 + k]).max(v[6 + k]);
         }
-        Some(Tri { v, n: [n[0] / len, n[1] / len, n[2] / len], lo, hi, helper: false })
+        Some(Tri { v, n: [n[0] / len, n[1] / len, n[2] / len], lo, hi, flags: 0 })
     }
 }
 
@@ -60,6 +61,8 @@ struct Region {
     lo: [f64; 3],
     size: f64,
     stair_helpers: u32,
+    /// Triangles with a stair material (S2i-1).
+    stairs: u32,
     /// Fingerprint of the region's content as Skyrim sent it (FNV-1a of the triangle bytes): a
     /// re-sent but unchanged region keeps it, so its physics chunk isn't rebuilt (S2).
     hash: u64,
@@ -160,7 +163,7 @@ impl Store {
                 let body = &p[std::mem::size_of::<ColRegion>()..need];
                 let hash = fnv(fnv(FNV_START, &h.count.to_le_bytes()), body);
                 let mut r = Region { tris: Vec::with_capacity(h.count as usize), stamp: Vec::new(), cells: vec![Vec::new(); (cn * cn) as usize],
-                                     cn, lo, size, stair_helpers: 0, hash };
+                                     cn, lo, size, stair_helpers: 0, stairs: 0, hash };
                 for i in 0..h.count as usize {
                     let t: ColTri = read(p, std::mem::size_of::<ColRegion>() + i * std::mem::size_of::<ColTri>())?;
                     let mut v = [0.0; 9];
@@ -168,7 +171,7 @@ impl Store {
                         v[k] = t.v[k] as f64;
                     }
                     if let Some(mut tri) = Tri::new(v) {
-                        tri.helper = t.flags & gmsky_protocol::TRI_STAIR_HELPER != 0;
+                        tri.flags = t.flags;
                         let idx = r.tris.len() as u32;
                         let (x0, y0) = r.cell_index(tri.lo[0], tri.lo[1]);
                         let (x1, y1) = r.cell_index(tri.hi[0], tri.hi[1]);
@@ -177,7 +180,8 @@ impl Store {
                                 r.cells[(cx * cn + cy) as usize].push(idx);
                             }
                         }
-                        r.stair_helpers += tri.helper as u32;
+                        r.stair_helpers += (tri.flags & gmsky_protocol::TRI_STAIR_HELPER != 0) as u32;
+                        r.stairs += (tri.flags & gmsky_protocol::TRI_STAIRS != 0) as u32;
                         r.tris.push(tri);
                     }
                 }
@@ -243,6 +247,11 @@ impl Store {
         self.regions.values().map(|r| r.stair_helpers as u64).sum()
     }
 
+    /// Stored triangles with a stair material (S2i-1).
+    pub fn stairs(&self) -> u64 {
+        self.regions.values().map(|r| r.stairs as u64).sum()
+    }
+
     /// Every stored triangle touching the box lo..hi (relative to the anchor), at most `max`, for
     /// building a Garry's Mod physics mesh (DESIGN.md "One collision system", S1). A shape touching
     /// two regions comes from Skyrim in both; identical triangles (to 1/16 unit, same vertex
@@ -288,8 +297,8 @@ impl Store {
     }
 
     /// Skyrim's triangles touching the box (each once), at most `max`: (lowest z, highest z,
-    /// unit normal, stair ramp). For the stuck detector (S2e).
-    pub fn tris_info(&self, lo: [f64; 3], hi: [f64; 3], max: usize) -> Vec<(f64, f64, [f64; 3], bool)> {
+    /// unit normal, GMSKY_TRI_* flags). For the stuck detector (S2e).
+    pub fn tris_info(&self, lo: [f64; 3], hi: [f64; 3], max: usize) -> Vec<(f64, f64, [f64; 3], u32)> {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
         for r in self.regions.values() {
@@ -307,7 +316,7 @@ impl Store {
                 if out.len() >= max {
                     return out;
                 }
-                out.push((t.lo[2], t.hi[2], t.n, t.helper));
+                out.push((t.lo[2], t.hi[2], t.n, t.flags));
             }
         }
         out
@@ -726,22 +735,23 @@ mod tests {
     }
 
     #[test]
-    fn tris_info_keeps_the_stair_ramp_flag() {
+    fn tris_info_keeps_the_stair_flags() {
         let mut s = Store::default();
         clear(&mut s, 1, 1);
-        // A floor triangle and a 45-degree ramp; the ramp is marked as a stair helper (the flags
-        // word after a triangle's 9 floats).
+        // A floor triangle and a 45-degree ramp; the ramp is marked as a stair helper and as a
+        // stair material (the flags word after a triangle's 9 floats).
         let tris = [[-100.0, -100.0, 0.0, 100.0, -100.0, 0.0, 100.0, 100.0, 0.0], [0.0, -50.0, 0.0, 0.0, 50.0, 0.0, 50.0, 0.0, 50.0]];
         let mut msg = region_payload(0, 0, 0, 1, [-136.0; 3], 272.0, &tris);
-        msg[40 + 40 + 36..40 + 40 + 40].copy_from_slice(&gmsky_protocol::TRI_STAIR_HELPER.to_le_bytes());
+        msg[40 + 40 + 36..40 + 40 + 40].copy_from_slice(&(gmsky_protocol::TRI_STAIR_HELPER | gmsky_protocol::TRI_STAIRS).to_le_bytes());
         s.apply(COL_REGION, &msg);
-        assert_eq!(s.stair_helpers(), 1);
+        assert_eq!((s.stair_helpers(), s.stairs()), (1, 1));
         let info = s.tris_info([-10.0, -10.0, -10.0], [10.0, 10.0, 10.0], 10);
         assert_eq!(info.len(), 2);
-        let ramp = info.iter().find(|t| t.3).expect("the ramp comes back marked");
+        let ramp = info.iter().find(|t| t.3 != 0).expect("the ramp comes back marked");
+        assert_eq!(ramp.3, gmsky_protocol::TRI_STAIR_HELPER | gmsky_protocol::TRI_STAIRS, "both flags kept");
         assert_eq!((ramp.0, ramp.1), (0.0, 50.0));
         assert!((ramp.2[2].abs() - 0.5f64.sqrt()).abs() < 1e-9);
-        assert!(info.iter().any(|t| !t.3 && t.2[2].abs() > 0.999));
+        assert!(info.iter().any(|t| t.3 == 0 && t.2[2].abs() > 0.999));
         assert_eq!(s.tris_info([-10.0, -10.0, -10.0], [10.0, 10.0, 10.0], 1).len(), 1);
     }
 

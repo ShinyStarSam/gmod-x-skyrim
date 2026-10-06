@@ -39,6 +39,8 @@ pub const COL_PAD: u32 = 0;
 pub const COL_CLEAR: u32 = 1;
 pub const COL_REGION: u32 = 2;
 pub const TRI_STAIR_HELPER: u32 = 0x1;
+/// S2i-1: the triangle's Skyrim material is a stair material (StoneStairs, WoodStairs, ...).
+pub const TRI_STAIRS: u32 = 0x2;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
