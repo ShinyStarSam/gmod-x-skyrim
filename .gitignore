@@ -35,6 +35,7 @@
 !*.bat
 !*.py
 !*.ini
+!*.java
 
 # Git submodules (third-party source, tracked as a link to their repo, not copied in)
 !/skse/extern/CommonLibSSE-NG

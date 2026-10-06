@@ -2,7 +2,9 @@
 
 **2026-10-06, after in-game tests 101-111: BLOCKED on Garry's Mod's physics crash** (physics props on
 Skyrim's ground, plan `docs/DESIGN.md` "One collision system", step S1c). See "The current
-problem". Waiting for the user's choice of the next experiment.
+problem". **Ghidra (2026-10-06) found the cause:** a per-object list of collision pair records
+overflows at 65,533 entries, and gm_flatmap's world adds ~6 records per mesh triangle. Waiting for
+the user's choice of the next experiment.
 
 **2026-10-06: the indoor shadow problem below is solved (test 93: Community Shaders' formula agrees
 with Skyrim's own shadow mask on 99.86% of points). Kept below as a record.**
@@ -33,7 +35,8 @@ Single-player and offline only.
   CommonLibSSE-NG 10.1.0 (git submodule, `ng` branch, `39f9d07a6`); vcpkg in `.tools/vcpkg`;
   Visual Studio 2022 + Build Tools (MSVC 14.44.35207, includes `dumpbin`); CMake 4.4.3;
   Rust 1.99.0 stable (MSVC); Python 3.12.10; Git 2.51. No mod manager; no other SKSE plugins.
-  No debugger installed.
+  No debugger installed. Ghidra 12.1.4 in `.tools\` (untracked; run with `tools\ghidra_dump.ps1`,
+  which keeps all its files in `build\ghidra`).
 - **Settings:** Skyrim `bAlwaysActive=1`. Garry's Mod started by `tools/launch_gmod.ps1`
   (`-insecure -windowed +fps_max_nofocus 300`) loads **gm_flatmap** straight into single-player
   when `garrysmod\maps\gm_flatmap.bsp` exists (the user is moving it there from the Workshop
@@ -161,21 +164,49 @@ after a new mesh object is set up: the last log line was `SetSolid` (tests 109, 
 - **The one long run that never crashed** (test 16, 272 builds): 512-triangle pieces built only away
   from the player, from a grid that arrived ahead of them.
 
+**What Ghidra found (2026-10-06, read-only, details and addresses in MODLOG.md):**
+- **The crash is a full list.** Each physics object keeps a sorted list with one entry for every
+  "pair record" it is part of. A pair record is the engine's note "these two pieces are close; check
+  when they could touch". The list numbers its slots with 16 bits and stops growing at 65,532; the
+  engine doesn't check this, so the next entry is written one slot past the end. Every dump's
+  registers match this exact path, so this is certain.
+- **Pair records are made per piece pair:** (pieces of object A near B) x (pieces of B near A).
+  Every triangle of a `PhysicsFromMesh` mesh is its own piece. Before making them, the engine asks
+  the game's collision filter whether the two objects collide at all.
+- **gm_flatmap's own world is 6 giant pieces** (floor, ceiling, 4 walls; bounding spheres ~23,000
+  units across), and all 6 count as "near" any mesh anywhere. So a mesh of T triangles gets
+  **~6 x T records with the world**: 7,442 triangles -> ~44,650, two-thirds of the limit by itself.
+  The world's own list adds up all meshes at once: test 109's two meshes (8,919 triangles, ~53,500)
+  survived; the third (+7,413, ~98,000) crashed.
+- **Difference from InfMap2 (our reference):** its maps have the same 6 giant world pieces, but its
+  chunk meshes have tens of triangles (3 terrain samples per 20,000-unit chunk), so it never gets
+  near the limit. Ours have thousands (Skyrim's real shapes).
+- **Not explained yet:** the rebuild tests with ~3,250-3,900 Skyrim triangles (101, 103, 107) and test
+  111's 9th build need another ~20,000-45,000 records from somewhere. Not known which object's list
+  was full in each test.
+
 **Ideas not tried yet (my order; one variable each):**
-1. **Find out what the 65,533-entry list is.** Read `vphysics.dll` around `+0xaaff0` and its callers
-   with a disassembler (read only; nothing written to the game or the repo). Knowing what fills it
-   (pairs between the new mesh and nearby objects? pieces of the new mesh?) tells us which number to
-   keep small. Needs Ghidra (free, a download): **only with your go-ahead.**
-2. **Build only far from the player.** The opposite of 110's start-up problem: build a chunk only when
+1. **Tell the engine our mesh and the world never collide.** The mesh already has
+   `SetCustomCollisionCheck(true)`; a `ShouldCollide` hook returning false for (mesh, world) should
+   stop the ~6 x T world records from being made at all, since the engine asks first (seen in the
+   code). Costs nothing in play: the mesh never moves, so it never needs the world. Test: test 111's
+   setup (`rebuild grid`) plus the chunk tests. **Not sure** Garry's Mod asks the hook for world pairs:
+   the hook would log how often it is asked about the world, so we'd know.
+2. **Count the lists directly.** Our Rust module reads (never writes) the list sizes of the mesh, the
+   world and the player's physics object through the offsets Ghidra showed, and logs them before and
+   after every setup call. Tells exactly which list fills and from what, including the unexplained
+   ~20,000-45,000. More work, and depends on Garry's Mod's internal layout (not sure of the first
+   step: from a Lua physics object to the engine's object).
+3. **Build only far from the player.** The opposite of 110's start-up problem: build a chunk only when
    the player's body is at least ~1,000 units from it (needs Skyrim to collect further out, S1d), and
    log the real distance. Test 16 is the only pattern that never crashed.
-3. **Small meshes.** Measure where the threshold is with the tidy grid: 500, 1,000, 2,000, 4,000
-   triangles under the walking player (test 111's setup). Tells us how small pieces must be.
-4. **A truly static physics object** made by our Rust module through the engine's physics interface
+4. **Small meshes** (what InfMap2 effectively does). Measure where the threshold is with the tidy
+   grid: 500, 1,000, 2,000, 4,000 triangles under the walking player (test 111's setup).
+5. **A truly static physics object** made by our Rust module through the engine's physics interface
    (like the map's own ground, which is created once at load and never runs this re-check), instead
    of `PhysicsFromMesh`, which makes a movable object and freezes it. More work; not sure the
    engine's static path avoids the re-check.
-5. **Replace the physics engine** (VPhysics-Jolt, open source): a `vphysics.dll` swap in the game
+6. **Replace the physics engine** (VPhysics-Jolt, open source): a `vphysics.dll` swap in the game
    folder, a big change, **only with your go-ahead**; not sure it supports this Garry's Mod version.
 
 ### Solved (2026-10-06, test 93): how Skyrim reads its indoor shadow maps
