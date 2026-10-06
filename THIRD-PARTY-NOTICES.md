@@ -26,9 +26,6 @@ memory) and adapts parts of its Skyrim plugin. Thank you to chasmlol.
   - `gmod/module/src/shapes.rs`, `gmod/lua/gmsky/field.lua`: the idea of feeding Skyrim's exact
     triangles to the other game's collision query (SkyCraft's `TriCollider.java`); the swept test
     itself is our own.
-  - `gmod/lua/gmsky/stairs.lua`: ground judged under a small footprint and steps below step
-    height not blocking a grounded player (SkyCraft's `TriCollider.java`), as two rules on top of
-    Source's own movement.
   - `docs/DESIGN.md`: architecture.
 
 ```

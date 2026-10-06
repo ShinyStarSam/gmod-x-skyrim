@@ -1994,3 +1994,68 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 - Garry's Mod: **0 STUCK readings** this run, so the pass check ("the stuck spots have stair triangles") could not be made. The S2h stairs rules (still on) stepped a few times (up to 11.6 units).
 - The `shapes:` status line with the stair-material count is not printed in physics mode, so Garry's Mod's stored count is not in the log (not checked).
 **Conclusion:** finding stairs by material works where Skyrim uses a stair material. **Not known:** whether every staircase does.
+
+## 2026-10-06 S2i-2: player-only ramps over Skyrim's stairs; S2h's stairs rules removed (built; not tested in game)
+
+**Changed:**
+- `gmod/module/src/shapes.rs`: `ramps_in_box`. From the stair-material triangles in a chunk's box plus 64 units around it, it finds each step's nose (the top edge of a steep stair triangle 1-20 units tall) and joins it to the next nose up (1-20 higher, 3-48 across, parallel, overlapping sideways) with a flat strip. The bottom step gets a strip down to its riser's foot at the same slope. Also counts nose pairs among triangles *without* a stair material (the plan B check). New unit test with four synthetic steps: every ramp corner lies on the board through the noses; the same steps without a stair material make no ramp and count 3 "shaped like stairs".
+- `gmod/module/src/lib.rs`: `gmsky.RampsInBox`.
+- `gmod/lua/gmsky/chunks.lua`: new entity `gmsky_ramp` (the chunk entity with its own triangles), one per chunk with ramps, built in the same order and with the same "wait while an old mesh is still in the engine" rule, removed with its chunk, moved with it on a re-centre. The server works ramps out again every 5 ticks for chunks whose regions or the regions around them changed, and replaces the ramp only when its triangles changed (at most 2 builds a tick). The client builds its own copy and logs when its fingerprint differs. **Player-only:** custom collision check; `ShouldCollide` says yes only to a player between `SetupMove` and `FinishMove` (its movement), no to everything else. Setting `gmsky_ramps 1/0` (0 = ramps ignored, for comparison). Self-test on the first ramp. Logged: one line per ramp build; the server status line has a "ramps (...)" part; STUCK lines add "below as movement sees it"; the client status line counts ramps and fingerprint mismatches.
+- `gmod/lua/gmsky/stairs.lua` removed, plus its includes, its status part and its credit (one system). S2g's lift stays.
+- DESIGN.md S2i-2 *how it is built*.
+**Differs from the approved plan:** the plan said the ramp's contents would be "player clip". Lua can't set that reliably on a physics mesh, so the ShouldCollide-during-movement rule does the same job instead. **Differs from SkyCraft:** SkyCraft makes no ramps (see DESIGN.md S2i).
+**Failure on the way:** the first harness run failed because the harness has no `table.Copy`; replaced with a plain copy loop. On review: the client's "an older entity is still here" wait would have stopped a ramp forever whenever a neighbouring chunk's ramp overlapped it (ramps may overlap, chunks never do). Ramps now wait only for an older ramp of their own chunk.
+**Tested how:** `cargo test --release -p gmsky-module`: 30 passed; `cargo build --release`; `gmod_harness.exe`: HARNESS PASSED (no physics there: ramps, the self-test and ShouldCollide are **not exercised**). **Not tested in game.** Not sure: that Garry's Mod asks `ShouldCollide` for the player's movement traces (the self-test answers it); that Skyrim's stair slopes are walkable as ramps (status line: "too steep", steepest angle).
+
+## 2026-10-06 In-game test 129 (S2i-2): ramps built and walked on; bullets hit them too; big stone stairs got no ramp
+
+**Logs:** `build/logs-ingame-test-129/`. No crash; 0 client/server ramp fingerprint mismatches.
+**Tested how:** user walked stairs inside and outside the fort. User: "the big stone stairs inside the fort and outside the fort did not work"; asked to check that ramp starts and ends are flush with what they lead to.
+**Result:**
+- 18 ramp entities, 252 strips from 514 noses; the player stood on a ramp in 19 status seconds ("standing on gmsky_ramp"). Steepest normal strips 23-32 degrees, but 9 strips were steeper than walkable (up to 68.9 degrees): false pairs, invisible walls.
+- **Self-test FAILED:** with the movement mark on or off, a bullet-style trace and a trace with no filter all hit the ramp. The ShouldCollide rule does not keep (Lua) traces off it. Whether the engine's own bullets hit it was not measured.
+- 16 STUCK readings, all on stairs (the big stone stairs): 27-54 stair-material triangles around the feet each time, slanted risers (normal z 0.19-0.42), and **no ramp under the player** (movement saw only `gmsky_chunk` below). So the material is there and the nose finder rejects these stairs; which check rejects them is not in this log.
+- "Shaped like stairs without a stair material": 452 pairs (needs a closer look before plan B means anything).
+
+## 2026-10-06 S2i-2 fixes after test 129: flush ramp ends, walkable pairs only, reasons on STUCK lines, player-clip contents (not tested in game)
+
+**Changed:** `gmod/module/src/shapes.rs`: noses steeper than walkable (rise/run above 1.02) are never paired; the bottom strip's two ends each run down in 1-unit steps until they meet the real floor and end on it (no floor within 48: in the air, counted); the landing beyond each top nose is checked (counted); `ramp_check` explains, for a box, how many stair triangles were rejected by which check (flat, height outside 1-20 with the range, no single level top edge with the spread, too short) and why noses have no partner. Unit test rewritten: floor in front (bottom end lands exactly on it), top landing flush, no floor (2 ends in the air), too-steep steps (no strips), no material (no ramp). `lib.rs`: `gmsky.RampsInBox` returns the new counts, new `gmsky.RampCheck`. `chunks.lua`: STUCK lines add the ramp check; ramp physics gets contents "player clip" (`RAMP:AfterBuild`); real bullets counted by what they hit (`EntityFireBullets`); log and status lines carry the new counts. DESIGN.md S2i-2 *after test 129*.
+**Not fixed yet:** the big stone stairs. The log doesn't say which check rejects them; the new STUCK "ramp check" will.
+**Tested how:** `cargo test --release -p gmsky-module`: 30 passed; `cargo build --release`; harness PASSED (ramps not exercised there). **Not tested in game.** Not sure: that the engine's traces read the contents set on a physics object (self-test and bullet count say).
+
+## 2026-10-06 In-game test 130: the stone stairs' risers have no level top edge; ramps still solid to everything
+
+**Logs:** `build/logs-ingame-test-130/`.
+**Tested how:** user walked the big stone stairs and shot/threw at ramps. User: "grenades and props collide with the ramps"; "focus on fixing the stone stairs".
+**Result:**
+- 23 STUCK readings, nearly all on the big stone stairs. The new ramp check: of 45-95 stair triangles around the feet, 21-38 are steep **without one level top edge**, and only 0-24 noses came out, most unpaired ("parallel noses not 3-48 units across", "don't overlap sideways"). The riser-based nose finder can't read these stairs.
+- Self-test FAILED again with contents "player clip" set (0x10000 read back): movement, bullet and unfiltered traces all hit the ramp. Props and grenades collide too (user). Put behind the stone stairs (user).
+
+## 2026-10-06 S2i-2: noses found from the treads, not the risers (not tested in game)
+
+**Changed:** `gmod/module/src/shapes.rs`: `find_noses` now takes a tread's (flat stair triangle's) front edge: level, at least 2 long, the surface just beyond not continuing at the same height and nothing within step height above it. New `Heights` (surface height lookup through a 16-unit grid) used for that and for the flush bottom ends and top landings. Pairing takes only the nearest higher nose across; too steep there means no strip. `ramp_check` reports tread edges by outcome (not level, short, inside a tread, at a tread's back, noses). The "shaped like stairs without a stair material" count is removed (Rust, `gmsky.RampsInBox`, `chunks.lua`). Unit test: 13 noses on the synthetic stairs (front edges plus side edges and the landing's back, which never pair), same 3 strips; new case: the same steps with risers that give nothing (no stair material) make exactly the same ramp; a too-steep flight makes no strip (the first version of nearest-only pairing was missing and step 2 joined the landing's back edge through step 3; caught by the test).
+**Tested how:** `cargo test --release -p gmsky-module`: 30 passed; `cargo build --release`; harness PASSED (ramps not exercised there). **Not tested in game.** Not sure: that the stone stairs' treads are flat (normal z 0.9+) and their front edges level within a unit (the ramp check's "not level" count says).
+
+## 2026-10-06 In-game test 131: still no ramps on the stone stairs (tread edges not level); triangle dump added; STATUS.md
+
+**Logs:** `build/logs-ingame-test-131/`.
+**Tested how:** user walked the stone stairs. User: "Still no ramps on the stairs, please check EVERY surface again"; "make sure we are checking every single stair material".
+**Result:** 8 STUCK readings. The tread-based finder: of 72-105 tread edges around each stuck spot, 52-77 are "not level" (ends more than 1 unit apart); 1-4 noses. Elsewhere 14 ramp entities, 123 strips, steepest 43.5 degrees (no more too-steep strips); 19 bottom ends in the air, 4 tops not flush.
+**Stair materials checked:** CommonLib's list has 78 Skyrim materials; exactly 7 are stair materials and all 7 are checked (same list as SkyCraft's `Dig.cpp`). Four of them appeared in this run.
+**Second failed attempt at the stone stairs** (riser edges, then tread edges, both designed from counts without the real triangles): stopped guessing and wrote `STATUS.md` (AGENTS.md).
+**Changed:** `shapes.rs` `dump`, `lib.rs` `gmsky.DumpTris`: every triangle in a box (stair material or not, normal, flags) to `logs/tris/<name>.txt` (the first dump of a session empties the folder; saved log folders keep earlier ones). `chunks.lua`: every STUCK line dumps the area (96 units across, 48 below to 96 above the feet) as `stuck_<N>`; console command `gmsky_dump_tris [name]` dumps around the player anywhere.
+**Tested how:** `cargo build --release`; harness PASSED (the dump isn't exercised there). **Not tested in game.**
+
+## 2026-10-06 In-game test 132: real triangles dumped; the stone steps are tilted; noses may tilt (checked on the dumps; not tested in game)
+
+**Logs:** `build/logs-ingame-test-132/` with `tris/`: `stuck_1`-`stuck_3` (automatic), `good_1` (a staircase that had a ramp), `bad_2` (a stone stair, by hand).
+**What the triangles show:** the stone steps rise 10-12 and are about 13 deep, but each step's front edge rises 2-3 units over its 30-unit width (tilted), and the flight curves a few degrees per 30-unit section. Both finders required edges level within 1 unit, so they found almost nothing (test 131: 52-77 of ~100 tread edges "not level"). At `stuck_3` a flat non-stair floor (z 141, then 147) covers the bottom of the flight; the steps continue underneath it.
+**Changed:** `shapes.rs`: a nose may rise 1 unit plus 0.2 per unit of its length; it keeps its height at both ends (`Nose::za`, `zb`, `z_at`, `along`); strips follow the tilt; pairing compares heights across from the lower nose's middle; bottom strips start from each end's own height. New ignored test `ramps_on_real_dumps` (run by hand with `GMSKY_DUMPS`; `GMSKY_DUMP_DETAIL=<name>` lists the noses near the spot).
+**Checked on the real dumps (offline):** before: 1-4 noses around the stuck spots. After: 16-22 noses near each spot, and **all 5 dumps have a ramp under the player's 32-unit box** (stuck_1: rises to 7.9 above the feet; stuck_3: 7.5; bad_2: 8.9; good_1: -0.1, the player stood on it; stuck_2: -13.4, the player was falling then). Steepest strip 43.6 degrees (walkable limit 45.6). Still some bottom strip ends in the air (3-6 per dump), not looked at yet.
+**Tested how:** `cargo test --release -p gmsky-module`: 30 passed (+1 ignored, run by hand as above); `cargo build --release`; harness PASSED. **Not tested in game.**
+
+## 2026-10-06 In-game test 133: stone stairs work ("much, much, much better")
+
+**Logs:** `build/logs-ingame-test-133/`, with dumps `tris/` (10 automatic STUCK dumps and the user's `small_lump_at_end_1`, `small_bump_2`, `missing_ramp_3`, `very_bumpy_4`, `very_bumpy2_5`).
+**Tested how:** user walked the stone stairs and others. User: "Much, much, much better!"
+**Result:** "standing on gmsky_ramp" in 73 status seconds (tests 129-131: 11-19). 10 ramp entities, 342 strips, steepest 42.1 degrees; tops 20, 0 not flush; bottoms 49, **35 ends in the air** (still open). 10 STUCK readings and 1 client/server ramp fingerprint mismatch (not looked at yet). The user's named dumps mark remaining rough spots for the next step.

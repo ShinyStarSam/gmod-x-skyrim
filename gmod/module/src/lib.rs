@@ -184,7 +184,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 59] = [
+    let funcs: [(&str, lua::CFn); 62] = [
         ("EndProcess", l_end_process),
         ("SkyrimExited", l_skyrim_exited),
         ("CloseGame", l_close_game),
@@ -206,6 +206,9 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("ShapesBounds", l_shapes_bounds),
         ("ShapesStatus", l_shapes_status),
         ("TrisInBox", l_tris_in_box),
+        ("RampsInBox", l_ramps_in_box),
+        ("RampCheck", l_ramp_check),
+        ("DumpTris", l_dump_tris),
         ("ShapesLattice", l_shapes_lattice),
         ("ShapesRegionsArrived", l_shapes_regions_arrived),
         ("ShapesChunkVersion", l_shapes_chunk_version),
@@ -996,6 +999,76 @@ unsafe extern "C" fn l_tris_in_box(l: *mut State) -> c_int {
             (a.pushnumber)(l, v);
         }
         6
+    })
+}
+
+/// gmsky.RampsInBox(lx, ly, lz, hx, hy, hz) -> flat, count, fingerprint, noses, strips, bottoms,
+/// bottom ends in the air, tops, tops not flush, steepest: S2i-2's ramps over Skyrim's stairs for a chunk's box (relative to
+/// the anchor; shapes::Store::ramps_in_box). `flat` holds 9 numbers per triangle; the fingerprint
+/// is a hex string. Nothing when not anchored to the store's epoch.
+unsafe extern "C" fn l_ramps_in_box(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let n = |i: c_int| (a.tonumber)(l, i);
+        let epoch = anchored_epoch();
+        let Some(r) = with_shapes(|st| (epoch != 0 && st.origin_epoch == epoch).then(|| st.ramps_in_box([n(1), n(2), n(3)], [n(4), n(5), n(6)]))) else {
+            return 0;
+        };
+        (a.createtable)(l, (r.tris.len() * 9) as c_int, 0);
+        let mut i = 1;
+        for t in &r.tris {
+            for v in t {
+                (a.pushnumber)(l, *v);
+                (a.rawseti)(l, -2, i);
+                i += 1;
+            }
+        }
+        (a.pushnumber)(l, r.tris.len() as f64);
+        lua::push_str(a, l, &format!("{:016x}", r.hash));
+        for v in [r.noses as f64, r.strips as f64, r.bottoms as f64, r.bottoms_floating as f64, r.tops as f64, r.tops_off as f64, r.steepest] {
+            (a.pushnumber)(l, v);
+        }
+        10
+    })
+}
+
+/// gmsky.DumpTris(lx, ly, lz, hx, hy, hz, name) -> count, path: every stored triangle touching the
+/// box written to logs/tris/<name>.txt (shapes::Store::dump). The first dump of a session empties
+/// logs/tris/ (earlier runs' dumps are in their saved log folders). Nothing when not anchored.
+unsafe extern "C" fn l_dump_tris(l: *mut State) -> c_int {
+    static CLEARED: std::sync::Once = std::sync::Once::new();
+    guarded(l, |a, _| {
+        let n = |i: c_int| (a.tonumber)(l, i);
+        let name: String = lua::to_string(a, l, 7).unwrap_or_default().chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
+        let epoch = anchored_epoch();
+        let Some((count, text)) = with_shapes(|st| (epoch != 0 && st.origin_epoch == epoch).then(|| st.dump([n(1), n(2), n(3)], [n(4), n(5), n(6)]))) else {
+            return 0;
+        };
+        let dir = log_dir().join("tris");
+        CLEARED.call_once(|| {
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(format!("{}.txt", if name.is_empty() { "dump".into() } else { name }));
+        let ok = std::fs::write(&path, text).is_ok();
+        (a.pushnumber)(l, count as f64);
+        lua::push_str(a, l, &format!("{}{}", path.display(), if ok { "" } else { " (WRITE FAILED)" }));
+        2
+    })
+}
+
+/// gmsky.RampCheck(lx, ly, lz, hx, hy, hz) -> line: why the stair triangles in the box did or
+/// didn't make ramps (shapes::Store::ramp_check; for the STUCK lines). Nothing when not anchored.
+unsafe extern "C" fn l_ramp_check(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let n = |i: c_int| (a.tonumber)(l, i);
+        let epoch = anchored_epoch();
+        match with_shapes(|st| (epoch != 0 && st.origin_epoch == epoch).then(|| st.ramp_check([n(1), n(2), n(3)], [n(4), n(5), n(6)]))) {
+            Some(line) => {
+                lua::push_str(a, l, &line);
+                1
+            }
+            None => 0,
+        }
     })
 }
 

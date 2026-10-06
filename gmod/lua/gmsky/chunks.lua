@@ -19,6 +19,10 @@
 -- once every region of a chunk has arrived) and rebuilds one only when its regions' content
 -- fingerprint changes (gmsky.ShapesChunkVersion). Each side builds its own physics from the shared
 -- Rust store (one module per process). Logs: gmod_server.log / gmod_client.log.
+--
+-- S2i-2 (DESIGN.md S2i): ramps over Skyrim's stairs. Each chunk with stair noses in it gets a
+-- second mesh, a `gmsky_ramp` entity (shape made in Rust, gmsky.RampsInBox), removed with its
+-- chunk. Only the player's movement collides with it (the ShouldCollide hook below).
 
 local gmsky = gmsky
 local C = gmsky.chunks or {}
@@ -188,6 +192,8 @@ function ENT:SetupDataTables()
 	self:NetworkVar("String", 0, "Version") -- the server's fingerprint of its regions when built
 	self:NetworkVar("Vector", 0, "BoxLo")   -- the chunk's box, relative to the anchor
 	self:NetworkVar("Vector", 1, "BoxHi")
+	self:NetworkVar("Vector", 2, "SrcLo")   -- ramps: the chunk box they were made for (relative to the anchor)
+	self:NetworkVar("Vector", 3, "SrcHi")
 end
 
 function ENT:UpdateTransmitState()
@@ -196,6 +202,19 @@ end
 
 function ENT:ChunkKey() return Key(self:GetCX(), self:GetCY(), self:GetCZ()) end
 function ENT:ChunkName() return string.format("chunk %d %d %d", self:GetCX(), self:GetCY(), self:GetCZ()) end
+
+-- Client: the triangles to build from, read from this side's store.
+function ENT:Source()
+	local lo, hi, N = self:GetBoxLo(), self:GetBoxHi(), self:GetN()
+	local _, _, ver = gmsky.ShapesChunkVersion(self:GetCX() * N, self:GetCY() * N, self:GetCZ() * N,
+		self:GetCX() * N + N - 1, self:GetCY() * N + N - 1, self:GetCZ() * N + N - 1)
+	if ver ~= self:GetVersion() then
+		C.mismatches = (C.mismatches or 0) + 1
+		gmsky.Log(string.format("chunks: %s: this side's regions differ from the server's (fingerprint %s here, %s there); built from this side's",
+			self:ChunkName(), tostring(ver), self:GetVersion()))
+	end
+	return gmsky.TrisInBox(lo.x, lo.y, lo.z, hi.x, hi.y, hi.z, MAX_TRIS + 1, true)
+end
 
 -- Builds the physics. False (and the reason) if it can't yet: an earlier mesh of this chunk is
 -- still in the engine. The server passes its triangles (already read) in `flat`.
@@ -207,26 +226,18 @@ function ENT:Build(flat, n)
 	if still then return false, still end
 	if CLIENT then
 		-- The server never has two chunks in one place, but the client may see a new chunk before
-		-- the old one's removal arrives: wait for it too.
-		for _, e in ipairs(ents.FindByClass("gmsky_chunk")) do
+		-- the old one's removal arrives: wait for it too. (Ramps of neighbouring chunks may overlap
+		-- each other: a ramp waits only for an older ramp of its own chunk.)
+		for _, e in ipairs(ents.FindByClass(self:GetClass())) do
 			if e ~= self and e.gmskyBuilt and IsValid(e:GetPhysicsObject())
-				and Overlap(wlo, whi, e:GetPos() + e:GetBoxLo(), e:GetPos() + e:GetBoxHi()) then
+				and (self.gmskyIsRamp and e:ChunkKey() == key or not self.gmskyIsRamp and Overlap(wlo, whi, e:GetPos() + e:GetBoxLo(), e:GetPos() + e:GetBoxHi())) then
 				return false, string.format("%s, an older chunk entity here, still has its physics", e:ChunkName())
 			end
 		end
 	end
 	local t0 = SysTime()
-	if not flat then
-		local N = self:GetN()
-		local _, _, ver = gmsky.ShapesChunkVersion(self:GetCX() * N, self:GetCY() * N, self:GetCZ() * N,
-			self:GetCX() * N + N - 1, self:GetCY() * N + N - 1, self:GetCZ() * N + N - 1)
-		if ver ~= self:GetVersion() then
-			C.mismatches = (C.mismatches or 0) + 1
-			gmsky.Log(string.format("chunks: %s: this side's regions differ from the server's (fingerprint %s here, %s there); built from this side's",
-				name, tostring(ver), self:GetVersion()))
-		end
-		flat, n = gmsky.TrisInBox(lo.x, lo.y, lo.z, hi.x, hi.y, hi.z, MAX_TRIS + 1, true)
-	end
+	if not flat then flat, n = self:Source() end
+	n = n or 0
 	if n == 0 or n > MAX_TRIS then
 		gmsky.Log(string.format("chunks: %s: %d triangles on this side: not built", name, n))
 		self.gmskyBuilt = true
@@ -263,6 +274,7 @@ function ENT:Build(flat, n)
 		logMs = logMs + C.StepLog(self, st[1], flagFirst, steps[i + 1] and steps[i + 1][1] or "nothing")
 	end
 	local phys = self:GetPhysicsObject()
+	if self.AfterBuild and IsValid(phys) then self:AfterBuild(phys) end
 	self:DrawShadow(false)
 	self:AddSolidFlags(FSOLID_FORCE_WORLD_ALIGNED)
 	self:AddFlags(FL_STATICPROP)
@@ -299,6 +311,8 @@ end
 -- already finds the old one in C.StillInEngine.
 function C.Retire(ent, why)
 	if not IsValid(ent) then return end
+	if IsValid(ent.gmskyRamp) then C.Retire(ent.gmskyRamp, "its chunk goes: " .. why) end
+	ent.gmskyRamp = nil
 	C.Destroyed(ent:ChunkKey(), ent:ChunkName(), ent:GetPhysicsObject(), why, ent:GetPos() + ent:GetBoxLo(), ent:GetPos() + ent:GetBoxHi())
 	ent.gmskyRetired = true
 	ent:PhysicsDestroy()
@@ -338,11 +352,76 @@ if CLIENT then
 	end
 end
 
+-- ---- S2i-2: the ramp entity (a copy of the chunk entity with its own triangles) ---------------
+local RAMP = {}
+for k, v in pairs(ENT) do RAMP[k] = v end
+RAMP.gmskyIsRamp = true
+function RAMP:ChunkKey() return "ramp " .. Key(self:GetCX(), self:GetCY(), self:GetCZ()) end
+function RAMP:ChunkName() return string.format("ramp %d %d %d", self:GetCX(), self:GetCY(), self:GetCZ()) end
+function RAMP:Initialize()
+	self:DrawShadow(false)
+	self:SetCustomCollisionCheck(true) -- the ShouldCollide hook below decides who touches it
+end
+-- Test 129: the ShouldCollide rule below didn't keep traces off the ramp (the self-test's bullet
+-- trace hit it). Second way: the ramp's contents become "player clip", which the player's
+-- movement traces include (MASK_PLAYERSOLID) and bullets' don't (MASK_SHOT). Not sure the engine's
+-- traces read a physics object's contents; the self-test and the bullet count say.
+function RAMP:AfterBuild(phys)
+	if not phys.SetContents then
+		C.rampContents = "PhysObj:SetContents missing"
+		return
+	end
+	phys:SetContents(CONTENTS_PLAYERCLIP)
+	C.rampContents = string.format("contents 0x%x (player clip 0x%x)", phys:GetContents(), CONTENTS_PLAYERCLIP)
+end
+
+-- Client: this side's ramps for the chunk box (fingerprint compared with the server's).
+function RAMP:Source()
+	local lo, hi = self:GetSrcLo(), self:GetSrcHi()
+	local flat, n, hash = gmsky.RampsInBox(lo.x, lo.y, lo.z, hi.x, hi.y, hi.z)
+	if hash ~= self:GetVersion() then
+		C.rampMismatches = (C.rampMismatches or 0) + 1
+		gmsky.Log(string.format("chunks: %s: this side's ramps differ from the server's (fingerprint %s here, %s there, %d triangles here); built from this side's",
+			self:ChunkName(), tostring(hash), self:GetVersion(), n or 0))
+	end
+	return flat, n
+end
+
 scripted_ents.Register(ENT, "gmsky_chunk")
+scripted_ents.Register(RAMP, "gmsky_ramp")
+
+-- Player-only (S2i-2): a ramp collides only with a player whose movement is being worked out
+-- right now (between SetupMove and FinishMove; both sides run these for prediction). Props, the
+-- world, chunks, and bullets (fired after movement, in the weapon's think) get "no". Physics
+-- never asks during movement, so its answer is always "no", as the hook requires.
+C.ramps = C.ramps or CreateConVar("gmsky_ramps", "1", FCVAR_REPLICATED,
+	"1 = the player walks on ramps laid over Skyrim's stairs (S2i-2); 0 = ramps are ignored (for comparison)")
+C.inMove = C.inMove or {}
+hook.Add("SetupMove", "gmsky_ramps_move", function(ply) C.inMove[ply] = true end)
+hook.Add("FinishMove", "gmsky_ramps_move", function(ply) C.inMove[ply] = nil end)
+-- Real bullets (test 129's self-test used Lua traces, which may filter differently from the
+-- engine's): every bullet's hit, counted by what it hit; status line.
+C.bullets = C.bullets or { shot = 0, ramp = 0 }
+hook.Add("EntityFireBullets", "gmsky_ramps_bullets", function(_, data)
+	local cb = data.Callback
+	data.Callback = function(attacker, tr, dmg)
+		C.bullets.shot = C.bullets.shot + 1
+		if IsValid(tr.Entity) and tr.Entity:GetClass() == "gmsky_ramp" then C.bullets.ramp = C.bullets.ramp + 1 end
+		if cb then return cb(attacker, tr, dmg) end
+	end
+	return true
+end)
+hook.Add("ShouldCollide", "gmsky_ramps", function(a, b)
+	local ra, rb = a.gmskyIsRamp, b.gmskyIsRamp
+	if not ra and not rb then return end
+	local other = ra and b or a
+	return (other:IsPlayer() and C.inMove[other] and C.ramps:GetBool()) or false
+end)
 
 -- Chunks can't be picked up or removed with tools.
-hook.Add("PhysgunPickup", "gmsky_chunks", function(_, ent) if IsValid(ent) and ent:GetClass() == "gmsky_chunk" then return false end end)
-hook.Add("CanTool", "gmsky_chunks", function(_, tr) if IsValid(tr.Entity) and tr.Entity:GetClass() == "gmsky_chunk" then return false end end)
+local function Ours(ent) return IsValid(ent) and (ent:GetClass() == "gmsky_chunk" or ent:GetClass() == "gmsky_ramp") end
+hook.Add("PhysgunPickup", "gmsky_chunks", function(_, ent) if Ours(ent) then return false end end)
+hook.Add("CanTool", "gmsky_chunks", function(_, tr) if Ours(tr.Entity) then return false end end)
 
 -- Once a second, if anything happened: this side's chunk numbers.
 function C.StatusLine()
@@ -364,7 +443,9 @@ end
 if CLIENT then
 	timer.Create("gmsky_chunks_status", 1, 0, function()
 		if #ents.FindByClass("gmsky_chunk") == 0 and next(C.dead) == nil then return end
-		gmsky.Log(C.StatusLine())
+		local ramps, built = ents.FindByClass("gmsky_ramp"), 0
+		for _, e in ipairs(ramps) do built = built + (e.gmskyBuilt and 1 or 0) end
+		gmsky.Log(C.StatusLine() .. string.format("; ramps: %d entities (%d built), fingerprint mismatches so far %d", #ramps, built, C.rampMismatches or 0))
 	end)
 end
 
@@ -418,17 +499,19 @@ if SERVER then
 	function C.MoveAll(anchor)
 		local n, worst = 0, 0
 		for _, rec in pairs(C.chunks) do
-			if IsValid(rec.ent) then
-				rec.ent:SetPos(anchor)
-				local phys = rec.ent:GetPhysicsObject()
-				if IsValid(phys) then
-					phys:SetPos(anchor)
-					worst = math.max(worst, phys:GetPos():Distance(anchor))
+			for _, e in ipairs({ rec.ent, IsValid(rec.ent) and rec.ent.gmskyRamp or false }) do
+				if IsValid(e) then
+					e:SetPos(anchor)
+					local phys = e:GetPhysicsObject()
+					if IsValid(phys) then
+						phys:SetPos(anchor)
+						worst = math.max(worst, phys:GetPos():Distance(anchor))
+					end
+					n = n + 1
 				end
-				n = n + 1
 			end
 		end
-		gmsky.Log(string.format("chunks: re-centre: %d chunks and their physics moved to the new anchor (%.1f, %.1f, %.1f); largest physics position error after the move %.3f units",
+		gmsky.Log(string.format("chunks: re-centre: %d chunks and ramps and their physics moved to the new anchor (%.1f, %.1f, %.1f); largest physics position error after the move %.3f units",
 			n, anchor.x, anchor.y, anchor.z, worst))
 	end
 
@@ -484,6 +567,27 @@ if SERVER then
 			k.floors, k.steps, k.ledges, k.ceil, k.ceil > 0 and string.format(" (lowest %.0f above the feet)", k.ceilLo) or "")
 	end
 
+	-- Every stored triangle within 96 units across and from 48 below to 96 above the feet, to
+	-- logs/tris/<name>.txt (gmsky.DumpTris). Returns count, path, or nothing.
+	function C.Dump(ply, a, name)
+		if not gmsky.DumpTris then return end
+		local p = ply:GetPos() - a
+		return gmsky.DumpTris(p.x - 96, p.y - 96, p.z - 48, p.x + 96, p.y + 96, p.z + 96, name)
+	end
+	C.dumps = C.dumps or 0
+	concommand.Add("gmsky_dump_tris", function(ply, _, args)
+		if IsValid(ply) and not ply:IsListenServerHost() then return end
+		ply = IsValid(ply) and ply or player.GetAll()[1]
+		local a = gmsky.terrain and gmsky.terrain.Anchor and gmsky.terrain.Anchor()
+		if not IsValid(ply) or not a then print("gmsky_dump_tris: not anchored yet") return end
+		C.dumps = C.dumps + 1
+		local name = (args[1] or "here") .. "_" .. C.dumps
+		local count, path = C.Dump(ply, a, name)
+		local p = ply:GetPos() - a
+		gmsky.Log(string.format("chunks: DUMP %s at (%.1f, %.1f, %.1f) relative to the anchor: %s triangles to %s", name, p.x, p.y, p.z, tostring(count), tostring(path)))
+		print("gmsky_dump_tris: " .. tostring(count) .. " triangles -> " .. tostring(path))
+	end)
+
 	local function StuckReport(ply, a, wish)
 		local pos, mins, maxs = ply:GetPos(), ply:OBBMins(), ply:OBBMaxs()
 		local function Hull(from, to)
@@ -494,6 +598,19 @@ if SERVER then
 			local from = pos + Vector(0, 0, up)
 			parts[#parts + 1] = string.format("ahead from %.0f up: %s", up, TraceText(Hull(from, from + wish * 24)))
 		end
+		-- S2i-2: what the player's movement finds under the feet (ramps count only during movement).
+		local was = C.inMove[ply]
+		C.inMove[ply] = true
+		parts[#parts + 1] = "below as movement sees it: " .. TraceText(util.TraceHull({ start = pos + Vector(0, 0, 2), endpos = pos - Vector(0, 0, 24),
+			mins = Vector(mins.x, mins.y, 0), maxs = Vector(maxs.x, maxs.y, 1), filter = ply, mask = MASK_PLAYERSOLID, collisiongroup = COLLISION_GROUP_PLAYER_MOVEMENT }))
+		C.inMove[ply] = was
+		-- Test 129: big stone stairs got no ramp; why, from the stair triangles around the feet.
+		local rp = pos - a
+		local check = gmsky.RampCheck and gmsky.RampCheck(rp.x - 48, rp.y - 48, rp.z - 24, rp.x + 48, rp.y + 48, rp.z + 40)
+		if check then parts[#parts + 1] = check end
+		-- Test 131: the real triangles around the spot, every surface with its marks (logs/tris/).
+		local count, path = C.Dump(ply, a, "stuck_" .. C.stuck.episodes)
+		if count then parts[#parts + 1] = string.format("%d triangles dumped to %s", count, path) end
 		local g = ply:GetGroundEntity()
 		gmsky.Log(string.format("chunks: STUCK #%d for %d ticks at (%.1f, %.1f, %.1f), relative to the anchor (%.1f, %.1f, %.1f): on ground %s (%s), speed (%.0f, %.0f, %.0f), wish direction (%.2f, %.2f); %s; %s",
 			C.stuck.episodes, C.stuck.ticks, pos.x, pos.y, pos.z, pos.x - a.x, pos.y - a.y, pos.z - a.z, tostring(ply:IsOnGround()),
@@ -602,6 +719,7 @@ if SERVER then
 				end
 			end
 		end
+		C.UpdateRamps(a, N)
 		-- Chunks more than one chunk outside the window go.
 		for key, rec in pairs(C.chunks) do
 			local cx, cy, cz = key:match("^(%-?%d+) (%-?%d+) (%-?%d+)$")
@@ -614,7 +732,99 @@ if SERVER then
 		end
 		-- The entities stay at the anchor (a re-centre moves them in C.MoveAll; this catches anything else).
 		for _, rec in pairs(C.chunks) do
-			if IsValid(rec.ent) and rec.ent:GetPos():DistToSqr(a) > 0.0001 then C.MoveAll(a) break end
+			if IsValid(rec.ent) and (rec.ent:GetPos():DistToSqr(a) > 0.0001 or IsValid(rec.ent.gmskyRamp) and rec.ent.gmskyRamp:GetPos():DistToSqr(a) > 0.0001) then C.MoveAll(a) break end
+		end
+	end
+
+	-- ---- S2i-2: ramps (server) ----
+	-- Every RAMP_EVERY ticks, each built chunk whose regions or the regions around it changed gets
+	-- its ramps worked out again (gmsky.RampsInBox); the ramp entity is replaced only when the
+	-- ramp's triangles changed. At most RAMP_BUILDS ramp builds a tick.
+	local RAMP_EVERY, RAMP_BUILDS = 5, 2
+	C.rampStats = C.rampStats or { builds = 0, waits = 0, computed = 0 }
+
+	-- Self-test on the first ramp (half a second later, so the engine has it in its lists): line
+	-- traces down onto a ramp triangle's middle; what each one hits.
+	local function SelfTest(ramp, flat, a)
+		local ply = player.GetAll()[1]
+		if not IsValid(ply) or not IsValid(ramp) then C.rampSelfTested = false return end
+		local c = a + Vector((flat[1] + flat[4] + flat[7]) / 3, (flat[2] + flat[5] + flat[8]) / 3, (flat[3] + flat[6] + flat[9]) / 3)
+		local from, to = c + Vector(0, 0, 8), c - Vector(0, 0, 8)
+		local function Hit(tr)
+			if not tr.Hit then return "nothing" end
+			return string.format("%s at %.0f%%", IsValid(tr.Entity) and tr.Entity:GetClass() or tr.HitWorld and "the world" or "?", tr.Fraction * 100)
+		end
+		local was = C.inMove[ply]
+		C.inMove[ply] = true
+		local moving = util.TraceLine({ start = from, endpos = to, filter = ply, mask = MASK_PLAYERSOLID, collisiongroup = COLLISION_GROUP_PLAYER_MOVEMENT })
+		local movingHull = util.TraceHull({ start = from, endpos = to, mins = Vector(-2, -2, 0), maxs = Vector(2, 2, 1), filter = ply, mask = MASK_PLAYERSOLID, collisiongroup = COLLISION_GROUP_PLAYER_MOVEMENT })
+		C.inMove[ply] = nil
+		local outside = util.TraceLine({ start = from, endpos = to, filter = ply, mask = MASK_PLAYERSOLID, collisiongroup = COLLISION_GROUP_PLAYER_MOVEMENT })
+		local bullet = util.TraceLine({ start = from, endpos = to, filter = ply, mask = MASK_SHOT })
+		local nofilter = util.TraceLine({ start = from, endpos = to, mask = MASK_SOLID })
+		C.inMove[ply] = was
+		local pass = IsValid(moving.Entity) and moving.Entity == ramp and not (IsValid(bullet.Entity) and bullet.Entity:GetClass() == "gmsky_ramp")
+		gmsky.Log(string.format("chunks: ramp SELF-TEST %s on %s at (%.1f, %.1f, %.1f), ramp %s: player movement trace hits %s (box trace %s); the same trace outside movement hits %s; bullet trace hits %s; trace with no filter hits %s",
+			pass and "PASSED" or "FAILED", ramp:ChunkName(), c.x, c.y, c.z, tostring(C.rampContents), Hit(moving), Hit(movingHull), Hit(outside), Hit(bullet), Hit(nofilter)))
+	end
+
+	function C.UpdateRamps(a, N)
+		if engine.TickCount() % RAMP_EVERY ~= 0 or not gmsky.RampsInBox then return end
+		local built = 0
+		for key, rec in pairs(C.chunks) do
+			if built >= RAMP_BUILDS then break end
+			local e = rec.ent
+			if IsValid(e) and e.gmskyBuilt then
+				local cx, cy, cz = e:GetCX(), e:GetCY(), e:GetCZ()
+				local _, _, ver = gmsky.ShapesChunkVersion(cx * N - 1, cy * N - 1, cz * N - 1, cx * N + N, cy * N + N, cz * N + N)
+				if rec.rampVer ~= ver then
+					local lo, hi = e:GetBoxLo(), e:GetBoxHi()
+					local flat, n, hash, noses, strips, bottoms, floating, tops, topsOff, steepest = gmsky.RampsInBox(lo.x, lo.y, lo.z, hi.x, hi.y, hi.z)
+					if flat then
+						C.rampStats.computed = C.rampStats.computed + 1
+						if hash == rec.rampHash then
+							rec.rampVer = ver
+						else
+							if IsValid(e.gmskyRamp) then C.Retire(e.gmskyRamp, "its ramp triangles changed") end
+							e.gmskyRamp = nil
+							local info = { n = n, noses = noses, strips = strips, bottoms = bottoms, floating = floating, tops = tops, topsOff = topsOff, steepest = steepest }
+							if n == 0 then
+								rec.rampVer, rec.rampHash, rec.rampInfo = ver, hash, info
+							else
+								local rlo, rhi = Vector(math.huge, math.huge, math.huge), Vector(-math.huge, -math.huge, -math.huge)
+								for i = 1, n * 9, 3 do
+									rlo.x, rlo.y, rlo.z = math.min(rlo.x, flat[i]), math.min(rlo.y, flat[i + 1]), math.min(rlo.z, flat[i + 2])
+									rhi.x, rhi.y, rhi.z = math.max(rhi.x, flat[i]), math.max(rhi.y, flat[i + 1]), math.max(rhi.z, flat[i + 2])
+								end
+								local still = C.StillInEngine("ramp " .. key, a + rlo, a + rhi)
+								if still then
+									C.rampStats.waits = C.rampStats.waits + 1
+								else
+									local r = ents.Create("gmsky_ramp")
+									r:SetCX(cx) r:SetCY(cy) r:SetCZ(cz) r:SetN(N)
+									r:SetVersion(hash)
+									r:SetBoxLo(rlo) r:SetBoxHi(rhi)
+									r:SetSrcLo(lo) r:SetSrcHi(hi)
+									r:SetPos(a)
+									r:SetAngles(Angle(0, 0, 0))
+									r:Spawn()
+									r:Build(flat, n)
+									e.gmskyRamp = r
+									rec.rampVer, rec.rampHash, rec.rampInfo = ver, hash, info
+									built = built + 1
+									C.rampStats.builds = C.rampStats.builds + 1
+									gmsky.Log(string.format("chunks: ramps for chunk %s: %d triangles; %d noses, %d strips, steepest %.1f degrees; bottoms %d (%d ends found no floor within 48 units); tops %d (%d landings not flush within 1 unit)",
+										key, n, noses, strips, steepest, bottoms, floating, tops, topsOff))
+									if not C.rampSelfTested then
+										C.rampSelfTested = true
+										timer.Simple(0.5, function() SelfTest(r, flat, a) end)
+									end
+								end
+							end
+						end
+					end
+				end
+			end
 		end
 	end
 
@@ -628,6 +838,23 @@ if SERVER then
 		local line = string.format("%s; empty chunks %d, too big %d, chunks waiting for regions %d; this second: %d rebuilds, %d removed, %d empties found; stuck so far %d",
 			C.StatusLine(), empty, big, C.waitingRegions, s.rebuilds, s.removed, s.empties, C.stuck.episodes)
 		s.rebuilds, s.removed, s.empties = 0, 0, 0
+		-- S2i-2: the ramps of the chunks there now.
+		local k = { ents = 0, n = 0, noses = 0, strips = 0, bottoms = 0, floating = 0, tops = 0, topsOff = 0, steepest = 0 }
+		for _, rec in pairs(C.chunks) do
+			local info = rec.rampInfo
+			if info and IsValid(rec.ent) then
+				k.ents = k.ents + (IsValid(rec.ent.gmskyRamp) and 1 or 0)
+				k.n, k.noses, k.strips, k.bottoms = k.n + info.n, k.noses + info.noses, k.strips + info.strips, k.bottoms + info.bottoms
+				k.floating, k.tops, k.topsOff = k.floating + info.floating, k.tops + info.tops, k.topsOff + info.topsOff
+				k.steepest = math.max(k.steepest, info.steepest)
+			end
+		end
+		local rs = C.rampStats
+		line = line .. string.format("; ramps (gmsky_ramps %d): %d entities, %d triangles, %d noses, %d strips (steepest %.1f degrees), bottoms %d (%d ends in the air), tops %d (%d not flush); this second: %d worked out, %d built, %d engine waits, bullets %d (%d hit a ramp)%s",
+			C.ramps:GetInt(), k.ents, k.n, k.noses, k.strips, k.steepest, k.bottoms, k.floating, k.tops, k.topsOff, rs.computed, rs.builds, rs.waits,
+			C.bullets.shot, C.bullets.ramp, C.rampSelfTested == nil and ", self-test not run yet" or "")
+		rs.computed, rs.builds, rs.waits = 0, 0, 0
+		C.bullets.shot, C.bullets.ramp = 0, 0
 		return line
 	end
 

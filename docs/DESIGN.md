@@ -2579,8 +2579,8 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
   count "propped on step edges" as standing: the box rests on Skyrim's ground and walkable Skyrim
   ground is within the step height under the small footprint. **Differs from SkyCraft:** its body
   may overlap steps below step height; our box can't, so it stands on the edges instead.
-- **S2i. Stairs as player-only ramps (proposed 2026-10-06 after test 127; S2i-1 approved and
-  built 2026-10-06, not tested in game).** User after test 127: S2h's rules don't feel right; "if we can detect where stairs are,
+- **S2i. Stairs as player-only ramps (proposed 2026-10-06 after test 127; S2i-1 built, test
+  128: stair materials arrive; S2i-2 approved and built 2026-10-06, not tested in game).** User after test 127: S2h's rules don't feel right; "if we can detect where stairs are,
   can we generate ramp-like player only collision shapes? That way it'll be smooth." Test 127:
   S2h's step-up still almost never succeeded. **Finding stairs:** Skyrim gives every collision
   triangle a material, and stairs have their own (`StoneStairs`, `WoodStairs`, `SnowStairs`,
@@ -2611,6 +2611,71 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
      never collide with it (ShouldCollide). Self-test logged when the first ramp is built: a
      player trace hits it, a bullet trace doesn't. S2h's `stairs.lua` is removed in the same
      step (one system); S2g stays.
+     *Approved 2026-10-06 after test 128; how it is built:*
+     - **Ramp shape, in Rust** (`shapes.rs` `ramps_in_box`, so the server and the client make
+       exactly the same ramp from the same store): stair-material triangles in the chunk's box
+       plus 64 units around it. A **nose** = the top edge of a steep stair triangle (normal z
+       under 0.5, 1-20 units tall, both ends of the edge at its top, at least 2 units long);
+       duplicates merged. Each nose is paired with the nearest nose 1-20 units higher, 3-48
+       units away across it, parallel (within about 25 degrees) and overlapping it sideways.
+       The strip joins the nose to that nose's line. A nose that nothing below pairs with
+       (the bottom step) gets a strip down at the same slope to its riser's foot. A chunk owns
+       the noses whose middle is inside its box. Logged: noses, strips, bottom strips, strips
+       too steep to walk (normal z under 0.7) and the steepest angle. **Plan B check:** the same
+       pairing on triangles *without* a stair material is only counted ("shaped like stairs,
+       no stair material").
+     - **Ramp physics:** one `gmsky_ramp` entity per chunk that has ramps, built like a chunk
+       (same order, same "wait while an old mesh is still in the engine" rule), removed with
+       its chunk. Rebuilt only when the ramp's triangles change (a fingerprint of them); the
+       server re-computes when the regions of the chunk *or the regions around it* change. The
+       client builds its own copy and logs if its fingerprint differs from the server's.
+     - **Player-only, changed from the plan above:** Lua cannot set a physics mesh's contents
+       for traces reliably, so instead: the ramp uses Garry's Mod's custom collision check, and
+       the `ShouldCollide` hook answers "yes" only for the player *while its movement is being
+       worked out* (between the `SetupMove` and `FinishMove` hooks, on both sides); "no" to
+       everything else (props, the world, chunks, bullets, which are fired after movement).
+       Self-test on the first ramp: line traces down onto it with the movement mark on and
+       off, a bullet-style trace, and a trace with no filter; what each hits is logged.
+     - STUCK lines say what a player trace finds below the feet (ramp or not); the status line
+       counts ramps.
+     *After test 129* (ramps built and stood on, but the self-test's bullet trace hit them too;
+     big stone stairs had stair triangles but no ramp; 9 strips steeper than walkable): (1) a pair
+     of noses steeper than Source can walk (rise over run above 1.02, normal z 0.7) is never
+     joined (such a strip is an invisible wall); (2) the bottom strip runs down, each end
+     separately, in 1-unit steps until it meets the real floor below and ends exactly on it
+     (flush); no floor within 48 units: it ends in the air there (counted); (3) the landing 3
+     units beyond each top nose is checked against the nose's height (within 1 unit = flush;
+     counted, not changed); mid-stair strips meet flush by construction (each ends on the next
+     nose's line at its height); (4) every STUCK line adds a "ramp check": how many stair
+     triangles around the feet were rejected and why, and why the noses there have no partner;
+     (5) the ramp's physics contents become "player clip" (in the player's movement mask, not in
+     bullets'), real bullets are counted by what they hit. The ShouldCollide rule stays for
+     props (physics asks it).
+     *After test 130* (big stone stairs: 21-38 of their steep stair triangles have no single level
+     top edge, so the riser-based finder found few noses): **a nose is now the front edge of a
+     tread** instead of a riser's top edge. A tread is a stair triangle with normal z 0.9 or more;
+     its edge is a nose when it is level (ends within a unit), at least 2 long, and just beyond it
+     (1.5 units out, at a quarter, half and three quarters along; two of three must agree) the
+     surface does not continue at the same height (within 0.75) and nothing lies within step
+     height above (that is a tread's back, under the next step). Surface heights come from all
+     triangles (stair or not) through a 16-unit lookup grid. A nose pairs only with the *nearest*
+     higher parallel nose across it; if that one is too steep there is no strip (a further nose
+     would make the strip cut through the step between). The "shaped like stairs without a stair
+     material" count is dropped (it would need a tread search over all ground). Test 130 also
+     showed grenades and props collide with ramps and the contents change didn't pass the
+     self-test; the user put that behind the stone stairs.
+     *After test 132* (first real triangles, `gmsky_dump_tris` and STUCK dumps): the stone steps
+     are regular (rise 10-12, depth about 13) but **tilted along their length** (a step's front
+     edge rises 2-3 units over its 30-unit width) and the flight curves a few degrees per section;
+     both finders had demanded edges level within a unit. Noses may now rise 1 unit plus 0.2 per
+     unit of length, keep their height at each end (strips follow the tilt; pairing compares
+     heights across from the lower nose's middle). Also seen: other, non-stair surfaces (floors,
+     landings) can cover the lower part of a staircase; those buried steps are correctly not
+     noses, and the ramp starts at the first step above the floor, its bottom strip landing on
+     that floor. Checked offline before the next game test: an ignored unit test
+     (`ramps_on_real_dumps`, run by hand with `GMSKY_DUMPS=<folder>`) builds the ramps from each
+     dump and reports whether a ramp lies under the player's box; the dumps stay in `build/`
+     (game data, never in the repo).
   **Differs from SkyCraft:** SkyCraft makes no ramps. It uses Skyrim's own invisible ramps (few:
   test 125 found 34 bodies) as floor only, and its own collider walks stairs (small footprint).
   The material read is SkyCraft's code used for a new purpose. **Not known:** whether Garry's Mod
