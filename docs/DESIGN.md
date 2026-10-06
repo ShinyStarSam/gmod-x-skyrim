@@ -2437,6 +2437,62 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
     sides (logged); how often Skyrim's re-sent regions really change (logged); build time of the
     densest chunks (cities); that freed memory can't still look alive to `gmsky.PhysAlive` (a
     chunk waiting more than 1 s is logged with its unchanging list).
+- **S2b. Fix for test 119's crash (planned 2026-10-06 after Ghidra on how the engine deletes
+  objects; the user: "read how the engine actually deletes objects, then plan a fix").**
+  - **How deletion really works (Ghidra, read-only; addresses in MODLOG.md):** Lua
+    `PhysicsDestroy` → the entity's `VPhysicsDestroyObject` → `PhysDestroyObject`, which first
+    clears the object's "game data" (its entity), then calls the engine's `DestroyObject`, all in
+    the same call. The engine deletes it **at once** unless it is in the middle of a physics step
+    or its "queue deletes" switch is on; then it waits on a list that is emptied **at the start
+    of the next physics step**. When the delete runs, the engine object and all its pair records
+    go at once. The server has the switch on (its meshes are "still held" right after
+    `PhysicsDestroy`), the client hasn't (its meshes are gone at 0 ticks). So a destroyed mesh
+    lives **at most until the next physics step (1 tick)**, never 7.
+  - **Corrections this makes:** test 117's "7 ticks" was how often the check ran (the server's
+    entity `Think` comes every ~0.1 s), not how long the engine kept the mesh. `gmsky.PhysAlive`
+    is right: the wrapper's destructor clears the very pointer it reads, then deletes the engine
+    object at once, so "gone" means gone. So in test 119 the old `27 -29 -1` really had gone.
+    And test 116 is explained exactly: a dead mesh has no game data, and with no game data the
+    game's collision filter always says "collide", so nothing could stop its records.
+  - **What crashed in test 119 instead:** the dump's stack runs through `CollisionRulesChanged`
+    (`server.dll+0x2eb909`) called from our Lua: one of the setup calls of the **new**
+    `27 -29 -1`, whose list didn't overflow; its live neighbour's (`27 -30 -1`, the player's) did.
+    The engine's rule for making pair records (`vphysics+0x98880`): for the object being
+    re-checked and each nearby object, (1) at least one of the two must be movable, (2) not both
+    "unmoveable", (3) the game's collision filter must say yes. A new mesh is movable until
+    `EnableMotion(false)`, and Source's filter only says "no" to two meshes when **both** carry
+    `FVPHYSICS_CONSTRAINT_STATIC`. We add that flag **last**, after five calls that each
+    re-check the new, movable mesh against its neighbours (InfMap2's order). So for those five
+    calls every neighbour is fair game: (triangles of the new chunk near the shared face) x
+    (triangles of the neighbour near it). Two dense chunks can pass 65,532. **Not proven:** this
+    is read from the code and fits the dump; the count itself has never been logged.
+  - **The fix (one variable):** give the new mesh `FVPHYSICS_CONSTRAINT_STATIC` (and
+    `NO_SELF_COLLISIONS`) **right after `PhysicsFromMesh`, before any other setup call**, both
+    sides. Every other chunk already has it, so the filter answers "no" for every chunk pair
+    from the first re-check on. Chunk vs player and chunk vs props are untouched (they don't
+    carry the flag). The rest of the order stays as now. The "wait until the old mesh has left
+    the engine" rule stays: it is the only protection against dead meshes (no game data, no
+    filter), and it now waits 1 tick on the server, 0 on the client.
+  - **Logged (to prove it from the numbers):** for every chunk build, after `PhysicsFromMesh`
+    and after every setup call: the new chunk's pair records **with other chunks** (count, and
+    the chunk with most), its list size, and the largest neighbour list. A setting
+    `gmsky_chunks_flagfirst 0|1` (default 1) switches between today's order and the fix, so the
+    same test shows both. A command `gmsky_chunks_stress` rebuilds the chunks around the
+    player's every 0.5 s (as if Skyrim had changed them), so we don't have to wait for a natural
+    rebuild under a running player.
+  - **Tests:** (A) `gmsky_chunks_flagfirst 0`, `gmsky_chunks_stress`, run around: *expect*
+    chunk-to-chunk records in the setup lines, large for dense neighbours, possibly the crash
+    (that would confirm the cause). (B) `gmsky_chunks_flagfirst 1`, same: *pass* = 0 records
+    with other chunks on every line, no crash in a few hundred rebuilds, props still land on
+    chunks, the player still walks on them. Then test 119's run again without stress.
+  - **If (B) still shows chunk records:** they come from a route that skips the filter (two
+    engine bits at `+0x78`, not decoded yet), or from `PhysicsFromMesh` itself (before we can
+    add the flag); the "after PhysicsFromMesh" line tells which. Fallbacks: `EnableMotion(false)`
+    also first (rule 1: two unmovable objects make no records at all); or a Lua `ShouldCollide`
+    "no" for chunk pairs with `SetCustomCollisionCheck` set before `PhysicsFromMesh`.
+  - **Differs from InfMap2:** the setup order (InfMap2 adds `CONSTRAINT_STATIC` last, like us
+    today; its chunks have tens of triangles, so it never gets near the limit). **SkyCraft** has
+    no Source physics; nothing to compare.
 - **S3. Props, ragdolls and grenades on it.** Mostly free once S2 works. Added: a prop moving into
   a chunk that isn't built yet is frozen for that moment and released with its speed (like the
   player's hold; InfMap2 doesn't need this because it makes its terrain itself, instantly; we

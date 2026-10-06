@@ -1,10 +1,14 @@
 # STATUS
 
-**2026-10-06, test 117: UNBLOCKED. The physics crash's cause is found and avoided:** a new mesh
-was built over the old one while the engine still held it (`PhysicsDestroy` always leaves the object
-for 7 more ticks). Waiting until it is gone: 174 builds, no crash. **S2 (physics chunks,
-`gmsky_ground physics`) is BLOCKED after two crashes** (test 118: fast travel, fixed; test 119: running,
-right after a neighbouring chunk was rebuilt). See "The current problem". Waiting for the user's choice.
+**2026-10-06, after Ghidra on how the engine deletes objects: S2 (physics chunks, `gmsky_ground
+physics`) is still BLOCKED by test 119's crash, but now with a planned fix (step S2b in
+`docs/DESIGN.md`), waiting for the user's go-ahead.** The deletion code shows a destroyed mesh
+lives at most one physics tick (test 117's "7 ticks" was our check's rhythm), and our "gone" check
+is right, so test 119's old mesh really was gone. The crash came inside a setup call of the *new*
+chunk: while it is still movable, the engine makes pair records with its live neighbour, because
+the "two static meshes never collide" flag is added last. Fix: add it first. See "The current problem".
+Earlier the same day: test 117 found the first crash's cause (a new mesh built over the old one
+while the engine still held it); waiting for it to go gave 174 builds without a crash.
 **Earlier: after in-game tests 101-111: BLOCKED on Garry's Mod's physics crash** (physics props on
 Skyrim's ground, plan `docs/DESIGN.md` "One collision system", step S1c). See "The current
 problem". **Ghidra (2026-10-06) found the cause:** a per-object list of collision pair records
@@ -144,26 +148,39 @@ chunks the whole time, barrels came to rest, every pair-record list stayed tiny)
    check said it left the engine after **1 tick** (test 117 measured 7 ticks every time, but kept
    the entity); the new mesh came in the next tick; crash.
 
-**What is known:** every rebuild with the entity removed reported "gone" after 1 tick (5 of 5, tests
+**What Ghidra showed (2026-10-06, read-only; addresses in MODLOG.md):**
+- **Deletion:** `PhysicsDestroy` clears the mesh's entity link and asks the engine to delete it in
+  the same call. The engine deletes it at once, or (the server's setting) at the start of the next
+  physics step. Then the engine object and all its pair records go at once. So the gap is at most
+  1 tick. Test 117's "7 ticks" was how often our server check ran (every ~0.1 s), not the engine.
+- **Our "gone" check is right:** the delete clears the very pointer `gmsky.PhysAlive` reads. The guess
+  in "Before Ghidra" below is wrong: the old `27 -29 -1` really was gone.
+- **Where it crashed:** test 119's dump stack goes through `CollisionRulesChanged` called from our
+  Lua, so inside a setup call of the **new** `27 -29 -1`.
+- **Why (read from the code, not yet counted):** the engine makes pair records between the object
+  it re-checks and a nearby one when one of them is movable and the game's filter says yes. A new
+  mesh is movable until `EnableMotion(false)`, and the filter only says "no" to two meshes that
+  both carry `FVPHYSICS_CONSTRAINT_STATIC`, which we (like InfMap2) add **last**, after five
+  re-checks. So the new chunk pairs up with its dense neighbour along their shared face; two dense
+  chunks can pass the 65,532 limit. Fits guess (b) of test 119 in MODLOG.md.
+
+**Options (my order):**
+1. **S2b (recommended, planned in `docs/DESIGN.md`):** add `FVPHYSICS_CONSTRAINT_STATIC` (and
+   `NO_SELF_COLLISIONS`) right after `PhysicsFromMesh`, before any other setup call; log every
+   chunk build's records with other chunks after each call; a setting to switch back to today's
+   order and a stress command that rebuilds the chunks around the player every 0.5 s, so one test
+   compares both orders. One variable. Differs from InfMap2's order.
+2. **Also freeze first** (`EnableMotion(false)` right after `PhysicsFromMesh`): by the engine's
+   rule, two unmovable objects make no records at all. A second variable; only if 1 isn't enough.
+3. **Lua `ShouldCollide` "no" for chunk pairs** (custom check set before `PhysicsFromMesh`):
+   the same effect as 1 through the Lua hook; slower (runs Lua per pair).
+4. ~~Wait 16 ticks after a destroy / keep the entity until the engine lets go~~ (old options 1-2):
+   **not needed**; the code shows the wait is already exact.
+
+**Before Ghidra (kept as a record):** every rebuild with the entity removed reported "gone" after 1 tick (5 of 5, tests
 118-119); one of them crashed. **Not known:** whether the old mesh really was gone. `gmsky.PhysAlive`
 judges by Valve's wrapper object, which removing the entity may free while the engine's own object
 lingers (a guess). Also not known why the neighbour's list, not the new mesh's, overflowed.
-
-**Options (my order):**
-1. **Measure the gap directly, plus a safe margin (recommended).** Never trust "gone" sooner than
-   16 ticks after a destroy (twice the 7 measured), and judge the engine's own object, not only the
-   wrapper: also check that no other object's list still holds a record with it (the player's and
-   the neighbours' lists, read as in tests 115-116). Log the neighbours' list sizes before every
-   build and the new chunk's partners after it, so a crash names the partner. Test: run far again.
-2. **Destroy the physics but keep the entity until the engine lets go** (test 117's exact path,
-   which measured 7 ticks reliably): `PhysicsDestroy` now, `Remove` only after the old mesh is gone.
-   One variable, cheap; doesn't explain the neighbour's list.
-3. **Freeze the new mesh sooner:** call `EnableMotion(false)` right after `PhysicsFromMesh`, before
-   `SetSolid` (differs from InfMap2's order), so a new mesh is never movable next to a dense
-   neighbour. Tests 14-15 found that moving setup calls only moved the crash, so not sure.
-4. **Ghidra:** read how `PhysicsDestroy` / entity removal delete the engine object (when the pair
-   records really go). Read-only; slower, but would replace guesses with facts.
-
 
 ### Earlier: physics ground crashes Garry's Mod (2026-10-06, tests 101-114; cause found in tests 115-117, see idea 2 and 2d)
 
