@@ -14,11 +14,13 @@ pub const MAX_TEXTURE: u32 = 1024;
 /// handedness), u, v, 4 x (bone, weight).
 pub const VERTEX_NUMBERS: usize = 20;
 /// Numbers per part: first corner, corner count, texture id, GMSKY_RND_MAT_* flags, alpha
-/// reference, normal map texture id, phong exponent, phong boost.
-pub const PART_NUMBERS: usize = 8;
+/// reference, normal map texture id, phong exponent, phong boost, Fresnel ranges (3), phong tint
+/// (3), phong exponent texture id, self-illumination tint (3), self-illumination mask texture id.
+pub const PART_NUMBERS: usize = 19;
 /// Numbers before each object's matrices in RenderFrame's flat table: model id, colour, bone
-/// count, entity number, GMSKY_RND_OBJ_* flags.
-pub const OBJECT_NUMBERS: usize = 5;
+/// count, entity number, GMSKY_RND_OBJ_* flags, feet x y z (world), width, height (width 0: no
+/// contact shadow; above 0 sets OBJ_CONTACT).
+pub const OBJECT_NUMBERS: usize = 10;
 
 pub type M34 = [[f32; 4]; 3];
 
@@ -160,7 +162,10 @@ impl RenderOut {
             .chunks(PART_NUMBERS)
             .filter(|p| p.len() == PART_NUMBERS)
             .map(|p| Part { first_index: p[0] as u32, index_count: p[1] as u32, texture_id: p[2] as u32, flags: p[3] as u32, alpha_ref: p[4] as f32,
-                            normal_texture_id: p[5] as u32, phong_exponent: p[6] as f32, phong_boost: p[7] as f32 })
+                            normal_texture_id: p[5] as u32, phong_exponent: p[6] as f32, phong_boost: p[7] as f32,
+                            phong_fresnel: [p[8] as f32, p[9] as f32, p[10] as f32], phong_tint: [p[11] as f32, p[12] as f32, p[13] as f32],
+                            phong_exponent_texture_id: p[14] as u32, reserved: 0,
+                            selfillum_tint: [p[15] as f32, p[16] as f32, p[17] as f32], selfillum_mask_texture_id: p[18] as u32 })
             .collect();
         let msg = encode_model(id, bone_count, &parts, &vertices, &indices);
         decode_model(&msg).map_err(|e| format!("model {id} refused before sending: {e}"))?;
@@ -173,7 +178,7 @@ impl RenderOut {
     }
 
     /// One Garry's Mod frame: per object, model id, colour (RGBA8 number), bone count, entity
-    /// number, GMSKY_RND_OBJ_* flags, then 12 numbers per bone (`GetBoneMatrix`, world). Each
+    /// number, GMSKY_RND_OBJ_HELD, feet (world), width, height, then 12 numbers per bone (`GetBoneMatrix`, world). Each
     /// becomes bone x poseToBone, relative to the anchor. `view`: Garry's Mod's camera for this
     /// frame (eye in world units, pitch / yaw / roll). Returns the objects sent.
     pub fn frame(&mut self, frame: u64, flat: &[f64], epoch: u32, anchor: [f64; 3], view: Option<([f64; 3], [f64; 3])>, switches: u32) -> u32 {
@@ -187,7 +192,12 @@ impl RenderOut {
         let mut at = 0;
         while at + OBJECT_NUMBERS <= flat.len() {
             let (model, color, bones) = (flat[at] as u32, flat[at + 1] as u32, flat[at + 2] as usize);
-            let (entity, flags) = (flat[at + 3] as u32, flat[at + 4] as u32);
+            let (entity, mut flags) = (flat[at + 3] as u32, flat[at + 4] as u32 & OBJ_HELD);
+            let (width, height) = (flat[at + 8] as f32, flat[at + 9] as f32);
+            let feet = [(flat[at + 5] - anchor[0]) as f32, (flat[at + 6] - anchor[1]) as f32, (flat[at + 7] - anchor[2]) as f32];
+            if width > 0.0 {
+                flags |= OBJ_CONTACT;
+            }
             at += OBJECT_NUMBERS;
             if at + bones * 12 > flat.len() {
                 break;
@@ -211,9 +221,10 @@ impl RenderOut {
                 }
                 matrices.push(Matrix { m: compose(&w, bind) });
             }
-            objects.push(Object { model_id: model, first_matrix: first, matrix_count: bones as u32, color, flags, entity });
+            let (feet, width, height) = if flags & OBJ_CONTACT != 0 { (feet, width, height) } else { ([0.0; 3], 0.0, 0.0) };
+            objects.push(Object { model_id: model, first_matrix: first, matrix_count: bones as u32, color, flags, entity, feet, width, height, reserved: 0 });
         }
-        let switches = switches & (FRAME_FLIP_GREEN | FRAME_NO_NORMALS | FRAME_NO_PHONG | FRAME_NO_SHADOWS);
+        let switches = switches & (FRAME_FLIP_GREEN | FRAME_NO_NORMALS | FRAME_NO_PHONG | FRAME_NO_SHADOWS | FRAME_LINEAR_ALBEDO | FRAME_SHADOW_DEBUG);
         let mut header = Frame { frame, qpc: now_qpc(), origin_epoch: epoch, flags: switches, ..Default::default() };
         if let Some((eye, angles)) = view {
             header.flags |= FRAME_VIEW;
@@ -305,15 +316,18 @@ mod tests {
         for x in [0.0, 1.0, 0.0] {
             verts.extend_from_slice(&[x, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         }
-        assert!(out.add_model(9, 1, &verts, &[0.0, 3.0, 5.0, MAT_PHONG as f64, 0.0, 6.0, 20.0, 2.0], &identity_with([-1.0, 0.0, 0.0])).is_ok());
+        assert!(out.add_model(9, 1, &verts, &[0.0, 3.0, 5.0, MAT_PHONG as f64, 0.0, 6.0, 20.0, 2.0, 0.1, 0.5, 1.5, 0.9, 0.8, 0.7, 7.0, 0.5, 0.6, 0.7, 8.0], &identity_with([-1.0, 0.0, 0.0])).is_ok());
         assert!(out.add_model(10, 1, &verts[..20], &[], &identity_with([0.0; 3])).is_err(), "not whole triangles");
         // The bone at (101, 2, 3) in the world, the anchor at (100, 0, 0): (1, 2, 3) - 1 in x.
-        let mut flat = vec![9.0, 4294967295.0, 1.0, 17.0, OBJ_HELD as f64];
+        let mut flat = vec![9.0, 4294967295.0, 1.0, 17.0, OBJ_HELD as f64, 0.0, 0.0, 0.0, 0.0, 0.0];
         flat.extend(identity_with([101.0, 2.0, 3.0]));
-        flat.extend_from_slice(&[42.0, 0.0, 1.0, 18.0, 0.0]); // unknown model
+        flat.extend_from_slice(&[42.0, 0.0, 1.0, 18.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]); // unknown model
         flat.extend(identity_with([0.0; 3]));
+        // An NPC: feet at (130, 5, 0) in the world, 32 wide, 72 tall; a stray flag bit is dropped.
+        flat.extend_from_slice(&[9.0, 0.0, 1.0, 19.0, 0x80 as f64, 130.0, 5.0, 0.0, 32.0, 72.0]);
+        flat.extend(identity_with([130.0, 5.0, 0.0]));
         let view = Some(([110.0, 5.0, 64.0], [10.0, 90.0, 0.0]));
-        assert_eq!(out.frame(1, &flat, 3, [100.0, 0.0, 0.0], view, FRAME_NO_PHONG | 0x8000), 1);
+        assert_eq!(out.frame(1, &flat, 3, [100.0, 0.0, 0.0], view, FRAME_NO_PHONG | 0x8000), 2);
         assert_eq!(out.frame(2, &flat, 0, [0.0; 3], view, 0), 0, "no epoch, no frame");
 
         let reader = RenderMapping::open_named(&name).unwrap();
@@ -322,13 +336,17 @@ mod tests {
             kinds.push(kind);
             if kind == MSG_FRAME {
                 let (f, o, m) = decode_frame(p).unwrap();
-                assert_eq!((f.origin_epoch, o.len(), o[0].model_id, o[0].color, o[0].entity, o[0].flags), (3, 1, 9, 0xFFFF_FFFF, 17, OBJ_HELD));
+                assert_eq!((f.origin_epoch, o.len(), o[0].model_id, o[0].color, o[0].entity, o[0].flags), (3, 2, 9, 0xFFFF_FFFF, 17, OBJ_HELD));
+                assert_eq!((o[0].feet, o[0].width), ([0.0; 3], 0.0), "a prop: no contact shadow");
+                assert_eq!((o[1].entity, o[1].flags, o[1].feet, o[1].width, o[1].height), (19, OBJ_CONTACT, [30.0, 5.0, 0.0], 32.0, 72.0), "an NPC: feet relative to the anchor");
                 assert_eq!((f.flags, f.view_eye, f.view_angles), (FRAME_VIEW | FRAME_NO_PHONG, [10.0, 5.0, 64.0], [10.0, 90.0, 0.0]), "view relative to the anchor, switches kept, unknown bits dropped");
                 assert_eq!([m[0].m[0][3], m[0].m[1][3], m[0].m[2][3]], [0.0, 2.0, 3.0]);
             }
             if kind == MSG_MODEL {
                 let m = decode_model(p).unwrap();
                 assert_eq!((m.parts[0].normal_texture_id, m.parts[0].phong_exponent, m.parts[0].phong_boost, m.parts[0].flags), (6, 20.0, 2.0, MAT_PHONG));
+                assert_eq!((m.parts[0].phong_fresnel, m.parts[0].phong_tint, m.parts[0].phong_exponent_texture_id), ([0.1, 0.5, 1.5], [0.9, 0.8, 0.7], 7));
+                assert_eq!((m.parts[0].selfillum_tint, m.parts[0].selfillum_mask_texture_id), ([0.5, 0.6, 0.7], 8));
                 assert_eq!(m.vertices[0].tangent, [1.0, 0.0, 0.0, 1.0]);
             }
             if kind == MSG_TEXTURE {

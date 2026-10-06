@@ -1218,14 +1218,15 @@ fn main() {
                 HARNESS_CVARS.gmsky_render = "1"
                 local frame = 100
                 function FrameNumber() return frame end
-                HARNESS_FILES = {{ ["materials/harness/box.vtf"] = "{vtf_lua}", ["materials/harness/box_normal.vtf"] = "{vtf_lua}" }}
+                HARNESS_FILES = {{ ["materials/harness/box.vtf"] = "{vtf_lua}", ["materials/harness/box_normal.vtf"] = "{vtf_lua}", ["materials/harness/box_exp.vtf"] = "{vtf_lua}" }}
                 file = {{ Read = function(name, path) HARNESS_READ_PATH = path return HARNESS_FILES[name] end }}
                 local function M(t) return {{ Unpack = function() return 1, 0, 0, t[1], 0, 1, 0, t[2], 0, 0, 1, t[3], 0, 0, 0, 1 end }} end
                 function Material(name)
                     return {{ IsError = function() return false end,
                         GetInt = function(_, k) return (k == "$flags" and 0x100) or (k == "$phong" and 1) or 0 end,
                         GetFloat = function(_, k) return k == "$phongexponent" and 20 or nil end,
-                        GetTexture = function(_, k) return {{ IsError = function() return false end, GetName = function() return k == "$bumpmap" and "harness/box_normal" or "harness/box" end }} end }}
+                        GetVector = function(_, k) return k == "$phongfresnelranges" and Vector(0.1, 0.5, 1.5) or Vector(0, 0, 0) end,
+                        GetTexture = function(_, k) return {{ IsError = function() return false end, GetName = function() return (k == "$bumpmap" and "harness/box_normal") or (k == "$phongexponenttexture" and "harness/box_exp") or "harness/box" end }} end }}
                 end
                 local corner = function(x) return {{ pos = Vector(x, 0, 0), normal = Vector(0, 0, 1), userdata = {{ 1, 0, 0, -1 }}, u = x, v = 0, weights = {{ {{ bone = 0, weight = 1 }} }} }} end
                 util.GetModelMeshes = function(model, lod, mask, skin)
@@ -1236,7 +1237,9 @@ fn main() {
                     return {{ GetClass = function() return class end, GetModel = function() return model end, GetSkin = function() return 0 end,
                         IsDormant = function() return false end, GetNoDraw = function() return extra == "nodraw" end, IsWeapon = function() return class == "weapon_mine" end,
                         GetOwner = function() return class == "weapon_mine" and HARNESS_PLY or nil end, GetColor = function() return {{ r = 255, g = 255, b = 255, a = 255 }} end,
-                        GetPos = function() return at end, SetupBones = function() end, EntIndex = function() return 42 end,
+                        GetPos = function() return at end, SetupBones = function() end, EntIndex = function() return class == "npc_citizen" and 43 or 42 end,
+                        IsNPC = function() return class == "npc_citizen" end, IsNextBot = function() return false end, IsPlayer = function() return false end,
+                        OBBMins = function() return Vector(-16, -13, 0) end, OBBMaxs = function() return Vector(16, 13, 72) end,
                         GetNW2Bool = function(_, k) return k == "gmsky_held" and extra == "held" end,
                         GetBoneMatrix = function(_, b) return b == 0 and M({{ at.x, at.y, at.z }}) or nil end,
                         GetWorldTransformMatrix = function() return M({{ at.x, at.y, at.z }}) end }}
@@ -1255,6 +1258,7 @@ fn main() {
                     Ent("prop_physics", "models/harness/box.mdl", near + Vector(9000, 0, 0)),
                     Ent("prop_physics", "models/harness/box.mdl", near, "nodraw"),
                     Ent("func_brush", "*3", near),
+                    Ent("npc_citizen", "models/harness/box.mdl", near + Vector(30, 0, 0)),
                 }} end
                 hook.Run("PostDrawOpaqueRenderables", false, false, false)
                 hook.Run("PostDrawOpaqueRenderables", false, false, false)  -- the same frame: not sent twice
@@ -1269,13 +1273,14 @@ fn main() {
                 return HARNESS_MESHES_ASKED .. " " .. HARNESS_READ_PATH .. " | " .. line
             "#);
             let r = lua.run(lc, &setup);
-            let ok = matches!(&r, Ok(Some(s)) if s.starts_with("1 GAME | render: on; 2 frames, 1.0 objects a frame, 1.0 held (gmsky_render_held 1), 0 skipped") && s.contains("models 1 ok, 0 can't be drawn") && s.contains("textures 2 (2 new, 0 failed)"));
-            check(ok, &format!("render.lua: one prop wanted, its model read once, its texture from GAME: {r:?}"));
+            let ok = matches!(&r, Ok(Some(s)) if s.starts_with("1 GAME | render: on; 2 frames, 2.0 objects a frame, 1.0 held (gmsky_render_held 1), 1.0 with contact shadows, 0 skipped") && s.contains("models 1 ok, 0 can't be drawn") && s.contains("textures 3 (3 new, 0 failed)"));
+            check(ok, &format!("render.lua: one prop and one NPC wanted, the model read once, its texture from GAME: {r:?}"));
             let mut kinds = Vec::new();
             let mut frames = Vec::new();
             let mut model_ok = false;
             let mut texture_ok = false;
             let mut normal_ok = false;
+            let mut exponent_ok = false;
             skyrim.read(u64::MAX, |kind, p| {
                 kinds.push(kind);
                 match kind {
@@ -1283,8 +1288,10 @@ fn main() {
                         let (t, px) = decode_texture(p).unwrap();
                         if t.id == 1 {
                             texture_ok = (t.width, t.height, t.format, t.flags) == (4, 4, TEX_RGBA8, 0) && px[0..4] == [30, 20, 10, 255];
+                        } else if t.id == 2 {
+                            normal_ok = t.flags == TEXF_LINEAR;
                         } else {
-                            normal_ok = t.id == 2 && t.flags == TEXF_LINEAR;
+                            exponent_ok = t.id == 3 && t.flags == TEXF_LINEAR;
                         }
                     }
                     MSG_MODEL => {
@@ -1292,6 +1299,8 @@ fn main() {
                         model_ok = m.model.id == 1 && m.model.bone_count == 1 && m.indices.len() == 3 && m.parts.len() == 1
                             && m.parts[0].texture_id == 1 && m.parts[0].flags == MAT_ALPHATEST | MAT_PHONG && m.parts[0].alpha_ref == 0.5
                             && m.parts[0].normal_texture_id == 2 && m.parts[0].phong_exponent == 20.0 && m.parts[0].phong_boost == 1.0
+                            && m.parts[0].phong_fresnel == [0.1, 0.5, 1.5] && m.parts[0].phong_tint == [1.0, 1.0, 1.0] && m.parts[0].phong_exponent_texture_id == 3
+                            && m.parts[0].selfillum_tint == [1.0, 1.0, 1.0] && m.parts[0].selfillum_mask_texture_id == 0
                             && m.vertices[1].pos == [1.0, 0.0, 0.0] && m.vertices[1].u == 1.0 && m.vertices[1].weights[0] == 255
                             && m.vertices[1].tangent == [1.0, 0.0, 0.0, -1.0];
                     }
@@ -1302,12 +1311,17 @@ fn main() {
             check(kinds.first() == Some(&MSG_RESET) && kinds.iter().filter(|&&k| k == MSG_FRAME).count() == 2,
                   &format!("render.lua: RESET first, one FRAME per Garry's Mod frame (also on a 2D-sky map; not for the 3D sky, depth or a repeat): {kinds:?}"));
             check(texture_ok, "render.lua: the VTF reaches Skyrim as a 4x4 RGBA8 texture (BGRA swapped)");
-            check(model_ok, "render.lua: the model reaches Skyrim (1 triangle, alpha-tested phong part on texture 1 with normal map 2 (exponent 20, boost default 1), corner on bone 0 with its tangent)");
+            check(model_ok, "render.lua: the model reaches Skyrim (1 triangle, alpha-tested phong part on texture 1 with normal map 2 (exponent 20, boost default 1, Fresnel [0.1 0.5 1.5], tint default white), corner on bone 0 with its tangent)");
             check(normal_ok, "render.lua: the $bumpmap goes as a second texture, flagged linear");
+            check(exponent_ok, "render.lua: the $phongexponenttexture goes as a third texture, flagged linear");
             let first = frames.first().map(|(f, o, m)| (f.frame, f.origin_epoch, o.len(), o.first().map(|o| (o.model_id, o.color, o.entity, o.flags)), m.first().map(|m| [m.m[0][3], m.m[1][3], m.m[2][3]])));
             // Bone at anchor + (10, 20, 30), poseToBone moves by -1 in x: (9, 20, 30) from the anchor.
-            check(first == Some((100, 1, 1, Some((1, 0xFFFF_FFFF, 42, OBJ_HELD)), Some([9.0, 20.0, 30.0]))),
+            check(first == Some((100, 1, 2, Some((1, 0xFFFF_FFFF, 42, OBJ_HELD)), Some([9.0, 20.0, 30.0]))),
                   &format!("render.lua: the frame has the held prop (entity 42) at bone x poseToBone minus the anchor, origin epoch 1: {first:?}"));
+            // Step N1: the NPC (entity 43) carries a contact shadow: feet relative to the anchor, 32 wide, 72 tall; the prop none.
+            let npc = frames.first().and_then(|(_, o, _)| o.get(1).map(|o| (o.entity, o.flags, o.feet, o.width, o.height, o.matrix_count)));
+            check(npc == Some((43, OBJ_CONTACT, [40.0, 20.0, 30.0], 32.0, 72.0, 1)) && frames.first().is_some_and(|(_, o, _)| o[0].width == 0.0),
+                  &format!("render.lua: the NPC is sent with its feet and size for its contact shadow, the prop without: {npc:?}"));
             let view = frames.first().map(|(f, _, _)| (f.flags, f.view_eye, f.view_angles));
             check(view == Some((FRAME_VIEW, [5.0, 20.0, 30.0], [5.0, 90.0, 0.0])), &format!("render.lua: the frame carries Garry's Mod's view, relative to the anchor: {view:?}"));
             // The server marks what the physgun picks up, and unmarks it on drop.

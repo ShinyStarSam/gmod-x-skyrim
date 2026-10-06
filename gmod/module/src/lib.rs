@@ -1402,7 +1402,7 @@ unsafe extern "C" fn l_render_texture(l: *mut State) -> c_int {
 }
 
 /// gmsky.RenderModel(id, bone_count, vertices, parts, bind_poses) -> ok, line: flat number tables
-/// (20 per corner, 8 per part, 12 per bone; render_out.rs).
+/// (20 per corner, 19 per part, 12 per bone; render_out.rs).
 unsafe extern "C" fn l_render_model(l: *mut State) -> c_int {
     guarded(l, |a, side| {
         let (id, bones) = ((a.tonumber)(l, 1) as u32, (a.tonumber)(l, 2) as u32);

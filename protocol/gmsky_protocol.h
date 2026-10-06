@@ -505,7 +505,7 @@ typedef struct GmskyOverlaySlotHdr {  // written by Garry's Mod into its own slo
 // (tail = head) and adds 1 to reader_epoch; Garry's Mod then sends RESET and everything again.
 #define GMSKY_RND_SHM_NAME L"Local\\GmodSkyrim_render_v1"
 #define GMSKY_RND_MAGIC 0x444E524Du  // "MRND"
-#define GMSKY_RND_VERSION 3u  // 2: the frame carries Garry's Mod's view; objects their entity and flags (G5a + G6); 3: tangents, normal maps, phong (G5b bundle)
+#define GMSKY_RND_VERSION 6u  // 2: the frame carries Garry's Mod's view; objects their entity and flags (G5a + G6); 3: tangents, normal maps, phong (G5b bundle); 4: phong Fresnel, tint, exponent texture; 5: objects carry feet and size (contact shadows); 6: self-illumination tint and mask
 #define GMSKY_RND_RING_BYTES (64u << 20)
 #define GMSKY_RND_HEAD_OFF 0x1000u
 #define GMSKY_RND_TAIL_OFF 0x1040u
@@ -533,6 +533,7 @@ typedef struct GmskyOverlaySlotHdr {  // written by Garry's Mod into its own slo
 #define GMSKY_RND_MAT_NOCULL 0x10u
 #define GMSKY_RND_MAT_PHONG 0x20u                // phong shine (exponent, boost in the part)
 #define GMSKY_RND_MAT_BASEALPHA_PHONGMASK 0x40u  // the shine's mask is the base texture's alpha (else the normal map's)
+#define GMSKY_RND_MAT_ALBEDOTINT 0x80u           // $phongalbedotint: the shine takes the base colour (by the exponent texture's green)
 
 // GmskyRndTexture.flags
 #define GMSKY_RND_TEXF_LINEAR 0x1u  // not colour: read as is, not as sRGB (normal maps)
@@ -544,8 +545,11 @@ typedef struct GmskyOverlaySlotHdr {  // written by Garry's Mod into its own slo
 #define GMSKY_RND_FRAME_NO_NORMALS 0x4u   // normal maps off (gmsky_render_normals 0)
 #define GMSKY_RND_FRAME_NO_PHONG 0x8u     // phong shine off (gmsky_render_phong 0)
 #define GMSKY_RND_FRAME_NO_SHADOWS 0x10u  // shadows off (gmsky_render_shadows 0)
+#define GMSKY_RND_FRAME_LINEAR_ALBEDO 0x20u  // colour textures converted sRGB -> linear (the old way; gmsky_render_linear_albedo 1)
+#define GMSKY_RND_FRAME_SHADOW_DEBUG 0x40u   // our objects coloured by their sun shadow (gmsky_render_shadow_debug 1; step N1)
 // GmskyRndObject.flags
 #define GMSKY_RND_OBJ_HELD 0x1u    // held by the player (physgun, gravity gun, +use): placed relative to the camera
+#define GMSKY_RND_OBJ_CONTACT 0x2u // an NPC, nextbot or player: a soft contact shadow under feet[], width wide (step N1)
 
 #define GMSKY_RND_FORGET_MODEL 1u
 #define GMSKY_RND_FORGET_TEXTURE 2u
@@ -592,6 +596,12 @@ typedef struct GmskyRndPart {  // triangles drawn with one material
     uint32_t normal_texture_id;  // the part's $bumpmap (a GMSKY_RND_TEXF_LINEAR texture); 0 = none
     float phong_exponent;      // GMSKY_RND_MAT_PHONG: $phongexponent
     float phong_boost;         // GMSKY_RND_MAT_PHONG: $phongboost
+    float phong_fresnel[3];    // $phongfresnelranges: min (head-on), mid, max (grazing)
+    float phong_tint[3];       // $phongtint (white if none)
+    uint32_t phong_exponent_texture_id;  // $phongexponenttexture (linear; exponent = 1 + 149 x red); 0 = none
+    uint32_t reserved;
+    float selfillum_tint[3];   // GMSKY_RND_MAT_SELFILLUM: $selfillumtint (white if none)
+    uint32_t selfillum_mask_texture_id;  // $selfillummask (linear); 0 = the base texture's alpha is the mask
 } GmskyRndPart;
 
 typedef struct GmskyRndVertex {
@@ -626,6 +636,10 @@ typedef struct GmskyRndObject {
     uint32_t color;            // RGBA8 tint (ent:GetColor()), R in the low byte
     uint32_t flags;            // GMSKY_RND_OBJ_*
     uint32_t entity;           // Garry's Mod's entity number (stable while it exists; for motion vectors)
+    float feet[3];             // GMSKY_RND_OBJ_CONTACT: its feet (GetPos), relative to the anchor (Garry's Mod units)
+    float width;               // GMSKY_RND_OBJ_CONTACT: its collision box width (Garry's Mod units)
+    float height;              // GMSKY_RND_OBJ_CONTACT: its collision box height (Garry's Mod units)
+    uint32_t reserved;
 } GmskyRndObject;
 
 // Rows of [rotation | translation]: a model-space point -> Garry's Mod units relative to the anchor.
@@ -732,7 +746,9 @@ GMSKY_ASSERT(offsetof(GmskyRenderCtl, writes_refused) == 40);
 GMSKY_ASSERT(sizeof(GmskyRndReset) == 8);
 GMSKY_ASSERT(sizeof(GmskyRndTexture) == 24);
 GMSKY_ASSERT(sizeof(GmskyRndModel) == 24);
-GMSKY_ASSERT(sizeof(GmskyRndPart) == 32);
+GMSKY_ASSERT(sizeof(GmskyRndPart) == 80);
+GMSKY_ASSERT(offsetof(GmskyRndPart, selfillum_tint) == 64);
+GMSKY_ASSERT(offsetof(GmskyRndPart, phong_fresnel) == 32);
 GMSKY_ASSERT(sizeof(GmskyRndVertex) == 56);
 GMSKY_ASSERT(offsetof(GmskyRndVertex, u) == 40);
 GMSKY_ASSERT(offsetof(GmskyRndVertex, bones) == 48);
@@ -740,7 +756,8 @@ GMSKY_ASSERT(sizeof(GmskyRndForget) == 8);
 GMSKY_ASSERT(sizeof(GmskyRndFrame) == 56);
 GMSKY_ASSERT(offsetof(GmskyRndFrame, view_eye) == 32);
 GMSKY_ASSERT(offsetof(GmskyRndFrame, origin_epoch) == 16);
-GMSKY_ASSERT(sizeof(GmskyRndObject) == 24);
+GMSKY_ASSERT(sizeof(GmskyRndObject) == 48);
+GMSKY_ASSERT(offsetof(GmskyRndObject, feet) == 24);
 GMSKY_ASSERT(sizeof(GmskyRndMatrix) == 48);
 GMSKY_ASSERT(GMSKY_RND_MAP_SIZE == 67113088u);
 

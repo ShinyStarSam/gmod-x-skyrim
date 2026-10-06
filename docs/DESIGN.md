@@ -1909,6 +1909,89 @@ they hide what's behind them.
     0x40), `GmskyRndTexture.flags` `LINEAR` 0x1. Flat tables: 20 numbers per corner, 8 per part.
   - Logs: shadow cascades captured (size, format, slices, conventions), our shadow map's casters and
     ms, shadow mask probe result, normal maps / phong parts per model.
+- **Phong fix + indoor shadow probe (user, 2026-10-05, after test 84: "father gregori looks like he's
+  drenched in sweat ... Can you grab said textures from skyrim objects to compare values?").**
+  - *What the files say* (read-only from both installs; extracted to the scratch folder, not the
+    repo). Garry's Mod's own archive overrides HL2's materials:
+    | Material | exponent | boost | Fresnel ranges | mask (average) |
+    |---|---|---|---|---|
+    | Grigori's head (`grigori_head.vmt`) | 10 | 1 | [0.1 0.5 1.5], tint [0.9 0.8 0.7] | normal map alpha 0.22 |
+    | Grigori's robe (`monk_sheet.vmt`) | 10 | 1 | [0.05 0.5 1] | 0.32 |
+    | Citizen (`citizen_sheet.vmt`) | 6 | 0.3 | [0.05 0.3 0.5] | 0.50 |
+    | Skyrim male head (`malehead.nif`) | glossiness 33 | strength 2.69 | colour (0.63 0.76 1.0) | `MaleHead_S` 0.017 |
+    | Skyrim male body | glossiness 23 | strength 4.50 | | `MaleBody_1_S` 0.018 |
+    | Skyrim steel sword | glossiness 80 | strength 1.0 | + environment map | normal map alpha 0.19 |
+    Effective head-on strength (boost x mask x Fresnel): Grigori's head as G5b drew it 1 x 0.22 =
+    **0.22** (no Fresnel); in Source 0.22 x 0.1 = **0.022**; Skyrim's skin 2.69 x 0.017 = **0.046**.
+    So G5b's shine was about 10x Source's and 5x Skyrim's on faces seen head-on: the missing
+    `$phongfresnelranges`.
+  - *Fix*: Source's phong as VertexLitGeneric does it: Fresnel `f = (1 - n.v)^2`, value =
+    lerp(min, mid, 2f) below 0.5, lerp(mid, max, 2f - 1) above (default ranges [0 0.5 1] when the
+    material has none; not sure of that default, logged per part); `$phongtint` (default white);
+    `$phongexponenttexture` (exponent = 1 + 149 x red; `$phongalbedotint` tints by the albedo by the
+    green channel); highlight x max(0, n.l). Render block **version 4**: `GmskyRndPart` 32 -> 64
+    bytes (Fresnel ranges, tint, exponent texture id; flag `ALBEDOTINT` 0x80).
+  - *Indoor shadows, step I1: probe only (log, no drawing change).* Skyrim's indoor shadows come from
+    a few shadow-casting lights (`BSShadowFrustumLight`, `BSShadowParabolicLight`), each with its own
+    shadow map(s). Not in SkyCraft. Hook their Render (vtable entry 0x0A, as the sun's) and log,
+    for each light drawn: its class, position, radius, its descriptors (count, slice, render
+    target, port, camera) and where its light transform puts the light itself and points 100 units
+    along each axis (to learn the projection: perspective for frustum lights; parabolic is
+    unknown); the depth buffer bound (size, format, array size). Also the per-second count of
+    active shadow lights by class. Steps I2 (Skyrim's indoor shadows on our objects) and I3 (our
+    objects' shadows from those lights) are planned from these numbers.
+- **Test 85 results and the next fix (2026-10-05).**
+  - *Phong*: now very subtle; the user is fine with it for now. **Polish item: hone the phong values**
+    (and the other polish items below).
+  - *Too dark (user: "The models are still TOO DARK").* Cause found by reading how vanilla Skyrim
+    lights (Community Shaders' reconstruction of Skyrim SE's `Lighting.hlsl` and `Color.hlsli`;
+    read, nothing copied; not checked against Skyrim's own compiled shaders, which have no names):
+    vanilla Skyrim uses its colour textures **as stored** (sRGB numbers used directly, no
+    gamma -> linear) and its light colours as they are. We read Source's colour textures through
+    sRGB views (converted to linear), which makes a 0.5 texel 0.21 (2.3x darker) and a 0.3 texel
+    0.07 (4x darker). Fix: colour textures uploaded as plain UNORM, as Skyrim reads its own; switch
+    `gmsky_render_linear_albedo 1` (frame flag 0x20) converts in the shader instead, to compare.
+  - *Indoor shadow probe I1 results:* every indoor shadow light was `BSShadowParabolicLight` (also
+    "omni"), 2 descriptors each; maps in a shared 4096 x 4096 x 8 depth array (format 53, R16, view
+    D16), one slice per light, the two descriptors in its lower and upper halves (ports y 2048-4096
+    and 0-2048). Each transform is affine (w = 1), as v x M: light-local x = world z - light z,
+    y = -/+ (world y - light y) (the two descriptors differ only in this sign), z = 1.111 x (world
+    x - light x) - 0.11. The descriptors' cameras are orthographic (+-1, near 0.1, far 1) at the
+    light, forward +x, up +y / -y. So the paraboloid projection itself is done in Skyrim's shaders,
+    not in this matrix; which local axis splits the two halves is not known yet. Next step I1b:
+    read back a few texels of a light's map and match them with known geometry, or find the
+    lookup in the lighting shader, before drawing anything with them.
+  - *Polish list (user, 2026-10-05):* phong values; physgun drag lag; Skyrim's directional ambient
+    is a 3x4 matrix in its shader (`mul(DirectionalAmbient, float4(n, 1))`), we use the weather's
+    six colours (SkyCraft's way); Source's `$halflambert`; Source `$envmap` reflections on metal.
+- **Test 86 results and step N1: NPC shadows (2026-10-05).** Brightness fix: right (user:
+  "Perfect"). New report: NPCs "don't seem to be affected by shadows", "pop out a ton and look very
+  flat"; lights do reach them. NPCs and props go through the same shader and the same shadow
+  lookups, so the reason is not certain. Two parts:
+  - *Contact shadows (SkyCraft's BlobAO, MIT), which we had left out.* SkyCraft darkens the ground
+    softly under every player's and mob's feet, because its bodies are drawn after Skyrim's own
+    ambient occlusion and "would otherwise look pasted onto the ground". Garry's Mod now marks NPCs,
+    nextbots and players (`GMSKY_RND_OBJ_CONTACT`) and sends their feet (`GetPos`) and size
+    (collision box width and height); render block version 5, the object grows to 48 bytes.
+    Skyrim's darkening pass (the one that already lays our sun shadows on Skyrim) also darkens up to
+    24 blobs, nearest first: radius 1.25 x max(width, 35 Skyrim units), as SkyCraft's 1.25 x max(width,
+    half a block). It runs day and night, indoors and out (shadows on or not). Like SkyCraft, the
+    same darkening also falls on our props' upward faces, not on the characters themselves.
+  - *User, later: an NPC dragged into a shaded area stays fully lit,* so Skyrim's sun shadow does
+    not reach NPCs at all (a real fault, not only the missing contact shadows). Switch
+    `gmsky_render_shadow_debug 1` (frame flag 0x40) colours our objects flat: red = in Skyrim's sun
+    shadow, green = sunlit, blue added = in our objects' shadow, yellow = sun shadows off.
+  - *A probe, to know rather than guess, whether Skyrim's sun shadows reach the NPCs.* Every 2 s, for
+    up to 5 characters, Skyrim's sun shadow and ours are read at three heights (feet, middle, top)
+    on the graphics card and logged ("contact shadows: probe ..."), 1 = lit, 0 = shadowed. If an NPC
+    standing in a building's shadow logs 1.00, the lookup is wrong for it; if it logs 0.00 but looks
+    bright, the shading (ambient) is the problem.
+  - *Test 88 result:* the probe read 0.00 (shadowed) on NPCs in shade, so the lookup was right; the
+    user found the cause: self-illuminated materials skipped all lighting, so the whole surface
+    stayed lit. Fixed the Source way: light and shadow the whole surface, then blend to the glow by
+    its mask (`$selfillummask`, else base alpha) and `$selfillumtint` (render block version 6).
+  - Differences from SkyCraft: SkyCraft also has VoxelAO (contact shadows where Minecraft blocks
+    meet Skyrim's world); not done for props (it needs a voxel grid of Minecraft blocks).
 - **G7. Effects (later, needs its own plan and your choice).** Options: (a) for effects drawn from
   Lua (`render.DrawBeam`, `DrawSprite`, `DrawQuadEasy`), a collector like SkyCraft's that wraps
   those calls; (b) for engine effects, send events (explosion at X, tracer from A to B) and draw

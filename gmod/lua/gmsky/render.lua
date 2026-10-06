@@ -48,6 +48,10 @@ R.shadows = R.shadows or CreateConVar("gmsky_render_shadows", "1", 0, "1 = shado
 R.normals = R.normals or CreateConVar("gmsky_render_normals", "1", 0, "1 = Garry's Mod's normal maps (surface bumps) in Skyrim")
 R.normalFlip = R.normalFlip or CreateConVar("gmsky_render_normal_flip", "0", 0, "1 = read normal maps' green channel the other way")
 R.phong = R.phong or CreateConVar("gmsky_render_phong", "1", 0, "1 = Garry's Mod's phong shine in Skyrim")
+-- After test 85 ("too dark"): Skyrim uses its colour textures as stored; 1 = convert ours to linear (the old, darker way).
+-- Step N1 (test 86: NPCs stay lit in shade): colours our objects by their sun shadow, to see it.
+R.shadowDebug = R.shadowDebug or CreateConVar("gmsky_render_shadow_debug", "0", 0, "1 = Garry's Mod's objects in Skyrim coloured by their sun shadow: red = Skyrim's shadow, green = sunlit, blue = our objects' shadow, yellow = sun shadows off")
+R.linearAlbedo = R.linearAlbedo or CreateConVar("gmsky_render_linear_albedo", "0", 0, "1 = convert Garry's Mod's colour textures to linear light (darker; the way before test 86)")
 R.RANGE = 8000             -- Garry's Mod units from the eye
 R.NEW_MODELS_PER_FRAME = 1  -- reading a model costs a few ms
 
@@ -59,7 +63,7 @@ R.nextTexture = R.nextTexture or 1
 R.stats = R.stats or {}
 
 local function ResetStats()
-	R.stats = { frames = 0, objects = 0, held = 0, skipped = 0, failed = 0, newModels = 0, modelMs = 0,
+	R.stats = { frames = 0, objects = 0, held = 0, contact = 0, skipped = 0, failed = 0, newModels = 0, modelMs = 0,
 		modelMsMax = 0, frameMs = 0, frameMsMax = 0, newTextures = 0, textureFails = 0 }
 end
 if not R.stats.frames then ResetStats() end
@@ -107,7 +111,8 @@ end
 local function MaterialInfo(name)
 	local info = R.materials[name]
 	if info then return info end
-	info = { tex = 0, flags = 0, aref = 0, bump = 0, phongExp = 0, phongBoost = 0 }
+	info = { tex = 0, flags = 0, aref = 0, bump = 0, phongExp = 0, phongBoost = 0, fresnel = { 0, 0.5, 1 }, tint = { 1, 1, 1 }, expTex = 0,
+		siTint = { 1, 1, 1 }, siMask = 0 }
 	local mat = Material(name)
 	if mat and not mat:IsError() then
 		local f = mat:GetInt("$flags") or 0
@@ -132,6 +137,28 @@ local function MaterialInfo(name)
 			info.phongExp = (e and e > 0) and e or 5
 			info.phongBoost = (b and b > 0) and b or 1
 			if (mat:GetInt("$basemapalphaphongmask") or 0) ~= 0 then info.flags = info.flags + 0x40 end
+			if (mat:GetInt("$phongalbedotint") or 0) ~= 0 then info.flags = info.flags + 0x80 end
+			-- Source's Fresnel ranges (head-on, middle, grazing) and tint; an unset vector reads as 0.
+			local fr = mat:GetVector("$phongfresnelranges")
+			if fr and (fr.x ~= 0 or fr.y ~= 0 or fr.z ~= 0) then info.fresnel = { fr.x, fr.y, fr.z } end
+			local tint = mat:GetVector("$phongtint")
+			if tint and (tint.x ~= 0 or tint.y ~= 0 or tint.z ~= 0) then info.tint = { tint.x, tint.y, tint.z } end
+			local ext = mat:GetTexture("$phongexponenttexture")
+			if ext and not ext:IsError() then info.expTex = TextureId(ext:GetName(), true) end
+			gmsky.Log(string.format("render: material %s: phong exponent %s, boost %.2f, Fresnel [%.2f %.2f %.2f]%s, tint [%.2f %.2f %.2f], exponent texture %s%s%s",
+				name, info.expTex > 0 and "from texture" or string.format("%.1f", info.phongExp), info.phongBoost, info.fresnel[1], info.fresnel[2], info.fresnel[3],
+				(fr and (fr.x ~= 0 or fr.y ~= 0 or fr.z ~= 0)) and "" or " (default)", info.tint[1], info.tint[2], info.tint[3], info.expTex > 0 and "yes" or "no",
+				bit.band(info.flags, 0x80) ~= 0 and ", albedo tint" or "", bit.band(info.flags, 0x40) ~= 0 and ", mask from base alpha" or ""))
+		end
+		-- Self-illumination (test 87: glowing parts made the whole surface unlit, shadows and all): Skyrim
+		-- lights the surface and then blends to the glow by the mask (base alpha, or $selfillummask).
+		if bit.band(info.flags, 0x8) ~= 0 then
+			local tint = mat:GetVector("$selfillumtint")
+			if tint and (tint.x ~= 0 or tint.y ~= 0 or tint.z ~= 0) then info.siTint = { tint.x, tint.y, tint.z } end
+			local mask = mat:GetTexture("$selfillummask")
+			if mask and not mask:IsError() then info.siMask = TextureId(mask:GetName(), true) end
+			gmsky.Log(string.format("render: material %s: self-illuminated, tint [%.2f %.2f %.2f], mask %s", name,
+				info.siTint[1], info.siTint[2], info.siTint[3], info.siMask > 0 and "texture" or "base alpha"))
 		end
 	else
 		gmsky.Log("render: material " .. tostring(name) .. " not found (drawn white)")
@@ -186,7 +213,11 @@ local function Prepare(key, model, skin)
 				parts[np + 1], parts[np + 2], parts[np + 3], parts[np + 4], parts[np + 5] =
 					first, corners - first, info.tex, info.flags, info.aref
 				parts[np + 6], parts[np + 7], parts[np + 8] = info.bump, info.phongExp, info.phongBoost
-				np = np + 8
+				parts[np + 9], parts[np + 10], parts[np + 11] = info.fresnel[1], info.fresnel[2], info.fresnel[3]
+				parts[np + 12], parts[np + 13], parts[np + 14] = info.tint[1], info.tint[2], info.tint[3]
+				parts[np + 15] = info.expTex
+				parts[np + 16], parts[np + 17], parts[np + 18], parts[np + 19] = info.siTint[1], info.siTint[2], info.siTint[3], info.siMask
+				np = np + 19
 			end
 		end
 		for b = 0, bones - 1 do
@@ -284,7 +315,16 @@ function R.Frame()
 				local held = heldOn and e:GetNW2Bool("gmsky_held", false)
 				flat[n + 1], flat[n + 2], flat[n + 3] = entry.id, c.r + c.g * 256 + c.b * 65536 + c.a * 16777216, entry.bones
 				flat[n + 4], flat[n + 5] = R.EntityNumber(e), held and 1 or 0
-				n = n + 5
+				-- Step N1: NPCs, nextbots and players get a soft contact shadow under their feet in
+				-- Skyrim (SkyCraft's, for its players and mobs): feet and collision box size; width 0 = none.
+				local feet, width, height = e:GetPos(), 0, 0
+				if e:IsNPC() or e:IsNextBot() or e:IsPlayer() then
+					local lo, hi = e:OBBMins(), e:OBBMaxs()
+					width, height = math.max(hi.x - lo.x, hi.y - lo.y), hi.z - lo.z
+					s.contact = s.contact + 1
+				end
+				flat[n + 6], flat[n + 7], flat[n + 8], flat[n + 9], flat[n + 10] = feet.x, feet.y, feet.z, width, height
+				n = n + 10
 				if held then s.held = s.held + 1 end
 				for b = 0, entry.bones - 1 do
 					local m = e:GetBoneMatrix(b) or e:GetWorldTransformMatrix()
@@ -302,7 +342,8 @@ function R.Frame()
 	-- The camera Garry's Mod draws this frame with (for held objects, step G6).
 	local v = render.GetViewSetup and render.GetViewSetup()
 	local switches = (R.normalFlip:GetBool() and 0x2 or 0) + (R.normals:GetBool() and 0 or 0x4)
-		+ (R.phong:GetBool() and 0 or 0x8) + (R.shadows:GetBool() and 0 or 0x10)
+		+ (R.phong:GetBool() and 0 or 0x8) + (R.shadows:GetBool() and 0 or 0x10) + (R.linearAlbedo:GetBool() and 0x20 or 0)
+		+ (R.shadowDebug:GetBool() and 0x40 or 0)
 	if v and v.origin and v.angles then
 		gmsky.RenderFrame(fn, flat, v.origin.x, v.origin.y, v.origin.z, v.angles.p, v.angles.y, v.angles.r, switches)
 	else
@@ -332,10 +373,10 @@ function R.Status()
 	end
 	local textures = 0
 	for _, id in pairs(R.textures) do if id > 0 then textures = textures + 1 end end
-	local line = string.format("render: %s; %d frames, %.1f objects a frame, %.1f held (gmsky_render_held %s), %d skipped (model not ready / can't be drawn); "
+	local line = string.format("render: %s; %d frames, %.1f objects a frame, %.1f held (gmsky_render_held %s), %.1f with contact shadows, %d skipped (model not ready / can't be drawn); "
 		.. "models %d ok, %d can't be drawn (%d new, %.1f ms avg, %.1f max); textures %d (%d new, %d failed); Lua %.2f ms a frame avg, %.2f max",
 		R.cvar:GetBool() and "on" or "off (gmsky_render 0)", s.frames, s.frames > 0 and s.objects / s.frames or 0,
-		s.frames > 0 and s.held / s.frames or 0, R.held:GetString(), s.skipped,
+		s.frames > 0 and s.held / s.frames or 0, R.held:GetString(), s.frames > 0 and s.contact / s.frames or 0, s.skipped,
 		known, failed, s.newModels, s.newModels > 0 and s.modelMs / s.newModels or 0, s.modelMsMax, textures, s.newTextures, s.textureFails,
 		s.frames > 0 and s.frameMs / s.frames or 0, s.frameMsMax)
 	ResetStats()

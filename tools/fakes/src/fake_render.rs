@@ -97,7 +97,7 @@ fn main() {
     let mut indices = Vec::new();
     push_box([-32.0, -4.0, -4.0], [0.0, 4.0, 4.0], 0, &mut verts, &mut indices);
     push_box([0.0, -4.0, -4.0], [32.0, 4.0, 4.0], 1, &mut verts, &mut indices);
-    let parts = [Part { first_index: 0, index_count: indices.len() as u32, texture_id: 1, flags: 0, alpha_ref: 0.0, normal_texture_id: 0, phong_exponent: 0.0, phong_boost: 0.0 }];
+    let parts = [Part { first_index: 0, index_count: indices.len() as u32, texture_id: 1, flags: 0, alpha_ref: 0.0, normal_texture_id: 0, phong_exponent: 0.0, phong_boost: 0.0, ..Default::default() }];
     let model = encode_model(1, 2, &parts, &verts, &indices);
     let px = checker();
     let texture = encode_texture(&Texture { id: 1, width: 64, height: 64, format: TEX_RGBA8, bytes: px.len() as u32, flags: 0 }, &px);
@@ -126,7 +126,7 @@ fn main() {
         let at = [150.0, 0.0, 40.0];
         let m0 = matrix(yaw, 0.0, at);
         let m1 = matrix(yaw, bend, at);
-        let objects = [Object { model_id: 1, first_matrix: 0, matrix_count: 2, color: 0xFFFF_FFFF, flags: 0, entity: 1 }];
+        let objects = [Object { model_id: 1, first_matrix: 0, matrix_count: 2, color: 0xFFFF_FFFF, flags: 0, entity: 1, ..Default::default() }];
         let msg = encode_frame(&Frame { frame, qpc: now_qpc(), origin_epoch: epoch, ..Default::default() }, &objects, &[m0, m1]);
         if !need_assets && w.map.write(MSG_FRAME, &msg) { sent_frames += 1 } else { dropped_frames += 1 }
         if now_ms() - last_print >= 1000 {

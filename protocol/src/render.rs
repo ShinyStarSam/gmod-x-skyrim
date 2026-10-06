@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::*};
 
 pub const SHM_NAME: &str = r"Local\GmodSkyrim_render_v1";
 pub const MAGIC: u32 = 0x444E_524D; // "MRND"
-pub const VERSION: u32 = 3; // 2: the frame carries Garry's Mod's view; objects their entity and flags (G5a + G6); 3: tangents, normal maps, phong
+pub const VERSION: u32 = 6; // 2: the frame carries Garry's Mod's view; objects their entity and flags (G5a + G6); 3: tangents, normal maps, phong; 4: phong Fresnel, tint, exponent texture; 5: objects carry feet and size (contact shadows); 6: self-illumination tint and mask
 pub const RING_BYTES: usize = 64 << 20;
 pub const HEAD_OFF: usize = 0x1000;
 pub const TAIL_OFF: usize = 0x1040;
@@ -38,6 +38,7 @@ pub const MAT_SELFILLUM: u32 = 0x8;
 pub const MAT_NOCULL: u32 = 0x10;
 pub const MAT_PHONG: u32 = 0x20;
 pub const MAT_BASEALPHA_PHONGMASK: u32 = 0x40;
+pub const MAT_ALBEDOTINT: u32 = 0x80;
 pub const TEXF_LINEAR: u32 = 0x1;
 
 pub const FRAME_VIEW: u32 = 0x1;
@@ -46,7 +47,10 @@ pub const FRAME_FLIP_GREEN: u32 = 0x2;
 pub const FRAME_NO_NORMALS: u32 = 0x4;
 pub const FRAME_NO_PHONG: u32 = 0x8;
 pub const FRAME_NO_SHADOWS: u32 = 0x10;
+pub const FRAME_LINEAR_ALBEDO: u32 = 0x20;
+pub const FRAME_SHADOW_DEBUG: u32 = 0x40;
 pub const OBJ_HELD: u32 = 0x1;
+pub const OBJ_CONTACT: u32 = 0x2;
 
 pub const FORGET_MODEL: u32 = 1;
 pub const FORGET_TEXTURE: u32 = 2;
@@ -105,6 +109,14 @@ pub struct Part {
     pub normal_texture_id: u32,
     pub phong_exponent: f32,
     pub phong_boost: f32,
+    /// $phongfresnelranges: min (head-on), mid, max (grazing).
+    pub phong_fresnel: [f32; 3],
+    pub phong_tint: [f32; 3],
+    pub phong_exponent_texture_id: u32,
+    pub reserved: u32,
+    /// MAT_SELFILLUM: $selfillumtint; $selfillummask texture (0 = the base texture's alpha).
+    pub selfillum_tint: [f32; 3],
+    pub selfillum_mask_texture_id: u32,
 }
 
 #[repr(C)]
@@ -151,6 +163,11 @@ pub struct Object {
     pub flags: u32,
     /// Garry's Mod's entity number (for motion vectors).
     pub entity: u32,
+    /// OBJ_CONTACT: feet relative to the anchor, collision box width and height (Garry's Mod units).
+    pub feet: [f32; 3],
+    pub width: f32,
+    pub height: f32,
+    pub reserved: u32,
 }
 
 /// Rows of [rotation | translation]: a model-space point -> Garry's Mod units relative to the anchor.
@@ -168,7 +185,9 @@ const _: () = {
     assert!(size_of::<Reset>() == 8);
     assert!(size_of::<Texture>() == 24);
     assert!(size_of::<Model>() == 24);
-    assert!(size_of::<Part>() == 32);
+    assert!(size_of::<Part>() == 80);
+    assert!(offset_of!(Part, selfillum_tint) == 64);
+    assert!(offset_of!(Part, phong_fresnel) == 32);
     assert!(size_of::<Vertex>() == 56);
     assert!(offset_of!(Vertex, u) == 40);
     assert!(offset_of!(Vertex, bones) == 48);
@@ -176,7 +195,8 @@ const _: () = {
     assert!(size_of::<Frame>() == 56);
     assert!(offset_of!(Frame, view_eye) == 32);
     assert!(offset_of!(Frame, origin_epoch) == 16);
-    assert!(size_of::<Object>() == 24);
+    assert!(size_of::<Object>() == 48);
+    assert!(offset_of!(Object, feet) == 24);
     assert!(size_of::<Matrix>() == 48);
     assert!(MAP_SIZE == 67_113_088);
 };
@@ -487,7 +507,7 @@ mod tests {
     }
 
     fn cube_model(id: u32) -> Vec<u8> {
-        let parts = [Part { first_index: 0, index_count: 6, texture_id: 7, flags: MAT_ALPHATEST, alpha_ref: 0.5, normal_texture_id: 0, phong_exponent: 0.0, phong_boost: 0.0 }];
+        let parts = [Part { first_index: 0, index_count: 6, texture_id: 7, flags: MAT_ALPHATEST, alpha_ref: 0.5, normal_texture_id: 0, phong_exponent: 0.0, phong_boost: 0.0, ..Default::default() }];
         let vertex = |x: f32, b: u8| Vertex { pos: [x, 1.0, 2.0], normal: [0.0, 0.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0], u: 0.25, v: 0.75, bones: [b, 0, 0, 0], weights: [255, 0, 0, 0] };
         let verts = [vertex(0.0, 0), vertex(1.0, 1), vertex(2.0, 1), vertex(3.0, 0)];
         encode_model(id, 2, &parts, &verts, &[0, 1, 2, 0, 2, 3])
@@ -522,7 +542,7 @@ mod tests {
         assert_eq!(texture_bytes(5, 5, TEX_BC3), Some(4 * 16));
         assert_eq!(texture_bytes(5, 5, TEX_RGBA8), Some(100));
 
-        let objects = [Object { model_id: 5, first_matrix: 0, matrix_count: 2, color: 0xFF00FF80, flags: 0, entity: 0 }];
+        let objects = [Object { model_id: 5, first_matrix: 0, matrix_count: 2, color: 0xFF00FF80, flags: 0, entity: 0, ..Default::default() }];
         let mut mat = Matrix::default();
         mat.m[0][3] = 12.5;
         let f = Frame { frame: 99, qpc: -4, origin_epoch: 3, ..Default::default() };

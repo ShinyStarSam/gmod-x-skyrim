@@ -117,7 +117,7 @@ static void TestRenderRing() {
     // A model: header, one part, 4 vertices on 2 bones, 2 triangles.
     std::vector<uint8_t> model(sizeof(GmskyRndModel) + sizeof(GmskyRndPart) + 4 * sizeof(GmskyRndVertex) + 6 * 4);
     GmskyRndModel mh{5, 4, 6, 1, 2, 0};
-    GmskyRndPart part{0, 6, 7, GMSKY_RND_MAT_ALPHATEST, 0.5f, 0, 0.0f, 0.0f};
+    GmskyRndPart part{0, 6, 7, GMSKY_RND_MAT_ALPHATEST, 0.5f, 0, 0.0f, 0.0f, {0, 0.5f, 1}, {1, 1, 1}, 0, 0, {1, 1, 1}, 0};
     std::memcpy(model.data(), &mh, sizeof(mh));
     std::memcpy(model.data() + sizeof(mh), &part, sizeof(part));
     for (int k = 0; k < 4; ++k) {
@@ -131,7 +131,7 @@ static void TestRenderRing() {
     // A frame: one object with 2 matrices.
     std::vector<uint8_t> frame(sizeof(GmskyRndFrame) + sizeof(GmskyRndObject) + 2 * sizeof(GmskyRndMatrix));
     GmskyRndFrame fh{99, -4, 3, 1, 2, 0};
-    GmskyRndObject obj{5, 0, 2, 0xFF00FF80u, 0, 0};
+    GmskyRndObject obj{5, 0, 2, 0xFF00FF80u, 0, 0, {0, 0, 0}, 0, 0, 0};
     GmskyRndMatrix mat{};
     mat.m[0][3] = 12.5f;
     std::memcpy(frame.data(), &fh, sizeof(fh));
