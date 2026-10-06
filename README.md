@@ -117,7 +117,9 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
 ## What doesn't work yet
 
 - Garry's Mod's world objects and effects are invisible in Skyrim (grenades, rockets, AR2 balls,
-  explosions, tracers, the physgun beam): only the hands, weapon and HUD are drawn.
+  explosions, tracers, the physgun beam): only the hands, weapon and HUD are drawn. In progress:
+  Skyrim draws them itself as 3D (geometry route, DESIGN.md §12). Step G1 works (test 75): Skyrim
+  draws a fixed test cube inside its own frame, locked to the world, hidden by walls, no jitter.
 - Grenades and AR2 balls fall through Skyrim's world and don't hurt NPCs; the physgun can't grab
   NPCs or corpses (Garry's Mod's physics doesn't see Skyrim's world or NPCs).
 - Skyrim potions and healing don't heal Garry's Mod's player. Skyrim's ragdolls are still

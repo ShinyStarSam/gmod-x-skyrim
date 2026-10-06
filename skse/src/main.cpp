@@ -5,6 +5,7 @@
 #include "Input.h"
 #include "Link.h"
 #include "Probe.h"
+#include "World.h"
 
 namespace
 {
@@ -33,11 +34,13 @@ namespace
 			gmsky::Camera::Install();
 			gmsky::Body::Install();
 			gmsky::Draw::Install();
+			gmsky::World::Install();
 			gmsky::Combat::Install();
 			break;
 		case SKSE::MessagingInterface::kPostLoadGame:
 		case SKSE::MessagingInterface::kNewGame:
 			gmsky::Probe::OnGameLoaded();
+			gmsky::World::OnGameLoaded();
 			break;
 		default:
 			break;

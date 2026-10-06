@@ -1265,6 +1265,12 @@ float4 PSBlur(VSOut i) : SV_Target {
 		logger::info("overlay draw: Present hooked (swap chain entry 8)");
 	}
 
+	bool DepthConvention(bool& a_reversed)
+	{
+		a_reversed = g_depthReversed;
+		return g_depthKnown && g_depthUsable;
+	}
+
 	void LogSecond()
 	{
 		const auto presents = g_presents.exchange(0), taken = g_taken.exchange(0), drawn = g_drawn.exchange(0);

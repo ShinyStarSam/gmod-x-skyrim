@@ -8,6 +8,10 @@ namespace gmsky::Draw
 	// At kDataLoaded: hooks Present (the swap chain exists by then).
 	void Install();
 
+	// Skyrim's depth convention as the probe last found it (G1 compares it with the camera's).
+	// False until a probe saw real depth.
+	bool DepthConvention(bool& a_reversed);
+
 	// Once a second (game thread): presents, drawn / not drawn and why, upload ms, picture age.
 	void LogSecond();
 }

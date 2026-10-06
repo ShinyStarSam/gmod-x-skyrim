@@ -10,6 +10,7 @@
 #include "Collision.h"
 #include "Combat.h"
 #include "Draw.h"
+#include "World.h"
 #include "Hitboxes.h"
 #include "Hud.h"
 #include "Input.h"
@@ -264,6 +265,7 @@ namespace gmsky::Probe
 			Body::LogSecond();
 			Overlay::LogSecond();
 			Draw::LogSecond();
+			World::LogSecond();
 			Arms::LogSecond();
 			Hud::LogSecond();
 			Actors::LogSecond();
