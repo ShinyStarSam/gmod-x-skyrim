@@ -1,6 +1,6 @@
 # STATUS
 
-**2026-10-06, after in-game tests 101-103: BLOCKED on Garry's Mod's physics crash again** (physics
+**2026-10-06, after in-game tests 101-103 and 107: BLOCKED on Garry's Mod's physics crash again** (physics
 props on Skyrim's ground, plan `docs/DESIGN.md` "One collision system", step S1). See "The current
 problem". Waiting for the user's choice of the next experiment.
 
@@ -117,7 +117,7 @@ publishes the origin.
 
 ## The current problem
 
-### Physics ground crashes Garry's Mod (2026-10-06, tests 101-103; blocked)
+### Physics ground crashes Garry's Mod (2026-10-06, tests 101-103 and 107; blocked)
 
 **What we did:** to make Garry's Mod's physics props, ragdolls and grenades land on Skyrim's ground
 (today they fall ~16,300 units to gm_flatmap's floor: test 100, 67 floor crossings by 25 objects
@@ -154,19 +154,32 @@ never crashed; the 2026-10-04 overlap experiment (overlap, nobody touching) surv
 rebuilt pieces where old pieces still were; InfMap2 never puts two meshes of one chunk in the same
 place.
 
+**Test 107 (idea 1, "no overlap", the user's rule "never two meshes in the same place"):** the old
+mesh's physics destroyed before the new one was built ("meshes with physics now: 0" on both
+sides), player standing still on the spot: **crashed on build 2**, same dump signature. So the
+overlap is not the trigger. What every crash shares: a mesh created where the player's body touches
+it. Every mesh created where nothing touches it survived (hundreds, tests 12-16). But the *first*
+build of every run also touched the player and survived, so it isn't that simple either.
+
+**What differs from InfMap2, which builds chunks under players without crashing:** its triangles
+come from a smooth height function (2 per square, about 600 units across in `gm_inf_bliss`);
+ours are Skyrim's real collision: thousands of small triangles, stacked layers (test 100: props
+crossed 2-3 surfaces in one fall), and probably slivers, near-duplicates and tiny edges. Nobody
+has measured the quality of what we feed `PhysicsFromMesh`.
+
 **Ideas not tried yet (in the order I'd suggest; one variable each):**
-1. **No overlap: destroy the old mesh's physics before building the new one** (`PhysicsDestroy()`
-   on the old entity first, which is immediate, unlike `Remove()`). Same test otherwise. If it
-   survives 10 minutes, the trigger is the overlap, and the real design must never let two meshes
-   share space: chunks on a fixed lattice that never overlap (as test 16, which survived), and a
-   changed chunk is replaced by destroying first, then building in the same tick.
-2. **Overlap, nobody touching:** the same as run 2 but the box 2,000 units away from the player.
-   Tells us whether "something touches both" is needed.
-3. **Smaller meshes** (512 triangles, as tests 12-15): only if 1 and 2 don't explain it.
-4. **A different kind of physics object:** the map's own ground is a *static* object in the
-   physics engine; `PhysicsFromMesh` makes a movable one that we freeze. Our Rust module could
-   create static objects through the engine's physics interface (`CreatePolyObjectStatic`). More
-   work, unknown risk; only if 1-3 fail.
+1. **Clean the mesh before building it.** Weld vertices closer than 1/16 unit, drop degenerate and
+   sliver triangles (tiny area or a near-zero angle), drop duplicates in any vertex order. Log the
+   mesh's quality every build (counts of each kind, shortest edge, smallest angle) so we see what
+   Skyrim's data looks like. Same test as 107 (player standing on it). If it survives, the trigger
+   is bad geometry and cleaning is part of the real design.
+2. **Not touching:** the same test but the mesh built 2,000 units from the player. Confirms that
+   something touching the new mesh is needed.
+3. **Player's body off for the moment of creation:** turn the player's physics collisions off,
+   build, turn them back on the next tick. Shows whether the crash is in working out the pairs
+   between the player and the new mesh (then it would crash on turning back on instead).
+4. **A static physics object** (like the map's own ground) made by our Rust module through the
+   engine's physics interface. More work; only if 1-3 don't lead anywhere.
 5. If none works: a different route for props (see `docs/DESIGN.md` fallbacks), decided with the
    user.
 
@@ -366,6 +379,8 @@ percentile), = 94/255.
 - **InfMap2's chunk setup for the physics mesh (S1, test 103, 2026-10-06):** crashed the same way
   as our old setup (test 101), within 6 builds, with the player standing still. The settings make
   no difference.
+- **Never two meshes at once (S1, test 107):** old mesh's physics destroyed before building the
+  new one: crashed on build 2, player standing still. Overlap is not the trigger.
 - **Lift rule using the highest point under the footprint:** popped the player onto object
   spikes up to 23×/s (test 17). Now judged at the player's centre (test 18: 0 lifts).
 - **Grids centred where the player was:** fast players outran them (test 20). Now centred ahead.

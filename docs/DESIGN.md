@@ -2216,6 +2216,14 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
   If run 2 or 3 crashes, this route is blocked: I record it, write STATUS.md, and we decide
   together. If run 2 passes, I can also (optional, your call) find which of InfMap2's settings is
   the one that matters, by switching them off one at a time.
+- **Rule from tests 101-103 (the user's, 2026-10-06): never two meshes for the same place at
+  once, on either side, like InfMap2 (one mesh per chunk, ever).** Both setups crashed when a new
+  mesh was built on top of the previous one while it still existed. A mesh is replaced by
+  destroying the old one's physics first (`PhysicsDestroy`, immediate; `Remove` waits for the end
+  of the tick), then building the new one in the same tick. (InfMap2's different chunks do sit in
+  the same physical spot, but its `ShouldCollide` stops them colliding with each other; two meshes
+  of the same ground that may collide never exist there.) S1's experiment follows this rule from
+  run 2b on; S2's chunks lie on a fixed lattice and never overlap.
 - **S2. Physics ground from Skyrim's regions (`gmsky_ground physics`).** New file
   `gmod/lua/gmsky/physground.lua`: InfMap2-style chunk entities, each holding the triangles of a
   block of 2×2×2 Skyrim regions (1,024 Skyrim units, ~544 Garry's Mod units; about 150 entities

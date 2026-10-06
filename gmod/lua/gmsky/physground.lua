@@ -11,6 +11,12 @@
 -- written here from that description; no code is copied.
 -- The client builds its copy too (as in tests 12-17), from the same store (one module per process).
 -- Every build is logged before and after, so a crash names the build.
+--
+-- Rule since tests 101-103 (both setups crashed with a new mesh built on top of the previous one,
+-- which still existed): never two meshes for the same place at once, on either side. Before a
+-- mesh is built, every older test mesh on that side loses its physics object (PhysicsDestroy is
+-- immediate; Remove only happens at the end of the tick), and a mesh older than one that already
+-- exists is never built. InfMap2 keeps the same rule: one mesh per chunk, ever.
 
 local gmsky = gmsky
 local G = gmsky.physground or {}
@@ -42,6 +48,32 @@ local function PlayerLine(ent)
 end
 
 -- The vertices PhysicsFromMesh wants, relative to the entity (which sits at the anchor).
+-- Never two meshes at once: destroys the physics of every older test mesh on this side, first.
+-- Returns how many were destroyed, or nil if a newer mesh already exists (then this one is skipped).
+local function ClearOlder(self)
+	local destroyed = 0
+	for _, other in ipairs(ents.FindByClass("gmsky_physground_test")) do
+		if other ~= self and IsValid(other) then
+			if other:GetBuild() > self:GetBuild() and other.gmskyBuilt then return nil end
+			if other:GetBuild() < self:GetBuild() and IsValid(other:GetPhysicsObject()) then
+				other:PhysicsDestroy()
+				other:SetSolid(SOLID_NONE)
+				destroyed = destroyed + 1
+			end
+		end
+	end
+	return destroyed
+end
+
+-- How many test meshes on this side have a physics object (must be 1 after a build).
+local function MeshesWithPhysics()
+	local n = 0
+	for _, e in ipairs(ents.FindByClass("gmsky_physground_test")) do
+		if IsValid(e) and IsValid(e:GetPhysicsObject()) then n = n + 1 end
+	end
+	return n
+end
+
 local function Verts(lo, hi)
 	local flat, n = gmsky.TrisInBox(lo.x, lo.y, lo.z, hi.x, hi.y, hi.z, MAX_TRIS)
 	local verts = {}
@@ -72,6 +104,11 @@ end
 function ENT:BuildMesh()
 	self.gmskyBuilt = true
 	local recipe, lo, hi = self:GetRecipe(), self:GetBoxLo(), self:GetBoxHi()
+	local destroyed = ClearOlder(self)
+	if not destroyed then
+		gmsky.Log(string.format("physground: build %d skipped on this side: a newer mesh already exists", self:GetBuild()))
+		return
+	end
 	local verts, n = Verts(lo, hi)
 	local s = G.side
 	if n == 0 then
@@ -80,8 +117,8 @@ function ENT:BuildMesh()
 		return
 	end
 	s.builds, s.tris = s.builds + 1, s.tris + n
-	gmsky.Log(string.format("physground: build %d (%s): %d triangles (build %d on this side, %d triangles so far); %s...",
-		self:GetBuild(), NAMES[recipe] or "?", n, s.builds, s.tris, PlayerLine(self)))
+	gmsky.Log(string.format("physground: build %d (%s): %d triangles (build %d on this side, %d triangles so far); older meshes destroyed first: %d, meshes with physics now: %d; %s...",
+		self:GetBuild(), NAMES[recipe] or "?", n, s.builds, s.tris, destroyed, MeshesWithPhysics(), PlayerLine(self)))
 	local t0 = SysTime()
 	if recipe == INFMAP then
 		-- InfMap2's chunk setup, in its order.
@@ -118,8 +155,8 @@ function ENT:BuildMesh()
 	local ms = (SysTime() - t0) * 1000
 	s.worst = math.max(s.worst, ms)
 	local phys = self:GetPhysicsObject()
-	gmsky.Log(string.format("physground: built %d in %.2f ms: PhysicsFromMesh=%s physics object=%s solid=%d solid flags=%d%s",
-		self:GetBuild(), ms, tostring(self.gmskyOk), tostring(IsValid(phys)), self:GetSolid(), self:GetSolidFlags(),
+	gmsky.Log(string.format("physground: built %d in %.2f ms: meshes with physics on this side %d (must be 1); PhysicsFromMesh=%s physics object=%s solid=%d solid flags=%d%s",
+		self:GetBuild(), ms, MeshesWithPhysics(), tostring(self.gmskyOk), tostring(IsValid(phys)), self:GetSolid(), self:GetSolidFlags(),
 		IsValid(phys) and string.format(" mass %.0f, constraint-static flag %s, no-self-collisions flag %s, moving %s", phys:GetMass(),
 			tostring(phys:HasGameFlag(FVPHYSICS_CONSTRAINT_STATIC)), tostring(phys:HasGameFlag(FVPHYSICS_NO_SELF_COLLISIONS)),
 			tostring(phys:IsMotionEnabled())) or ""))
@@ -192,7 +229,8 @@ if SERVER then
 		e:SetAngles(Angle(0, 0, 0))
 		e:Spawn()
 		Flag(e)
-		-- The previous one goes after the new one exists (tests 12-15 built new ground next to old).
+		-- The new one destroyed the previous one's physics before building (ClearOlder); the entity
+		-- itself goes now.
 		if IsValid(G.current) then G.current:Remove() end
 		G.current = e
 	end
@@ -248,7 +286,7 @@ if SERVER then
 		if recipe == INFMAP then
 			for _, ent in ipairs(ents.GetAll()) do Flag(ent) end
 		end
-		gmsky.Log(string.format("physground: experiment START, recipe %s: a new physics mesh from Skyrim's triangles within %d x %d x %d units of the player every %.1f s, the old one removed after; custom collision checks on the player and physics objects: %s",
+		gmsky.Log(string.format("physground: experiment START, recipe %s: a new physics mesh from Skyrim's triangles within %d x %d x %d units of the player every %.1f s, the old one's physics destroyed first (never two meshes at once); custom collision checks on the player and physics objects: %s",
 			which, HALF_XY * 2, HALF_XY * 2, HALF_Z * 2, EVERY, recipe == INFMAP and "yes (as InfMap2)" or "no"))
 	end)
 end
