@@ -1028,117 +1028,43 @@ fn main() {
             let want = "depthAlpha(false) Clear(0,0,0,0,true,true) alphaWrite(true,true) depthAlpha(true) alphaWrite(false) | forced=false / \
                         depthAlpha(false) Clear(0,0,0,0,true,true) alphaWrite(true,true) depthAlpha(true) alphaWrite(false) | forced=false /  | forced=false";
             check(r == Ok(Some(want.into())), &format!("gmsky_overlay 1 prepares each frame, 0 leaves it alone: {r:?}"));
-            // Step W1: the frame is wiped once, where Source starts drawing entities in the main view
-            // (not in the 3D sky, a depth pass or another picture; a main view flagged "sky", as every
-            // view of a 2D-sky map is (test 70), still counts); the view model then doesn't wipe again.
-            // gmsky_overlay_world 0, or no main-view entity pass: wiped at the view model.
-            // Step W4: alpha writes off in the see-through pass; after it, the camera is sent and the
-            // depth drawn in the main view: entities with a model through DepthWrite (not effects
-            // without one, our own stand-ins, the player's weapon), the reference square, the grab;
-            // then the world layer is copied into its own picture and grabbed where the view model
-            // starts. After test 72: solid models (and the view model) stamped alpha 1 with colour
-            // writes off. With nothing to show: no camera, depth or world layer, only the wipes.
-            let world_lua = r#"
-                local target = nil
-                local rec = function(name) return function(...) local t = {} for i = 1, select('#', ...) do local v = select(i, ...) t[i] = type(v) == "number" and string.format("%g", v) or tostring(v) end HARNESS_RENDER[#HARNESS_RENDER + 1] = name .. "(" .. table.concat(t, ",") .. ")" end end
-                local function Ang(p, y, r) return { p = p, y = y, r = r, Forward = function() return Vector(1, 0, 0) end, Right = function() return Vector(0, -1, 0) end, Up = function() return Vector(0, 0, 1) end } end
-                render.GetRenderTarget = function() return target end
-                render.GetViewSetup = function() return { origin = Vector(10, 20, 30), angles = Ang(5, 0, 0), aspect = 16 / 9, fov = 90 } end
-                render.PushRenderTarget = function(rt) target = rt HARNESS_RENDER[#HARNESS_RENDER + 1] = "push(" .. tostring(rt) .. ")" end
-                render.PopRenderTarget = function() target = nil HARNESS_RENDER[#HARNESS_RENDER + 1] = "pop()" end
+            // After test 72 / 73: the frame is wiped where the view model starts; the view model is
+            // then stamped solid (alpha 1, colour writes off), its see-through parts (the RPG's laser)
+            // left out, and redrawing it doesn't stamp again (test 73's stack overflow). (The world
+            // layer's steps W1-W4 were removed in G8.)
+            let stamp_lua = r#"
+                local rec = function(name) return function(...) local t = {} for i = 1, select('#', ...) do t[i] = tostring((select(i, ...))) end HARNESS_RENDER[#HARNESS_RENDER + 1] = name .. "(" .. table.concat(t, ",") .. ")" end end
                 render.MaterialOverride = rec("override")
-                render.SetMaterial = rec("material")
-                render.CopyRenderTargetToTexture = rec("copy")
                 render.OverrideColorWriteEnable = rec("colorWrite")
-                render.FogMode, render.FogStart, render.FogEnd, render.FogColor, render.FogMaxDensity = rec("fogMode"), rec("fogStart"), rec("fogEnd"), rec("fogColor"), rec("fogDensity")
-                render.GetFogMode = function() return 0 end
-                render.GetFogDistances = function() return 0, 0 end
-                render.GetFogColor = function() return 0, 0, 0 end
-                MATERIAL_FOG_NONE, MATERIAL_FOG_LINEAR = 0, 1
                 bit = bit or { band = function(a, b) local r, k = 0, 1 while a > 0 and b > 0 do if a % 2 == 1 and b % 2 == 1 then r = r + k end a, b, k = math.floor(a / 2), math.floor(b / 2), k * 2 end return r end }
                 function Material(name) return { IsError = function() return false end, GetInt = function(_, k) return (name:find("laser") and k == "$flags") and 128 or 0 end } end
-                render.DrawQuadEasy = function(pos, n, w, h) HARNESS_RENDER[#HARNESS_RENDER + 1] = string.format("quad(%.1f,%.1f,%.1f,size %.2f)", pos.x, pos.y, pos.z, w) end
-                function Color() return "white" end
-                function GetRenderTargetEx(name, w, h, size, depth, flags, rtflags, fmt) return name .. "/" .. tostring(fmt) end
-                function CreateMaterial(name, shader, kv) return name .. "/" .. shader .. "/" .. tostring(kv["$color_depth"]) end
-                function ScrW() return 1280 end
-                function ScrH() return 720 end
-                RT_SIZE_LITERAL, MATERIAL_RT_DEPTH_SEPARATE, IMAGE_FORMAT_RGBA16161616F, MATERIAL_RT_DEPTH_NONE, IMAGE_FORMAT_BGRA8888 = 5, 1, 24, 2, 12
-                local function Ent(class, model, owner) return { GetClass = function() return class end, GetModel = function() return model end,
-                    IsDormant = function() return false end, GetNoDraw = function() return false end, IsWeapon = function() return class == "weapon_x" end,
-                    GetOwner = function() return owner end, DrawModel = function() HARNESS_RENDER[#HARNESS_RENDER + 1] = "draw(" .. class .. ")" end } end
-                local world = { Ent("prop_physics", "models/a.mdl"), Ent("class CLuaEffect", nil), Ent("gmsky_actor", "models/b.mdl"), Ent("weapon_x", "models/w.mdl", "someone") }
-                local everything = {}
-                ents.GetAll = function() return everything end
-                local grabWorld, grabDepth, view = gmsky.OverlayGrabWorld, gmsky.OverlayGrabDepth, gmsky.OverlayView
-                gmsky.OverlayGrabWorld = rec("grabWorld")
-                gmsky.OverlayGrabDepth = rec("grabDepth")
-                gmsky.OverlayView = rec("view")
-                local function frame(world, passes)
-                    HARNESS_CVARS.gmsky_overlay, HARNESS_CVARS.gmsky_overlay_world = "1", world
-                    hook.Run("PreRender")
-                    HARNESS_RENDER = {}
-                    for _, p in ipairs(passes) do
-                        target = p.rt
-                        local r = hook.Run("PreDrawOpaqueRenderables", p.depth or false, p.sky or false, p.sky3d or false)
-                        if r ~= nil then return "returned " .. tostring(r) end
-                        hook.Run("PreDrawTranslucentRenderables", p.depth or false, p.sky or false, p.sky3d or false)
-                        hook.Run("PostDrawTranslucentRenderables", p.depth or false, p.sky or false, p.sky3d or false)
-                        target = nil
-                    end
-                    hook.Run("PreDrawViewModel") hook.Run("PostDrawViewModel", HARNESS_VM) hook.Run("PreDrawHUD") hook.Run("PostRender")
-                    local clears = 0
-                    for _, c in ipairs(HARNESS_RENDER) do if c:find("^Clear") then clears = clears + 1 end end
-                    return tostring(gmsky.liveoverlay.frame.cleared) .. " x" .. clears
-                end
+                function CreateMaterial(name, shader) return name .. "/" .. shader end
+                local subs = {}
+                HARNESS_VM = { GetClass = function() return "viewmodel" end, GetModel = function() return "models/v.mdl" end,
+                    GetMaterials = function() return { "models/rpg/body", "models/rpg/laser" } end,
+                    GetSubMaterial = function(_, i) return subs[i] or "" end,
+                    SetSubMaterial = function(_, i, m) subs[i] = m HARNESS_RENDER[#HARNESS_RENDER + 1] = "sub(" .. i .. "," .. tostring(m) .. ")" end }
+                -- Drawing the view model runs its "drawn" hook again, as in the game.
+                HARNESS_VM.DrawModel = function(self) HARNESS_RENDER[#HARNESS_RENDER + 1] = "draw(viewmodel)" hook.Run("PostDrawViewModel", self) end
                 gmsky.liveoverlay.wipes = {}
-                gmsky.liveoverlay.lastActivity = nil
-                local out = {
-                    frame("1", { { sky3d = true, sky = true }, { depth = true }, { rt = "reflection" }, { sky = true } }),
-                    frame("1", { { sky3d = true, sky = true } }),
-                    frame("0", { {} }),
-                }
+                HARNESS_CVARS.gmsky_overlay = "1"
+                hook.Run("PreRender")
+                HARNESS_RENDER = {}
+                hook.Run("PreDrawViewModel") hook.Run("PostDrawViewModel", HARNESS_VM) hook.Run("PreDrawHUD") hook.Run("PostRender")
+                HARNESS_VM = nil
                 local wipes = {}
                 for k, v in pairs(gmsky.liveoverlay.wipes) do wipes[#wipes + 1] = k .. "=" .. v end
                 table.sort(wipes)
-                everything = world
-                HARNESS_VM = Ent("viewmodel", "models/v.mdl")
-                local subs = {}
-                HARNESS_VM.GetMaterials = function() return { "models/rpg/body", "models/rpg/laser" } end
-                HARNESS_VM.GetSubMaterial = function(_, i) return subs[i] or "" end
-                HARNESS_VM.SetSubMaterial = function(_, i, m) subs[i] = m HARNESS_RENDER[#HARNESS_RENDER + 1] = "sub(" .. i .. "," .. tostring(m) .. ")" end
-                -- Drawing the view model runs its "drawn" hook again, as in the game (test 73's stack overflow).
-                HARNESS_VM.DrawModel = function(self) HARNESS_RENDER[#HARNESS_RENDER + 1] = "draw(viewmodel)" hook.Run("PostDrawViewModel", self) end
-                frame("1", { { sky = true } })
-                HARNESS_VM = nil
-                local w4 = table.concat(HARNESS_RENDER, " ")
-                gmsky.OverlayGrabWorld, gmsky.OverlayGrabDepth, gmsky.OverlayView = grabWorld, grabDepth, view
-                everything = {}
-                HARNESS_CVARS.gmsky_overlay, HARNESS_CVARS.gmsky_overlay_world = "0", nil
-                render.GetRenderTarget, render.GetViewSetup, render.CopyRenderTargetToTexture, render.OverrideColorWriteEnable = nil, nil, nil, nil
-                render.FogMode, render.GetFogMode, Material = nil, nil, nil
+                HARNESS_CVARS.gmsky_overlay = "0"
+                render.MaterialOverride, render.OverrideColorWriteEnable, Material = nil, nil, nil
                 hook.Run("PreRender")
-                return table.concat(out, " / ") .. " | " .. table.concat(wipes, " ") .. " | " .. w4
+                return table.concat(wipes, " ") .. " | " .. table.concat(HARNESS_RENDER, " ")
             "#;
-            let r = lua.run(lc, world_lua);
-            // The reference square: depth pixel 4 of 640 x 360 is ndc (-0.9875, 0.9778); tan(45) = 1,
-            // 1 / (16/9) = 0.5625 vertically; 1000 away: (10 + 1000, 20 + 987.5, 30 + 550.0);
-            // 8 pixels = 8 * 2 * 1000 * 1 / 640 = 25 units.
-            let want = "entities x2 / view model x1 / view model x1 | 3D sky pass skipped=2 depth pass skipped=1 nothing to show=1 \
-                        other picture skipped=1 wiped at entities=1 wiped at view model=2 | \
-                        depthAlpha(false) Clear(0,0,0,0,true,true) alphaWrite(true,false) \
-                        colorWrite(true,false) alphaWrite(true,true) override(gmsky_alphastamp/UnlitGeneric/nil) draw(prop_physics) override(nil) colorWrite(false) \
-                        alphaWrite(true,false) view(10,20,30,5,0,0,90,1.77778) \
-                        alphaWrite(false) push(gmsky_depth_640x360/24) Clear(0,0,0,0,true,true) \
-                        fogMode(1) fogStart(0) fogEnd(20000) fogColor(255,255,255) fogDensity(1) \
-                        material(gmsky_depthfog/UnlitGeneric/nil) quad(510.0,513.8,305.0,size 12.50) \
-                        material(gmsky_depthfog/UnlitGeneric/nil) quad(4010.0,3870.0,2230.0,size 100.00) \
-                        material(gmsky_depthfog/UnlitGeneric/nil) quad(510.0,513.8,30.0,size 12.50) material(gmsky_alphastamp/UnlitGeneric/nil) quad(510.0,488.7,305.0,size 12.50) \
-                        override(gmsky_depthfog/UnlitGeneric/nil) draw(prop_physics) override(nil) fogMode(0) fogStart(0) fogEnd(0) fogColor(0,0,0) grabDepth(500,4000) pop() alphaWrite(true,false) \
-                        copy(gmsky_world_1280x720/12) push(gmsky_world_1280x720/12) grabWorld() pop() alphaWrite(false) Clear(0,0,0,0,false,false) \
+            let r = lua.run(lc, stamp_lua);
+            let want = "wiped at view model=1 | depthAlpha(false) Clear(0,0,0,0,true,true) \
                         colorWrite(true,false) alphaWrite(true,true) sub(0,!gmsky_alphastamp) sub(1,!gmsky_alphastamp) sub(1,!gmsky_nodraw) draw(viewmodel) alphaWrite(false) sub(0,nil) sub(1,nil) colorWrite(false) alphaWrite(false) \
                         alphaWrite(true,true) depthAlpha(true) alphaWrite(false)";
-            check(r == Ok(Some(want.into())), &format!("steps W1-W4: entity-pass wipe, see-through alpha off, camera, depth of models with the reference square, world layer: {r:?}"));
+            check(r == Ok(Some(want.into())), &format!("wiped at the view model, view model stamped solid without its see-through part: {r:?}"));
             // After test 44: with the overlay on, a halo is drawn between a copy of the frame's alpha
             // and a restore of it (colour kept, alpha replaced); with gmsky_overlay_halofix 0, or
             // with the overlay off, the halo is drawn untouched.

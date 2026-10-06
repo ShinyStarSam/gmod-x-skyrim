@@ -425,7 +425,7 @@ typedef struct GmskyColTri {
 // A zero-filled block is valid: middle 0, nobody attached.
 #define GMSKY_OV_SHM_NAME L"Local\\GmodSkyrim_overlay_v1"
 #define GMSKY_OV_MAGIC 0x564F534Du      // "MSOV"
-#define GMSKY_OV_VERSION 2u  // 2: slot header 128 bytes with the picture's camera (step W4)
+#define GMSKY_OV_VERSION 3u  // 2: slot header 128 bytes with the picture's camera (step W4); 3: world layer removed (G8)
 #define GMSKY_OV_MAX_W 3840u
 #define GMSKY_OV_MAX_H 2160u
 #define GMSKY_OV_MASK_MAX_W (GMSKY_OV_MAX_W / 4u)  // plate mask for the planned blur, quarter size
@@ -448,14 +448,7 @@ typedef struct GmskyColTri {
 #define GMSKY_OVF_PREMULTIPLIED 0x1u  // colour already multiplied by alpha (drawn over transparent black)
 #define GMSKY_OVF_SRGB 0x2u           // colour values are sRGB-encoded (blend in linear light, test 32)
 #define GMSKY_OVF_BLUR 0x4u           // Skyrim blurs its picture behind see-through parts (gmsky_overlay_blur)
-// Step W2 (DESIGN.md "Garry's Mod's world objects and effects in Skyrim"): the slot's pixels then
-// hold three pictures one after the other. The HUD picture (hands, weapon, HUD) at 0, as always;
-// with GMSKY_OVF_WORLD the world layer (grenades, explosions, props; same size, format and rows)
-// at height * row_bytes; with GMSKY_OVF_DEPTH (only with WORLD) the world layer's depth at
-// 2 * height * row_bytes: depth_width x depth_height 32-bit floats, rows top to bottom, each the
-// distance along the view in Garry's Mod units, 0 = no Garry's Mod object there (always shown).
-#define GMSKY_OVF_WORLD 0x8u
-#define GMSKY_OVF_DEPTH 0x10u
+// (0x8 and 0x10 were the world layer and its depth, steps W2-W4; removed in G8.)
 
 typedef struct GmskyOverlayCtl {
     uint32_t magic;              // GMSKY_OV_MAGIC once initialized (GMSKY_MAGIC_INIT while one side sets it up)
@@ -480,15 +473,7 @@ typedef struct GmskyOverlaySlotHdr {  // written by Garry's Mod into its own slo
     uint32_t row_bytes;       // bytes per row in the slot (width * 4, rows top to bottom)
     uint32_t mask_width;      // plate mask (1 byte per pixel at GMSKY_OV_MASK_OFF); 0 = none
     uint32_t mask_height;
-    uint16_t depth_width;     // GMSKY_OVF_DEPTH: the depth picture's size (half the picture's, rounded down)
-    uint16_t depth_height;
-    // Step W4: the camera Garry's Mod drew the world layer with (for Skyrim's re-projection).
-    float view_eye[3];        // Garry's Mod units, relative to the anchor of origin epoch view_epoch
-    float view_angles[3];     // pitch, yaw, roll in degrees (Source's angles, view punch included)
-    float view_fov;           // horizontal field of view in degrees, as drawn (aspect-scaled)
-    float view_aspect;        // width / height
-    uint32_t view_epoch;      // origin epoch of the anchor; 0 = no camera (no re-projection)
-    uint8_t reserved[44];
+    uint8_t reserved[84];     // (the world layer's depth size and camera until G8)
 } GmskyOverlaySlotHdr;
 
 #define GMSKY_OV_SLOT_HDR_OFF 0x40u  // three GmskyOverlaySlotHdr
@@ -549,7 +534,7 @@ typedef struct GmskyOverlaySlotHdr {  // written by Garry's Mod into its own slo
 #define GMSKY_RND_FRAME_SHADOW_DEBUG 0x40u   // our objects coloured by their sun shadow (gmsky_render_shadow_debug 1; step N1)
 // GmskyRndObject.flags
 #define GMSKY_RND_OBJ_HELD 0x1u    // held by the player (physgun, gravity gun, +use): placed relative to the camera
-#define GMSKY_RND_OBJ_CONTACT 0x2u // an NPC, nextbot or player: a soft contact shadow under feet[], width wide (step N1)
+#define GMSKY_RND_OBJ_CONTACT 0x2u // an NPC, nextbot or player: feet[] and width are set (Skyrim's NPC sun-shadow probe)
 
 #define GMSKY_RND_FORGET_MODEL 1u
 #define GMSKY_RND_FORGET_TEXTURE 2u
@@ -729,12 +714,10 @@ GMSKY_ASSERT(offsetof(GmskyOverlayCtl, frames_published) == 24);
 GMSKY_ASSERT(offsetof(GmskyOverlayCtl, skyrim_width) == 40);
 GMSKY_ASSERT(offsetof(GmskyOverlayCtl, skyrim_size_qpc) == 48);
 GMSKY_ASSERT(sizeof(GmskyOverlaySlotHdr) == 128);
-GMSKY_ASSERT(offsetof(GmskyOverlaySlotHdr, view_eye) == 48);
-GMSKY_ASSERT(offsetof(GmskyOverlaySlotHdr, view_epoch) == 80);
 GMSKY_ASSERT(offsetof(GmskyOverlaySlotHdr, frame) == 16);
 GMSKY_ASSERT(offsetof(GmskyOverlaySlotHdr, capture_qpc) == 24);
 GMSKY_ASSERT(offsetof(GmskyOverlaySlotHdr, row_bytes) == 32);
-GMSKY_ASSERT(offsetof(GmskyOverlaySlotHdr, depth_width) == 44);
+GMSKY_ASSERT(offsetof(GmskyOverlaySlotHdr, reserved) == 44);
 GMSKY_ASSERT(sizeof(GmskyOverlayCtl) <= GMSKY_OV_SLOT_HDR_OFF);
 GMSKY_ASSERT(GMSKY_OV_SLOT_HDR_OFF + 3 * sizeof(GmskyOverlaySlotHdr) <= GMSKY_OV_PIXELS_OFF);
 GMSKY_ASSERT(GMSKY_OV_SLOT_BYTES == 33751040u);

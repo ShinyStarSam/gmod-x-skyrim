@@ -2081,6 +2081,35 @@ they hide what's behind them.
   effects Lua can see at all; the first step is a log of what happens when you shoot.
 - **G8. Clean-up.** When G3-G5 cover the world objects, the world layer and depth picture (W1-W4
   code in `liveoverlay.lua`, `capture.rs`, `Draw.cpp`) are removed. The hands / HUD picture stays.
+  **Detailed plan (2026-10-06, after test 96; the user: "Commit and continue").** The world layer
+  has been off by default since G3b (`gmsky_overlay_world 0`), so removing it should change nothing
+  you can see. One step, revertible as one commit:
+  - *Garry's Mod, `liveoverlay.lua`:* removed: `gmsky_overlay_world`, `gmsky_overlay_depth`, the
+    wipe at the entity pass, the see-through pass with alpha writes off, the fog depth picture
+    with its calibration squares, the camera sent with the picture, the world-layer copy, the
+    "something happened" hooks (shots, effects, new entities) and the "live overlay world" status
+    line. Kept: the overlay switch, the wipe where the view model / hands / HUD start, alpha
+    forced for the HUD, the halo fix, the view model and hands stamped solid, the hidden window,
+    the blur flag, `gmsky_overlay_shot`, the status line.
+  - *Garry's Mod module, `capture.rs` / `lib.rs`:* removed: `gmsky.OverlayGrabWorld`,
+    `OverlayGrabDepth`, `OverlayView`, `OverlayDepthCentre`; the extra copies, the fog
+    calibration and depth conversion, their counters and tests. The HUD picture path is unchanged.
+  - *Protocol:* the flags `GMSKY_OVF_WORLD` / `GMSKY_OVF_DEPTH` and the slot header's depth size
+    and camera fields go; the header stays 128 bytes (the space becomes `reserved`). The overlay
+    block's version goes 2 -> 3, so an old build on either side refuses the block instead of
+    misreading it (rebuild both, as always).
+  - *Skyrim, `Draw.cpp`:* removed: the world-layer and depth textures, the re-projection, Skyrim's
+    depth probe and the "world layer drawn ..." log line. The HUD picture, its sRGB blending and
+    the blur stay as they are.
+  - *Skyrim, `World.cpp`:* the in-frame drawing asked that probe whether Skyrim's depth is
+    reversed. The probe only ran while a world layer came, so in every test since G3b it said
+    "probe not ready, from the matrix" (tests 91-96 logs). The camera matrix's answer is now the
+    only one; the log line stays.
+  - *Harness:* the W1-W4 check is replaced by one that the frame is still wiped at the view
+    model, with the view model stamped solid.
+  - Test: hands, weapon and HUD look as before (with HOLOHUD's blurred plates); props, NPCs and
+    effects look as before; Garry's Mod's log has no "live overlay world" line; Skyrim's log no
+    "world layer drawn" line.
 
 **Not sure (checked by logs, not guessed):** whether `util.GetModelMeshes` gives normals and the
 model's real skin materials for every model (the wiki lists a `skin` argument); whether

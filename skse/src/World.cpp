@@ -42,7 +42,6 @@
 // shadow mask for the light (nothing drawn).
 #include "World.h"
 
-#include "Draw.h"
 #include "Input.h"
 #include "Link.h"
 #include "Render.h"
@@ -973,7 +972,6 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 			bool onScreen = false;
 			float screenX = 0, screenY = 0, distance = 0;
 			bool reversed = false;
-			const char* depthFrom = "";
 			// G3a
 			uint64_t objectsDrawn = 0, skippedEpoch = 0, skippedNoOrigin = 0, skippedUnknown = 0, skippedBones = 0;
 			uint64_t triangles = 0, drawCalls = 0, blendedCalls = 0, framesDrawn = 0;
@@ -3081,24 +3079,19 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 			Set4(fc.camUp, R.entry[0][1], R.entry[1][1], R.entry[2][1], 0.0f);
 			Set4(fc.camRight, R.entry[0][2], R.entry[1][2], R.entry[2][2], 0.0f);
 
-			// Depth convention: the finished-frame probe's (it measures Skyrim's buffer itself), else
-			// the matrix's (near maps above far = reversed).
+			// Depth convention from the matrix (near maps above far = reversed). (Until G8 a depth probe
+			// in Draw.cpp could override it; it only ran with the old world layer, never since G3b.)
 			auto ndcZ = [&](float a_dist) {
 				const float p[3] = { R.entry[0][0] * a_dist, R.entry[1][0] * a_dist, R.entry[2][0] * a_dist };
 				const float z = fc.viewProj[2][0] * p[0] + fc.viewProj[2][1] * p[1] + fc.viewProj[2][2] * p[2] + fc.viewProj[2][3];
 				const float w = fc.viewProj[3][0] * p[0] + fc.viewProj[3][1] * p[1] + fc.viewProj[3][2] * p[2] + fc.viewProj[3][3];
 				return std::fabs(w) > 1e-6f ? z / w : 0.0f;
 			};
-			const bool matrixReversed = ndcZ(100.0f) > ndcZ(10000.0f);
-			bool probeReversed = false;
-			const bool probeKnown = Draw::DepthConvention(probeReversed);
-			const bool reversed = probeKnown ? probeReversed : matrixReversed;
+			const bool reversed = ndcZ(100.0f) > ndcZ(10000.0f);
 			static int lastConvention = -1;
-			const int convention = (probeKnown ? 2 : 0) + (reversed ? 1 : 0);
-			if (convention != lastConvention) {
-				lastConvention = convention;
-				logger::info("in-frame drawing: depth {} ({}); the camera's matrix says {}", reversed ? "reversed Z" : "standard Z",
-					probeKnown ? "from the depth probe" : "probe not ready, from the matrix", matrixReversed ? "reversed" : "standard");
+			if (int(reversed) != lastConvention) {
+				lastConvention = int(reversed);
+				logger::info("in-frame drawing: depth {} (from the camera's matrix)", reversed ? "reversed Z" : "standard Z");
 			}
 
 			static bool checkedMatrix = false;
@@ -3125,7 +3118,6 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 				seen = g_seen;
 			}
 			seen.reversed = reversed;
-			seen.depthFrom = probeKnown ? "probe" : "matrix";
 			GatherLighting(fc, cam, seen);
 
 			// G5b bundle: Garry's Mod's console switches (frame flags), shadows, Skyrim's depth back to positions.
@@ -3443,8 +3435,8 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 				seen.firstOnScreen ? std::format("on screen at ({:.3f}, {:.3f})", seen.firstX, seen.firstY) : std::string("off screen"));
 		}
 		const uint64_t objectsDrawn = seen.objectsDrawn;
-		logger::info("in-frame drawing: {} calls, {} drawn, skipped: {} menu, {} no camera/player, {} targets, {} init; {:.3f} ms avg, {:.3f} max (CPU); depth {} ({}){}",
-			calls, drawn, menu, noCam, targets, init, drawn ? QpcMs(ticks) / drawn : 0.0, QpcMs(maxTicks), seen.reversed ? "reversed" : "standard", seen.depthFrom, cube);
+		logger::info("in-frame drawing: {} calls, {} drawn, skipped: {} menu, {} no camera/player, {} targets, {} init; {:.3f} ms avg, {:.3f} max (CPU); depth {}{}",
+			calls, drawn, menu, noCam, targets, init, drawn ? QpcMs(ticks) / drawn : 0.0, QpcMs(maxTicks), seen.reversed ? "reversed" : "standard", cube);
 		if (seen.gpuModels || seen.gmodFrame || seen.uploadFailures) {
 			logger::info("in-frame drawing: Garry's Mod objects: {} frames drawn, {} objects ({} triangles, {} draw calls, {} blended); {} point lights; skipped: {} epoch (frame {} vs origin {}), {} no origin, {} unknown model, {} bone count; "
 						 "on the card: {} models, {} textures; uploads {} models, {} textures, {} failed, max {:.2f} ms; Garry's Mod frame {}{}",

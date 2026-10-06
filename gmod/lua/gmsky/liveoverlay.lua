@@ -18,42 +18,13 @@
 -- Present hook copies marked frames (capture.rs). The Garry's Mod window then shows only the hands
 -- and HUD on black: that is expected (it goes out of sight in step 2d).
 --
--- Step W1 (DESIGN.md "Garry's Mod's world objects and effects in Skyrim"): with gmsky_overlay_world
--- 1 (the default) the frame is wiped earlier, when Source starts drawing entities in the main view
--- (PreDrawOpaqueRenderables), so gm_flatmap's floor and sky are gone but grenades, rockets,
--- explosions, tracers, beams and props drawn after it stay in the picture. The view model's wipe is
--- the fallback for frames where that didn't happen. Test 70: Garry's Mod says "drawing the sky" on
--- every main view of a map with a 2D sky (the wiki's note), so only the 3D sky is skipped now.
---
--- Step W2 (SkyCraft's way: Skyrim hides them behind its own depth buffer, W3): where the view
--- model, hands or HUD start, the frame so far is the world layer: gmsky.OverlayGrabWorld() copies
--- it, then it is wiped and the hands / HUD are drawn on transparent as before. The module sends HUD
--- picture, world layer and depth together (capture.rs).
---
--- Step W4 (after test 71): the depth is drawn inside the main view, right after its see-through
--- pass (same camera): each Garry's Mod entity with a model is drawn again with ent:DrawModel()
--- under Source's DepthWrite material ($color_depth: red = distance / its far constant) into a
--- half-size RGBA16F target (render.RenderView ignored the override in test 71). A small square at a
--- known distance in the top-left corner lets the module work out the far constant itself. The
--- camera goes along (gmsky.OverlayView) so Skyrim can re-project the world layer onto its own
--- camera. Alpha writes are off in the see-through pass (effects add light; test 71's black boxes).
--- World layer and depth are only sent while something can show (an entity, or a shot / effect in
--- the last second); otherwise only the hands / HUD picture (cheap).
---
--- After test 72: the module copies the pictures at the end of the frame (Source holds drawing back,
--- so copies made when Lua asked were empty), so the world layer is first copied into its own
--- picture (render.CopyRenderTargetToTexture). Solid models get their pixels stamped opaque (alpha 1,
--- colour untouched) after the see-through pass, and the view model and hands after they are drawn:
--- see-through parts of solid models (some props, the RPG, the tool gun's screen) showed Skyrim
--- through them.
---
--- After test 73: Source's DepthWrite drew nothing here (every depth picture empty), so the depth
--- picture is drawn with fog instead: models black under white linear fog from 0 to FOG_END, so a
--- pixel's grey level grows with its distance. Calibration squares at known distances let the module
--- work out the scale and whether the fog measures along the view or along the ray (capture.rs). The
--- stamp no longer calls itself (redrawing the view model ran its hook again: thousands of stamps a
--- frame, a stack overflow, ~12 frames/s), and leaves see-through and glowing sub-materials out (the
--- RPG's laser glow became a black bar).
+-- Steps W1-W4 (the world layer: Garry's Mod's props and effects as a second picture, with a depth
+-- picture and its camera) were removed in G8 (DESIGN.md): Skyrim draws Garry's Mod's objects itself
+-- since G3b (render.lua). What stayed from them: after test 72, the view model and hands get their
+-- pixels stamped opaque (alpha 1, colour untouched) after they are drawn: see-through parts of
+-- solid models (the RPG, the tool gun's screen) showed Skyrim through them. After test 73 the stamp
+-- no longer calls itself (redrawing the view model ran its hook again: a stack overflow) and leaves
+-- see-through and glowing sub-materials out (the RPG's laser glow became a black bar).
 
 local gmsky = gmsky
 local L = gmsky.liveoverlay or {}
@@ -75,23 +46,8 @@ L.halofix = L.halofix or CreateConVar("gmsky_overlay_halofix", "1", 0,
 	"1 = keep the overlay's transparency when Garry's Mod draws a halo (physgun grab outline)")
 L.halos = L.halos or { fixed = 0, unfixed = 0, ms = 0 }
 
--- Step W1: keep Garry's Mod's world objects and effects (wiped at the entity pass, not the view model).
--- Off by default since G3b: Skyrim draws Garry's Mod's objects itself (render.lua); 1 brings the
--- picture world layer back (objects then show twice).
-L.world = L.world or CreateConVar("gmsky_overlay_world", "0", 0,
-	"1 = keep Garry's Mod's world objects and effects (grenades, explosions, props) in the overlay")
--- Per 5 s status line: where frames were wiped, and entity passes not used (why).
+-- Per 5 s status line: where frames were wiped.
 L.wipes = L.wipes or {}
-
--- Step W2: the world layer's depth for Skyrim's depth test.
-L.depth = L.depth or CreateConVar("gmsky_overlay_depth", "1", 0,
-	"1 = send the depth of Garry's Mod's world objects so Skyrim hides them behind its walls")
--- After test 73: the fog's end and the calibration squares' distances (Garry's Mod units); each
--- square covers 8 x 8 depth pixels (capture.rs: A at (4, 4) and C at (4, h/2) at D1, B at (12, 4)
--- at D2, D at (20, 4) plain white).
-L.FOG_END = 20000
-L.D1, L.D2 = 500, 4000
-L.SQ = 8
 
 -- Blur behind see-through parts (HOLOHUD's plates, the console): done by Skyrim, which blurs its own
 -- picture there; this only sets a flag in each picture (DESIGN.md "Blur behind the plates").
@@ -133,11 +89,7 @@ local function WrapHalo()
 		render.SetMaterial(s.mat)
 		render.DrawScreenQuad()
 		render.OverrideBlend(false)
-		if L.frame.noAlpha then
-			render.OverrideAlphaWriteEnable(true, false) -- still in the see-through pass (step W4)
-		else
-			render.OverrideAlphaWriteEnable(L.frame.alphaForced and true or false, true)
-		end
+		render.OverrideAlphaWriteEnable(L.frame.alphaForced and true or false, true)
 		L.halos.fixed = L.halos.fixed + 1
 		L.halos.ms = L.halos.ms + (SysTime() - t0) * 1000
 	end
@@ -212,84 +164,6 @@ local function Count(what)
 	L.wipes[what] = (L.wipes[what] or 0) + 1
 end
 
-local function Target()
-	return render.GetRenderTarget and render.GetRenderTarget() or nil
-end
-
--- Step W1: Source has drawn the map (gm_flatmap's floor, its sky) and is about to draw entities.
--- Only the main view counts: not the 3D sky, not depth-only passes (shadows), and not a view drawn
--- into another picture (a reflection, a camera screen), which has a different render target than
--- the frame had at PreRender. Must return nothing (true would stop Source drawing the entities).
--- The DepthWrite material that draws every object as its distance (step W2).
-local function DepthMaterial()
-	-- After test 73: black, fogged white with distance.
-	L.depthMat = L.depthMat or CreateMaterial("gmsky_depthfog", "UnlitGeneric", {
-		["$basetexture"] = "vgui/white", ["$color"] = "[0 0 0]", ["$vertexalpha"] = "0", ["$vertexcolor"] = "0",
-	})
-	return L.depthMat
-end
-
-hook.Add("PreDrawOpaqueRenderables", "gmsky_liveoverlay", function(depth, skybox, sky3d)
-	local f = L.frame
-	if not f.active or f.cleared or not L.world:GetBool() then return end
-	-- (skybox is true on every main view of a 2D-sky map, test 70: not a reason to skip.)
-	if depth or sky3d then
-		Count(depth and "depth pass skipped" or "3D sky pass skipped")
-		return
-	end
-	if Target() ~= f.target then
-		Count("other picture skipped")
-		return
-	end
-	ClearOnce("entities")
-end)
-
--- The main view's own passes after the entity wipe: not depth-only passes, not the 3D sky, not
--- another picture.
-local function MainPass(f, depth, sky3d)
-	return f.active and f.cleared == "entities" and not depth and not sky3d and Target() == f.target
-end
-
--- Step W4: something Garry's Mod draws in the world happened recently (shots, effects, new entities).
-function L.Poke() L.lastActivity = RealTime and RealTime() or 0 end
-hook.Add("EntityFireBullets", "gmsky_liveoverlay", function() L.Poke() end)
-hook.Add("OnEntityCreated", "gmsky_liveoverlay", function(e)
-	if IsValid(e) and not e:GetClass():find("^gmsky_") then L.Poke() end
-end)
-if util and util.Effect and not L.effectWrapped then
-	L.effectWrapped = true
-	local orig = util.Effect
-	util.Effect = function(...) L.Poke() return orig(...) end
-end
-
--- Entities whose model is drawn in the world (not the player, hands, view model, held weapons,
--- our own invisible ground and stand-ins); `any` = also something without a model (an effect).
-local SKIP_DRAW = { player = true, gmod_hands = true, predicted_viewmodel = true, viewmodel = true, worldspawn = true }
-local function WorldEntities()
-	local list, any = {}, false
-	if not (ents and ents.GetAll and LocalPlayer) then return list, any end
-	local ply = LocalPlayer()
-	for _, e in ipairs(ents.GetAll()) do
-		if IsValid(e) and not e:IsDormant() and not e:GetNoDraw() then
-			local c = e:GetClass()
-			if not SKIP_DRAW[c] and not c:find("^gmsky_") and e ~= ply and not (e:IsWeapon() and IsValid(e:GetOwner())) then
-				any = true
-				local m = e:GetModel()
-				if m and m ~= "" then list[#list + 1] = e end
-			end
-		end
-	end
-	return list, any
-end
-
--- Step W4: alpha writes off for the see-through pass, so effects only add light.
-hook.Add("PreDrawTranslucentRenderables", "gmsky_liveoverlay", function(depth, skybox, sky3d)
-	local f = L.frame
-	if f.noAlphaDone or not MainPass(f, depth, sky3d) then return end
-	f.noAlphaDone, f.noAlpha = true, true
-	render.OverrideAlphaWriteEnable(true, false)
-end)
-
 -- After test 72: a white material that writes alpha 1; drawn with colour writes off it only marks
 -- a model's pixels as solid.
 local function StampMaterial()
@@ -362,107 +236,6 @@ local function Stamp(list)
 	L.stamping = false
 end
 
--- Step W4: the camera, and the depth of the world objects, drawn in the main view.
-local function DepthStep(f)
-	local t0 = SysTime()
-	local list, any = WorldEntities()
-	f.worldActive = any or (RealTime and L.lastActivity and RealTime() - L.lastActivity < 1) or false
-	if not f.worldActive then
-		Count("nothing to show")
-		return
-	end
-	Stamp(list)
-	render.OverrideAlphaWriteEnable(true, false) -- back to the see-through pass's setting
-	local v = render.GetViewSetup and render.GetViewSetup()
-	if v and gmsky.OverlayView then
-		gmsky.OverlayView(v.origin.x, v.origin.y, v.origin.z, v.angles.p, v.angles.y, v.angles.r, v.fov, v.aspect)
-	end
-	if not (v and L.depth:GetBool() and gmsky.OverlayGrabDepth) then return end
-	local w, h = math.max(16, math.floor(ScrW() / 2)), math.max(16, math.floor(ScrH() / 2))
-	if not (L.depthRt and L.depthRt.w == w and L.depthRt.h == h) then
-		-- Point sampling, clamped (1 + 4 + 8); its own depth buffer; four half floats.
-		local name = string.format("gmsky_depth_%dx%d", w, h)
-		L.depthRt = { w = w, h = h, rt = GetRenderTargetEx(name, w, h, RT_SIZE_LITERAL, MATERIAL_RT_DEPTH_SEPARATE, 13, 0,
-			IMAGE_FORMAT_RGBA16161616F) }
-	end
-	local mat = DepthMaterial()
-	render.OverrideAlphaWriteEnable(false) -- the material's alpha 1 marks a real depth
-	render.PushRenderTarget(L.depthRt.rt)
-	render.Clear(0, 0, 0, 0, true, true)
-	-- After test 73: white linear fog from 0 to FOG_END (the old fog put back afterwards).
-	local fogMode = render.GetFogMode and render.GetFogMode()
-	local fogStart, fogEnd = 0, 0
-	if render.GetFogDistances then fogStart, fogEnd = render.GetFogDistances() end
-	local fr, fg, fb = 0, 0, 0
-	if render.GetFogColor then fr, fg, fb = render.GetFogColor() end
-	render.FogMode(MATERIAL_FOG_LINEAR)
-	render.FogStart(0)
-	render.FogEnd(L.FOG_END)
-	render.FogColor(255, 255, 255)
-	render.FogMaxDensity(1)
-	-- The calibration squares (drawn first; a model in front of one spoils that frame's
-	-- calibration, and the module keeps the last good one).
-	local fwd, right, up = v.angles:Forward(), v.angles:Right(), v.angles:Up()
-	local tx = math.tan(math.rad(v.fov / 2))
-	local ty = tx / v.aspect
-	local function Square(px, py, d, m)
-		local nx, ny = -1 + 2 * px / w, 1 - 2 * py / h
-		local pos = v.origin + (fwd + right * (nx * tx) + up * (ny * ty)) * d
-		local size = L.SQ * 2 * d * tx / w
-		render.SetMaterial(m)
-		render.DrawQuadEasy(pos, -fwd, size, size, Color(255, 255, 255), 0)
-	end
-	Square(4, 4, L.D1, mat)
-	Square(12, 4, L.D2, mat)
-	Square(4, math.floor(h / 2), L.D1, mat)
-	Square(20, 4, L.D1, StampMaterial())
-	render.MaterialOverride(mat)
-	for _, e in ipairs(list) do e:DrawModel() end
-	render.MaterialOverride(nil)
-	render.FogMode(fogMode or MATERIAL_FOG_NONE)
-	render.FogStart(fogStart or 0)
-	render.FogEnd(fogEnd or 0)
-	render.FogColor(fr or 0, fg or 0, fb or 0)
-	gmsky.OverlayGrabDepth(L.D1, L.D2)
-	render.PopRenderTarget()
-	render.OverrideAlphaWriteEnable(true, false) -- back to the see-through pass's setting
-	Count("depth drawn")
-	L.depthMs = (L.depthMs or 0) + (SysTime() - t0) * 1000
-	L.depthEnts = (L.depthEnts or 0) + #list
-end
-
-hook.Add("PostDrawTranslucentRenderables", "gmsky_liveoverlay", function(depth, skybox, sky3d)
-	local f = L.frame
-	if f.depthDone or not MainPass(f, depth, sky3d) then return end
-	f.depthDone = true
-	DepthStep(f)
-end)
-
--- Step W2: the world is done (the view model, hands or HUD start): copy it as the world layer (if
--- anything can show) and wipe it, once per frame, only if the frame was wiped at the entity pass.
-local function SplitLayers()
-	local f = L.frame
-	if not f.active or f.split or f.cleared ~= "entities" then return end
-	f.split = true
-	if f.worldActive and gmsky.OverlayGrabWorld then
-		local w, h = ScrW(), ScrH()
-		if not (L.worldRt and L.worldRt.w == w and L.worldRt.h == h) then
-			-- Point sampling, clamped (1 + 4 + 8); no depth; 8 bits per channel with alpha.
-			L.worldRt = { w = w, h = h, rt = GetRenderTargetEx(string.format("gmsky_world_%dx%d", w, h), w, h, RT_SIZE_LITERAL,
-				MATERIAL_RT_DEPTH_NONE, 13, 0, IMAGE_FORMAT_BGRA8888) }
-		end
-		render.CopyRenderTargetToTexture(L.worldRt.rt)
-		render.PushRenderTarget(L.worldRt.rt)
-		gmsky.OverlayGrabWorld()
-		render.PopRenderTarget()
-	end
-	if f.noAlpha then
-		f.noAlpha = false
-		render.OverrideAlphaWriteEnable(false)
-	end
-	render.Clear(0, 0, 0, 0, false, false)
-end
-
 hook.Add("PreRender", "gmsky_liveoverlay", function()
 	-- The window follows the overlay and gmsky_overlay_hidewindow (both can change any time).
 	if L.on ~= nil then Window(L.on and L.hidewindow:GetBool()) end
@@ -480,11 +253,11 @@ hook.Add("PreRender", "gmsky_liveoverlay", function()
 			.. table.concat(prev.order or {}, ", "))
 	end
 	Apply(L.cvar:GetBool())
-	L.frame = { active = L.on, target = L.on and Target() or nil }
+	L.frame = { active = L.on }
 end)
 
-hook.Add("PreDrawViewModel", "gmsky_liveoverlay", function() SplitLayers() ClearOnce("view model") end)
-hook.Add("PreDrawPlayerHands", "gmsky_liveoverlay", function() SplitLayers() ClearOnce("hands") end)
+hook.Add("PreDrawViewModel", "gmsky_liveoverlay", function() ClearOnce("view model") end)
+hook.Add("PreDrawPlayerHands", "gmsky_liveoverlay", function() ClearOnce("hands") end)
 -- After test 72: the view model and hands are solid (the RPG and the tool gun's screen showed Skyrim
 -- through them).
 hook.Add("PostDrawViewModel", "gmsky_liveoverlay", function(vm)
@@ -503,7 +276,6 @@ end)
 hook.Add("PreDrawHUD", "gmsky_liveoverlay", function()
 	local f = L.frame
 	if not f.active then return end
-	SplitLayers()
 	ClearOnce("HUD (no view model this frame)")
 	if not f.alphaForced then
 		f.alphaForced = true
@@ -522,10 +294,6 @@ hook.Add("PostRender", "gmsky_liveoverlay", function()
 	if not f.active then return end
 	Note("PostRender")
 	Count("wiped at " .. tostring(f.cleared or "nothing"))
-	if f.noAlpha then
-		f.noAlpha = false
-		render.OverrideAlphaWriteEnable(false)
-	end
 	if f.cleared then
 		render.SetWriteDepthToDestAlpha(true)
 		if gmsky.OverlayPrepared then gmsky.OverlayPrepared() end
@@ -567,45 +335,6 @@ local function CountList(t, max)
 	return #out > 0 and table.concat(out, ", ") or "none"
 end
 
--- Garry's Mod things within 4,000 units of the eye that the picture can now show, by class (not
--- the player, the hands, held weapons, or our own invisible ground and stand-ins).
-local SKIP = { player = true, gmod_hands = true, predicted_viewmodel = true, viewmodel = true, worldspawn = true }
-local function NearThings()
-	if not (ents and ents.FindInSphere and LocalPlayer) then return "?" end
-	local ply = LocalPlayer()
-	if not IsValid(ply) then return "?" end
-	local byClass = {}
-	for _, e in ipairs(ents.FindInSphere(ply:EyePos(), 4000)) do
-		local c = e:GetClass()
-		if not SKIP[c] and not c:find("^gmsky_") and not e:GetNoDraw() and not (e:IsWeapon() and IsValid(e:GetOwner())) then
-			byClass[c] = (byClass[c] or 0) + 1
-		end
-	end
-	return CountList(byClass, 8)
-end
-
--- Step W2 calibration: Garry's Mod's own trace to the object under the crosshair, measured along
--- the view, next to the depth picture's distance at the screen centre. Equal = far constant right.
-local function Calibration()
-	if not (util and util.TraceLine and LocalPlayer and gmsky.OverlayDepthCentre) then return "calibration: ?" end
-	local ply = LocalPlayer()
-	if not IsValid(ply) then return "calibration: ?" end
-	local eye, aim = ply:EyePos(), ply:GetAimVector()
-	local tr = util.TraceLine({ start = eye, endpos = eye + aim * 16384, filter = ply })
-	local e = tr.Entity
-	local depth = gmsky.OverlayDepthCentre()
-	local what
-	if IsValid(e) and not e:GetClass():find("^gmsky_") then
-		local along = (tr.HitPos - eye):Dot(aim)
-		what = string.format("crosshair on %s at %.1f along the view", e:GetClass(), along)
-		if depth then what = what .. string.format(", depth picture %.1f (ratio %.3f)", depth, depth / math.max(along, 0.001)) end
-	else
-		what = "crosshair on no Garry's Mod object"
-		if depth then what = what .. string.format(", depth picture %.1f", depth) end
-	end
-	return "calibration: " .. what
-end
-
 -- A Lua error inside a timer makes Garry's Mod delete the timer, so errors are caught and logged.
 timer.Create("gmsky_liveoverlay_status", 5, 0, function()
 	local ok, err = pcall(function()
@@ -615,13 +344,10 @@ timer.Create("gmsky_liveoverlay_status", 5, 0, function()
 			gmsky.Log(string.format("%s; mat_queue_mode %s; halos: %d with alpha kept (%.2f ms each), %d without",
 				s, QueueMode(), h.fixed, h.fixed > 0 and h.ms / h.fixed or 0, h.unfixed))
 			L.halos = { fixed = 0, unfixed = 0, ms = 0 }
-			local drawn = L.wipes["depth drawn"] or 0
-			gmsky.Log(string.format("live overlay world (gmsky_overlay_world %s, depth %s): frames %s | depth %.3f ms avg, %.1f entities avg | %d models stamped solid (%d see-through parts left out) | near: %s | %s",
-				L.world:GetString(), L.depth:GetString(), CountList(L.wipes, 10),
-				drawn > 0 and (L.depthMs or 0) / drawn or 0, drawn > 0 and (L.depthEnts or 0) / drawn or 0, L.stamped or 0, L.stampedParts or 0,
-				NearThings(), Calibration()))
+			gmsky.Log(string.format("live overlay frames: %s | %d models stamped solid (%d see-through parts left out)",
+				CountList(L.wipes, 10), L.stamped or 0, L.stampedParts or 0))
 			L.wipes = {}
-			L.depthMs, L.depthEnts, L.stamped, L.stampedParts = 0, 0, 0, 0
+			L.stamped, L.stampedParts = 0, 0
 		end
 	end)
 	if not ok then gmsky.Log("ERROR in live overlay status: " .. tostring(err)) end

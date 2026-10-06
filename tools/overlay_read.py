@@ -24,7 +24,7 @@ from PIL import Image
 
 NAME = "Local\\GmodSkyrim_overlay_v1"
 MAGIC = 0x564F534D
-VERSION = 2
+VERSION = 3
 MAX_W, MAX_H = 3840, 2160
 PIXELS_OFF = 0x1000
 MASK_OFF = MAX_W * MAX_H * 4
@@ -32,7 +32,7 @@ SLOT_BYTES = (MASK_OFF + (MAX_W // 4) * (MAX_H // 4) + 0xFFFF) & ~0xFFFF
 MAP_SIZE = PIXELS_OFF + 3 * SLOT_BYTES
 SLOT_HDR_OFF = 0x40
 CTL = struct.Struct("<IIQIIQQIIq")         # GmskyOverlayCtl, 56 bytes
-SLOT = struct.Struct("<IIIIQqIIII8fI44x")  # GmskyOverlaySlotHdr, 128 bytes (version 2)
+SLOT = struct.Struct("<IIIIQqIII84x")  # GmskyOverlaySlotHdr, 128 bytes (version 3)
 assert CTL.size == 56 and SLOT.size == 128 and MAP_SIZE == 101257216
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -53,8 +53,7 @@ def ctl(m):
 
 def slot_hdr(m, i):
     keys = ("width", "height", "format", "flags", "frame", "capture_qpc", "row_bytes",
-            "mask_w", "mask_h", "depth_wh",  # depth_wh: depth_width | depth_height << 16
-            "eye_x", "eye_y", "eye_z", "pitch", "yaw", "roll", "fov", "aspect", "view_epoch")
+            "mask_w", "mask_h")
     return dict(zip(keys, SLOT.unpack_from(m, SLOT_HDR_OFF + i * SLOT.size)))
 
 
@@ -107,7 +106,7 @@ def main():
     h, data, retries = got
     now, freq = qpc()
     age_ms = (now - h["capture_qpc"]) * 1000.0 / freq if h["capture_qpc"] else float("nan")
-    flags = [n for b, n in ((1, "premultiplied"), (2, "sRGB")) if h["flags"] & b]
+    flags = [n for b, n in ((1, "premultiplied"), (2, "sRGB"), (4, "blur")) if h["flags"] & b]
     print(f"newest picture: frame {h['frame']}, {h['width']}x{h['height']}, format {h['format']} "
           f"({'BGRA8' if h['format'] == 1 else '?'}), flags {', '.join(flags) or 'none'}, "
           f"{age_ms:.1f} ms old when copied, {retries} retries, mask {h['mask_w']}x{h['mask_h']}")

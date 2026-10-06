@@ -1507,3 +1507,22 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 **Tested how:** user indoors with props near torches, NPCs outdoors and indoors. User: "Good. Commit and continue".
 **Result (logs):** 56-60 indoor maps copied a second, 3.00 of our point lights shadowed a frame, 3.00 of our maps drawn a frame, darkening pass every frame; 0 lights moved, 0 duplicates; no contact-shadow log lines; status line reports "characters". The softness constant (`kIndoorSoftUv` 0.006) stays.
 **Next:** commit I3 + the bundle; then G8 (clean-up of the old picture route) is planned.
+## 2026-10-06 Step G8: the old world-layer picture route removed (built, not tested in game)
+
+**Committed before this:** `564aeee` (I3 + softer edges + contact shadows removed, tests 95-96), user: "Good. Commit and continue".
+**Why:** since G3b Skyrim draws Garry's Mod's objects itself; the world layer (steps W1-W4: Garry's Mod's props and effects as a second picture with a fog depth picture and its camera) has been off by default (`gmsky_overlay_world 0`) ever since. Plan in DESIGN.md G8.
+**Changed (about 1,600 lines removed):**
+- `liveoverlay.lua`: `gmsky_overlay_world`, `gmsky_overlay_depth`, the entity-pass wipe, the see-through pass with alpha off, the fog depth picture and its calibration squares, the camera, the world-layer copy, the activity hooks (shots, effects, new entities; `util.Effect` no longer wrapped). Kept: the wipe at the view model / hands / HUD, the HUD alpha, halo fix, the view model and hands stamped solid, hidden window, blur flag, snapshot. The 5 s line is now "live overlay frames: wiped at ... | N models stamped solid".
+- Module: `gmsky.OverlayGrabWorld`, `OverlayGrabDepth`, `OverlayView`, `OverlayDepthCentre` and everything behind them in `capture.rs` (extra copies, fog calibration, depth conversion, counters, 3 unit tests). The status line loses its "world layer: ..." part.
+- Protocol: `GMSKY_OVF_WORLD` / `GMSKY_OVF_DEPTH` and the slot header's depth size and camera gone (header still 128 bytes, space reserved); overlay block version 2 -> 3, so an old build on the other side refuses the block (both rebuilt). `tools/overlay_read.py` follows. Stale comment on `GMSKY_RND_OBJ_CONTACT` (still said "contact shadow") corrected.
+- `Draw.cpp`: world-layer and depth textures, re-projection, Skyrim's depth probe, the "world layer drawn" log line. The HUD picture, sRGB blending and blur unchanged.
+- `World.cpp`: depth convention from the camera matrix only. The probe only ran with a world layer, so tests 91-96 all logged "probe not ready, from the matrix"; no change in behaviour expected. Log: "in-frame drawing: depth standard Z (from the camera's matrix)".
+- Harness: the W1-W4 check replaced by "wiped at the view model, view model stamped solid without its see-through part".
+**Tested how:** `cargo build --release` (no warnings); `cargo test --release`: module 21, protocol 12 passed; harness PASSED; C++ PROTOCOL TEST PASSED; plugin built, no warnings, copied into Skyrim; overlay shaders (4 entry points) compile offline. **Not tested in game.**
+**Next:** in-game test 97.
+## 2026-10-06 In-game test 97 (logs `build/logs-ingame-test-97/`): G8 works
+
+**Tested how:** user played with hands, HUD, physgun, props. User: "it works fine".
+**Result (logs):** hands / HUD picture 60 a second, 0 errors; Garry's Mod wiped every frame at the view model, view model and hands stamped solid; physgun halos drawn with the overlay's alpha kept (up to 682 per 5 s); no world-layer lines.
+**User's notes:** (1) outdoor shadows look worse than indoor ones now: use the same system if possible; (2) the physgun halo looks smaller than the object. Found for (2): the two games' fields of view differ. Garry's Mod's 100 is a 4:3 view widened for 16:9 (half-view tangent 1.589, about 115 degrees across); Skyrim was given 100 and draws 100 degrees across its actual 16:9 screen (frustum 1.1918, logged in tests 71-74). Skyrim draws the props narrower-angled, i.e. bigger, than Garry's Mod's picture with the halo, hands and HUD.
+**Next:** commit G8; fix the FOV conversion.
