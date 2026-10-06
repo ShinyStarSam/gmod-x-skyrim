@@ -254,6 +254,27 @@ hook.Add("StartCommand", "gmsky_input", function(ply, cmd)
 	inputStats.buttons = buttons
 end)
 
+-- After test 126 (the user): when the Skyrim we were linked to closes, Garry's Mod closes too
+-- (its window gets the same "close" as its close button). The module watches Skyrim's process.
+-- Test 127: Garry's Mod ignored the close message (and Lua may not run `exit`: Garry's Mod blocks
+-- it), so if it is still running CLOSE_WAIT seconds later, the module ends its process.
+local CLOSE_WAIT = 5
+local closeWithSkyrim = CreateConVar("gmsky_close_with_skyrim", "1", FCVAR_ARCHIVE,
+	"1 = Garry's Mod closes when the Skyrim it was linked to closes")
+timer.Create("gmsky_close_with_skyrim", 1, 0, function()
+	local gone = gmsky.SkyrimExited()
+	if not gone then return end
+	if not closeWithSkyrim:GetBool() then
+		gmsky.Log(string.format("Skyrim (process %d) has closed; not closing Garry's Mod (gmsky_close_with_skyrim 0)", gone))
+		return
+	end
+	gmsky.Log(string.format("Skyrim (process %d) has closed: closing Garry's Mod: %s", gone, gmsky.CloseGame()))
+	timer.Simple(CLOSE_WAIT, function()
+		gmsky.Log(string.format("Garry's Mod is still running %d s after the close message: ending its process now (Garry's Mod's own shutdown is skipped)", CLOSE_WAIT))
+		gmsky.EndProcess()
+	end)
+end)
+
 -- Once a second: write what we're sending to the log, so it can be checked from numbers.
 local lastWrites = 0
 timer.Create("gmsky_status", 1, 0, function()

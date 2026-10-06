@@ -184,7 +184,10 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 56] = [
+    let funcs: [(&str, lua::CFn); 59] = [
+        ("EndProcess", l_end_process),
+        ("SkyrimExited", l_skyrim_exited),
+        ("CloseGame", l_close_game),
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -1291,6 +1294,38 @@ unsafe extern "C" fn l_console_window(l: *mut State) -> c_int {
         let pid = mapping().map(|m| m.shared().header.skyrim_pid.load(std::sync::atomic::Ordering::Acquire)).unwrap_or(0);
         lua::push_str(a, l, &window::console_front((a.toboolean)(l, 1) != 0, pid));
         1
+    })
+}
+
+/// gmsky.SkyrimExited() -> pid: once, after the Skyrim process seen earlier has ended; nothing
+/// otherwise (window::skyrim_exited).
+unsafe extern "C" fn l_skyrim_exited(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let pid = mapping().map(|m| m.shared().header.skyrim_pid.load(std::sync::atomic::Ordering::Acquire)).unwrap_or(0);
+        match window::skyrim_exited(pid) {
+            Some(gone) => {
+                (a.pushnumber)(l, gone as f64);
+                1
+            }
+            None => 0,
+        }
+    })
+}
+
+/// gmsky.CloseGame() -> line for the log: asks Garry's Mod's window to close (window::close_game).
+unsafe extern "C" fn l_close_game(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        lua::push_str(a, l, &window::close_game());
+        1
+    })
+}
+
+/// gmsky.EndProcess(): ends Garry's Mod's process at once (window::end_process). The log line
+/// is written by Lua before.
+unsafe extern "C" fn l_end_process(l: *mut State) -> c_int {
+    guarded(l, |_, _| {
+        window::end_process();
+        0
     })
 }
 

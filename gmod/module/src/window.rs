@@ -36,7 +36,16 @@ extern "system" {
 #[link(name = "kernel32")]
 extern "system" {
     fn GetCurrentProcessId() -> u32;
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+    fn WaitForSingleObject(handle: *mut c_void, ms: u32) -> u32;
+    fn CloseHandle(handle: *mut c_void) -> i32;
+    fn GetCurrentProcess() -> isize;
+    fn TerminateProcess(process: isize, code: u32) -> i32;
 }
+
+const SYNCHRONIZE: u32 = 0x0010_0000;
+const WAIT_OBJECT_0: u32 = 0;
+const WM_CLOSE: u32 = 0x0010;
 
 const GW_OWNER: u32 = 4;
 const SWP_NOSIZE: u32 = 0x1;
@@ -237,5 +246,66 @@ mod tests {
         assert_eq!(rect(hwnd), before);
         assert_eq!(restore(), "Garry's Mod's window wasn't moved");
         unsafe { DestroyWindow(hwnd) };
+    }
+}
+
+/// The Skyrim process being watched: (process id, handle that can wait on it).
+static WATCHED: Mutex<Option<(u32, usize)>> = Mutex::new(None);
+/// The last Skyrim process reported as ended: never watched again (test 127: the shared memory
+/// keeps its id after it ends, so it was opened and reported again every second).
+static REPORTED: Mutex<u32> = Mutex::new(0);
+
+/// Closing Garry's Mod with Skyrim (the user, after test 126). `pid_now` is Skyrim's process id
+/// from the shared memory (0 when it isn't connected). The first time a Skyrim process is seen
+/// it is watched; once that process has ended, its id is returned (once). A newer Skyrim process
+/// replaces the watched one. Only ever looks at the process; never touches it.
+pub fn skyrim_exited(pid_now: u32) -> Option<u32> {
+    let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut reported = REPORTED.lock().unwrap_or_else(|e| e.into_inner());
+    if pid_now != 0 && pid_now != *reported && watched.map(|w| w.0) != Some(pid_now) {
+        if let Some((_, h)) = watched.take() {
+            unsafe { CloseHandle(h as *mut c_void) };
+        }
+        let h = unsafe { OpenProcess(SYNCHRONIZE, 0, pid_now) };
+        if !h.is_null() {
+            *watched = Some((pid_now, h as usize));
+        }
+    }
+    let (pid, h) = (*watched)?;
+    if unsafe { WaitForSingleObject(h as *mut c_void, 0) } != WAIT_OBJECT_0 {
+        return None;
+    }
+    unsafe { CloseHandle(h as *mut c_void) };
+    *watched = None;
+    *reported = pid;
+    Some(pid)
+}
+
+/// Asks Garry's Mod's game window to close, as its close button does. A line for the log.
+pub fn close_game() -> String {
+    let Some(h) = game_window() else {
+        return format!("no Garry's Mod window found (no visible {GAME_CLASS} window in this process): not closed");
+    };
+    let ok = unsafe { PostMessageW(h, WM_CLOSE, 0, 0) } != 0;
+    format!("Garry's Mod's window {} to close", if ok { "asked" } else { "could NOT be asked" })
+}
+
+/// Ends this process (Garry's Mod) at once, without Garry's Mod's own shutdown. Only used when
+/// the close message didn't work (test 127: Garry's Mod ignored it).
+pub fn end_process() {
+    unsafe { TerminateProcess(GetCurrentProcess(), 0) };
+}
+
+#[cfg(test)]
+mod watch_tests {
+    #[test]
+    fn skyrim_exited_reports_an_ended_process_once() {
+        let mut child = std::process::Command::new("cmd").args(["/c", "ping -n 2 127.0.0.1 >nul"]).spawn().unwrap();
+        let pid = child.id();
+        assert_eq!(super::skyrim_exited(pid), None, "still running");
+        child.wait().unwrap();
+        assert_eq!(super::skyrim_exited(0), Some(pid), "ended, pid gone from the header");
+        assert_eq!(super::skyrim_exited(0), None, "reported once");
+        assert_eq!(super::skyrim_exited(pid), None, "its id still in the header: still reported only once");
     }
 }

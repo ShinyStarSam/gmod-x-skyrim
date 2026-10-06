@@ -2579,6 +2579,34 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
   count "propped on step edges" as standing: the box rests on Skyrim's ground and walkable Skyrim
   ground is within the step height under the small footprint. **Differs from SkyCraft:** its body
   may overlap steps below step height; our box can't, so it stands on the edges instead.
+- **S2i. Stairs as player-only ramps (PROPOSED 2026-10-06 after test 127, waiting for the
+  user).** User after test 127: S2h's rules don't feel right; "if we can detect where stairs are,
+  can we generate ramp-like player only collision shapes? That way it'll be smooth." Test 127:
+  S2h's step-up still almost never succeeded. **Finding stairs:** Skyrim gives every collision
+  triangle a material, and stairs have their own (`StoneStairs`, `WoodStairs`, `SnowStairs`,
+  `StoneStairsBroken`, `StoneAsStairs`, `WoodAsStairs`). SkyCraft reads each triangle's material
+  (`Dig.cpp` `ShapeMaterial` / `GuardedMaterial`, for digging); we would read it the same way and
+  mark stair triangles. **Not known:** whether every Skyrim staircase uses a stair material.
+  Steps:
+  1. **S2i-1, Skyrim side, logging only:** each triangle's material (SkyCraft's method, credited);
+     stair-material triangles get a new flag `GMSKY_TRI_STAIRS`. Once a second in `skyrim.log`:
+     stair triangles sent. The STUCK lines in Garry's Mod count stair triangles around the
+     player. *Test:* the same stairs; *pass:* the stuck spots have stair triangles. If they
+     don't, plan B is finding stairs by shape (a run of steep risers 2-18 units high with
+     flat treads between).
+  2. **S2i-2, ramps in Garry's Mod:** a stair riser's top edge is a step's "nose". Each nose is
+     joined to the next nose uphill (up to 48 units away, 2-18 units higher) by a flat strip, so
+     the ramp touches every step's nose like a board laid on the stairs; the lowest nose's
+     strip goes down to the floor at the same slope. The ramps of a chunk are a second physics
+     mesh living exactly as long as the chunk. **Player-only:** its contents are
+     "player clip" (bullets' traces don't include that, the player's movement does) and props
+     never collide with it (ShouldCollide). Self-test logged when the first ramp is built: a
+     player trace hits it, a bullet trace doesn't. S2h's `stairs.lua` is removed in the same
+     step (one system); S2g stays.
+  **Differs from SkyCraft:** SkyCraft makes no ramps. It uses Skyrim's own invisible ramps (few:
+  test 125 found 34 bodies) as floor only, and its own collider walks stairs (small footprint).
+  The material read is SkyCraft's code used for a new purpose. **Not known:** whether Garry's Mod
+  lets traces skip a physics object by its contents (the self-test says).
 - **S3. Props, ragdolls and grenades on it.** Mostly free once S2 works. Added: a prop moving into
   a chunk that isn't built yet is frozen for that moment and released with its speed (like the
   player's hold; InfMap2 doesn't need this because it makes its terrain itself, instantly; we
