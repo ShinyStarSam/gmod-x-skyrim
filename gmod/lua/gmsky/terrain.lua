@@ -342,6 +342,39 @@ if SERVER then
 	-- Step S2: Skyrim's shapes as physics chunks (chunks.lua). The trace field goes (one system).
 	-- The player is held until every chunk under its feet is built or known empty.
 	local WAIT_CHUNKS = "waiting for the physics chunks under the player"
+
+	-- S2g: the player's box inside Skyrim's ground (tests 123 and 125: after a load, a door, a
+	-- fast travel the player is put at Skyrim's foot position, and Garry's Mod's 32-unit box,
+	-- wider than Skyrim's capsule, overlaps the ground; inside a physics mesh it can't move).
+	-- Lifted to the lowest free spot up to UNSTICK_UP above, in 2-unit steps, then dropped onto
+	-- what is under it. Logged.
+	local UNSTICK_UP = 72
+	T.stats.unsticks = T.stats.unsticks or 0
+	local function InsideChunk(ply, p)
+		local tr = util.TraceHull({ start = p, endpos = p, mins = ply:OBBMins(), maxs = ply:OBBMaxs(), filter = ply, mask = MASK_PLAYERSOLID })
+		return tr.StartSolid and IsValid(tr.Entity) and tr.Entity:GetClass() == "gmsky_chunk"
+	end
+	function T.Unstick(ply, pos)
+		if not InsideChunk(ply, pos) then return end
+		for up = 2, UNSTICK_UP, 2 do
+			local p = pos + Vector(0, 0, up)
+			if not InsideChunk(ply, p) then
+				local tr = util.TraceHull({ start = p, endpos = pos, mins = ply:OBBMins(), maxs = ply:OBBMaxs(), filter = ply, mask = MASK_PLAYERSOLID })
+				local to = tr.StartSolid and p or tr.HitPos
+				ply:SetPos(to)
+				T.stats.unsticks = T.stats.unsticks + 1
+				gmsky.Log(string.format("terrain: UNSTICK #%d: the player's box was inside Skyrim's ground at (%.1f, %.1f, %.1f): lifted %.1f units (free %d above, then dropped onto %s)",
+					T.stats.unsticks, pos.x, pos.y, pos.z, to.z - pos.z, up, tr.Hit and (IsValid(tr.Entity) and tr.Entity:GetClass() or "the world") or "nothing"))
+				return
+			end
+		end
+		if not T.unstickFailLogged then
+			T.unstickFailLogged = true
+			gmsky.Log(string.format("terrain: UNSTICK failed: the player's box is inside Skyrim's ground at (%.1f, %.1f, %.1f) and no free spot within %d units above (logged once)",
+				pos.x, pos.y, pos.z, UNSTICK_UP))
+		end
+	end
+
 	function T.UpdatePhysics(ply, pos, a, anchored, connected)
 		if IsValid(T.ent) then
 			T.ent:Remove()
@@ -370,6 +403,7 @@ if SERVER then
 			T.Hold(ply, pos, WAIT_CHUNKS)
 			gmsky.Log(string.format("terrain: HOLD at (%.0f, %.0f, %.0f): %s", pos.x, pos.y, pos.z, WAIT_CHUNKS))
 		end
+		if ready and not noclip and not T.holding then T.Unstick(ply, ply:GetPos()) end
 	end
 
 	-- While held: no movement, no falling.
@@ -387,6 +421,7 @@ if SERVER then
 				(IsValid(ground) and ground:GetClass() == "gmsky_chunk") and ("Skyrim's collision (" .. ground:ChunkName() .. ")")
 					or (IsValid(ground) and ground:GetClass()) or (ground == game.GetWorld() and "the map" or "nothing"),
 				T.stats.holdTicks, T.recentres, T.holding and (", HOLDING (" .. tostring(T.holdWhy) .. ")") or "", gmsky.chunks.ServerStatus())
+				.. string.format("; unsticks so far %d", T.stats.unsticks or 0)
 			T.stats.lifts, T.stats.holdTicks = 0, 0
 			return out
 		end

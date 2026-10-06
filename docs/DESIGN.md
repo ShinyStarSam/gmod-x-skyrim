@@ -2543,6 +2543,11 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
   skipped by bullets). That rule is a later step if the numbers show ramps blocking or bullets
   stopping on them. Test: the same stairs; expect the stored ramp count above 0, STUCK on stairs
   gone or rare, "ground" true on stairs.
+- **S2g. Lift the player out of the ground (built 2026-10-06 after test 125).** After a load, a
+  door or a fast travel the player is put at Skyrim's foot position, and Garry's Mod's 32-unit box
+  (wider than Skyrim's capsule) overlaps the ground; inside a physics mesh it can't move. Every tick
+  (physics mode, server): if the box starts inside a chunk, lift it to the lowest free spot up to 72
+  units above and drop it onto what is below. Logged per lift.
 - **S3. Props, ragdolls and grenades on it.** Mostly free once S2 works. Added: a prop moving into
   a chunk that isn't built yet is frozen for that moment and released with its speed (like the
   player's hold; InfMap2 doesn't need this because it makes its terrain itself, instantly; we
