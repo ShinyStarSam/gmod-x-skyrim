@@ -1218,16 +1218,16 @@ fn main() {
                 HARNESS_CVARS.gmsky_render = "1"
                 local frame = 100
                 function FrameNumber() return frame end
-                HARNESS_FILES = {{ ["materials/harness/box.vtf"] = "{vtf_lua}" }}
+                HARNESS_FILES = {{ ["materials/harness/box.vtf"] = "{vtf_lua}", ["materials/harness/box_normal.vtf"] = "{vtf_lua}" }}
                 file = {{ Read = function(name, path) HARNESS_READ_PATH = path return HARNESS_FILES[name] end }}
                 local function M(t) return {{ Unpack = function() return 1, 0, 0, t[1], 0, 1, 0, t[2], 0, 0, 1, t[3], 0, 0, 0, 1 end }} end
                 function Material(name)
                     return {{ IsError = function() return false end,
-                        GetInt = function(_, k) return k == "$flags" and 0x100 or 0 end,
-                        GetFloat = function() return 0 end,
-                        GetTexture = function() return {{ IsError = function() return false end, GetName = function() return "harness/box" end }} end }}
+                        GetInt = function(_, k) return (k == "$flags" and 0x100) or (k == "$phong" and 1) or 0 end,
+                        GetFloat = function(_, k) return k == "$phongexponent" and 20 or nil end,
+                        GetTexture = function(_, k) return {{ IsError = function() return false end, GetName = function() return k == "$bumpmap" and "harness/box_normal" or "harness/box" end }} end }}
                 end
-                local corner = function(x) return {{ pos = Vector(x, 0, 0), normal = Vector(0, 0, 1), u = x, v = 0, weights = {{ {{ bone = 0, weight = 1 }} }} }} end
+                local corner = function(x) return {{ pos = Vector(x, 0, 0), normal = Vector(0, 0, 1), userdata = {{ 1, 0, 0, -1 }}, u = x, v = 0, weights = {{ {{ bone = 0, weight = 1 }} }} }} end
                 util.GetModelMeshes = function(model, lod, mask, skin)
                     HARNESS_MESHES_ASKED = (HARNESS_MESHES_ASKED or 0) + 1
                     return {{ {{ material = "harness/box", triangles = {{ corner(0), corner(1), corner(0) }} }} }}, {{ [0] = {{ matrix = M({{ -1, 0, 0 }}), parent = -1 }} }}
@@ -1269,24 +1269,31 @@ fn main() {
                 return HARNESS_MESHES_ASKED .. " " .. HARNESS_READ_PATH .. " | " .. line
             "#);
             let r = lua.run(lc, &setup);
-            let ok = matches!(&r, Ok(Some(s)) if s.starts_with("1 GAME | render: on; 2 frames, 1.0 objects a frame, 1.0 held (gmsky_render_held 1), 0 skipped") && s.contains("models 1 ok, 0 can't be drawn") && s.contains("textures 1 (1 new, 0 failed)"));
+            let ok = matches!(&r, Ok(Some(s)) if s.starts_with("1 GAME | render: on; 2 frames, 1.0 objects a frame, 1.0 held (gmsky_render_held 1), 0 skipped") && s.contains("models 1 ok, 0 can't be drawn") && s.contains("textures 2 (2 new, 0 failed)"));
             check(ok, &format!("render.lua: one prop wanted, its model read once, its texture from GAME: {r:?}"));
             let mut kinds = Vec::new();
             let mut frames = Vec::new();
             let mut model_ok = false;
             let mut texture_ok = false;
+            let mut normal_ok = false;
             skyrim.read(u64::MAX, |kind, p| {
                 kinds.push(kind);
                 match kind {
                     MSG_TEXTURE => {
                         let (t, px) = decode_texture(p).unwrap();
-                        texture_ok = t.id == 1 && (t.width, t.height, t.format) == (4, 4, TEX_RGBA8) && px[0..4] == [30, 20, 10, 255];
+                        if t.id == 1 {
+                            texture_ok = (t.width, t.height, t.format, t.flags) == (4, 4, TEX_RGBA8, 0) && px[0..4] == [30, 20, 10, 255];
+                        } else {
+                            normal_ok = t.id == 2 && t.flags == TEXF_LINEAR;
+                        }
                     }
                     MSG_MODEL => {
                         let m = decode_model(p).unwrap();
                         model_ok = m.model.id == 1 && m.model.bone_count == 1 && m.indices.len() == 3 && m.parts.len() == 1
-                            && m.parts[0].texture_id == 1 && m.parts[0].flags == MAT_ALPHATEST && m.parts[0].alpha_ref == 0.5
-                            && m.vertices[1].pos == [1.0, 0.0, 0.0] && m.vertices[1].u == 1.0 && m.vertices[1].weights[0] == 255;
+                            && m.parts[0].texture_id == 1 && m.parts[0].flags == MAT_ALPHATEST | MAT_PHONG && m.parts[0].alpha_ref == 0.5
+                            && m.parts[0].normal_texture_id == 2 && m.parts[0].phong_exponent == 20.0 && m.parts[0].phong_boost == 1.0
+                            && m.vertices[1].pos == [1.0, 0.0, 0.0] && m.vertices[1].u == 1.0 && m.vertices[1].weights[0] == 255
+                            && m.vertices[1].tangent == [1.0, 0.0, 0.0, -1.0];
                     }
                     MSG_FRAME => frames.push(decode_frame(p).unwrap()),
                     _ => {}
@@ -1295,7 +1302,8 @@ fn main() {
             check(kinds.first() == Some(&MSG_RESET) && kinds.iter().filter(|&&k| k == MSG_FRAME).count() == 2,
                   &format!("render.lua: RESET first, one FRAME per Garry's Mod frame (also on a 2D-sky map; not for the 3D sky, depth or a repeat): {kinds:?}"));
             check(texture_ok, "render.lua: the VTF reaches Skyrim as a 4x4 RGBA8 texture (BGRA swapped)");
-            check(model_ok, "render.lua: the model reaches Skyrim (1 triangle, alpha-tested part on texture 1, corner on bone 0)");
+            check(model_ok, "render.lua: the model reaches Skyrim (1 triangle, alpha-tested phong part on texture 1 with normal map 2 (exponent 20, boost default 1), corner on bone 0 with its tangent)");
+            check(normal_ok, "render.lua: the $bumpmap goes as a second texture, flagged linear");
             let first = frames.first().map(|(f, o, m)| (f.frame, f.origin_epoch, o.len(), o.first().map(|o| (o.model_id, o.color, o.entity, o.flags)), m.first().map(|m| [m.m[0][3], m.m[1][3], m.m[2][3]])));
             // Bone at anchor + (10, 20, 30), poseToBone moves by -1 in x: (9, 20, 30) from the anchor.
             check(first == Some((100, 1, 1, Some((1, 0xFFFF_FFFF, 42, OBJ_HELD)), Some([9.0, 20.0, 30.0]))),

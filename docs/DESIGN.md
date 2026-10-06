@@ -1873,6 +1873,42 @@ they hide what's behind them.
     - *Result (test 81):* built and active, but Garry's Mod's view and Skyrim's camera differed by
       only 0.01 degrees on average, so it changes little; the visible drag lag is probably Garry's
       Mod's own physgun physics. **Parked as later polish (user, 2026-10-05).**
+- **G5b + surface maps bundled (user's choice, 2026-10-05, after test 81: "a bit flat").**
+  - *Skyrim's sun shadows on our objects* (SkyCraft's `CaptureSunShadows` / `SetSkyrimShadows` /
+    `SkyrimSunShadow`, MIT): a hook on `BSShadowDirectionalLight`'s vtable entry 0x0A (its Render)
+    copies the sun's first two shadow cascades the moment Skyrim has drawn them (the shared shadow
+    map array is reused for other lights later in the frame), with each cascade's light transform
+    and split as they were then. Our pixel shader looks each surface point up in them (cascade by
+    view depth, 3x3 samples) and takes the sun's share away where Skyrim's trees, buildings or
+    terrain block it. Conventions (row / column matrix, depth direction) decided from the matrix
+    itself as SkyCraft does, logged once.
+  - *Our objects' shadows*: our own sun shadow map (2048 x 2048, orthographic down the sun's rays,
+    4,480 Skyrim units each way, snapped to whole texels and turned only in quarter-degree steps,
+    SkyCraft's `SetSunShadowMatrix`), drawn with our objects (bones and alpha test included). Used
+    (a) by our objects' pixel shader (they shadow themselves and each other) and (b) by a full-screen
+    pass before them (SkyCraft's `OverlayPS`, multiply blend): each Skyrim pixel's position comes
+    back from Skyrim's depth, and where our objects block its sun, the sun's share of its light is
+    taken away (estimated from Skyrim's ambient and sun at that normal). Where Skyrim's own shadow
+    mask (`kSHADOW_MASK`) already says shaded, nothing is taken (no double shadows); the mask is
+    used only after a probe shows it holds 0-1 values with some lit (SkyCraft's `ReadProbe`).
+    Outside only (an interior's light has no shadow map here); off while the directional light (sun,
+    or the moon at night) is near or below the horizon. *Test 83: works outside in daytime.*
+    Interiors (Skyrim's shadow-casting point / spot lights) would need their own work: not in
+    SkyCraft, not planned yet.
+  - *Normal maps*: each part's `$bumpmap` (not `$ssbump` ones) goes as a second texture, flagged
+    linear (not sRGB). Corners carry their tangent (MeshVertex `userdata`: tangent x, y, z,
+    handedness; `tangent` with handedness 1 if not). Surface normal = T x nx + B x ny + N x nz, B =
+    handedness x (N x T). Not sure which way Source's green channel points: one constant in the
+    shader, logged; checked by eye.
+  - *Phong shine*: `$phong` parts with `$phongexponent` (default 5) and `$phongboost` (default 1);
+    the mask is the normal map's alpha, or the base texture's with `$basemapalphaphongmask`. Sun
+    and point lights get a highlight `boost x mask x max(0, r.v)^exponent`. No `$envmap`
+    reflections, no `$phongexponenttexture`, no Fresnel ranges yet.
+  - Render block **version 3**: `GmskyRndVertex` 40 -> 56 bytes (tangent), `GmskyRndPart` 24 ->
+    32 bytes (normal map id, phong exponent, boost; flags `PHONG` 0x20, `BASEALPHA_PHONGMASK`
+    0x40), `GmskyRndTexture.flags` `LINEAR` 0x1. Flat tables: 20 numbers per corner, 8 per part.
+  - Logs: shadow cascades captured (size, format, slices, conventions), our shadow map's casters and
+    ms, shadow mask probe result, normal maps / phong parts per model.
 - **G7. Effects (later, needs its own plan and your choice).** Options: (a) for effects drawn from
   Lua (`render.DrawBeam`, `DrawSprite`, `DrawQuadEasy`), a collector like SkyCraft's that wraps
   those calls; (b) for engine effects, send events (explosion at X, tracer from A to B) and draw

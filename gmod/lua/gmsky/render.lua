@@ -43,6 +43,11 @@ R.cvar = R.cvar or CreateConVar("gmsky_render", "1", 0,
 	"1 = send Garry's Mod's objects to Skyrim, which draws them in its own world (geometry route)")
 R.held = R.held or CreateConVar("gmsky_render_held", "1", 0,
 	"1 = Skyrim keeps what you hold (physgun, gravity gun, +use) in front of its own camera (step G6)")
+-- G5b bundle: switches to compare in game (sent with every frame; Skyrim reads them live).
+R.shadows = R.shadows or CreateConVar("gmsky_render_shadows", "1", 0, "1 = shadows on Garry's Mod's objects and from them (G5b)")
+R.normals = R.normals or CreateConVar("gmsky_render_normals", "1", 0, "1 = Garry's Mod's normal maps (surface bumps) in Skyrim")
+R.normalFlip = R.normalFlip or CreateConVar("gmsky_render_normal_flip", "0", 0, "1 = read normal maps' green channel the other way")
+R.phong = R.phong or CreateConVar("gmsky_render_phong", "1", 0, "1 = Garry's Mod's phong shine in Skyrim")
 R.RANGE = 8000             -- Garry's Mod units from the eye
 R.NEW_MODELS_PER_FRAME = 1  -- reading a model costs a few ms
 
@@ -69,8 +74,10 @@ local MAT_FLAGS = {
 }
 
 -- A texture's id in Skyrim, sending it the first time (0 = none / could not be sent).
-local function TextureId(name)
-	local id = R.textures[name]
+-- linear: a normal map (not a colour), read as is by Skyrim.
+local function TextureId(name, linear)
+	local key = linear and (name .. "|linear") or name
+	local id = R.textures[key]
 	if id then return id end
 	id = 0
 	local data = file.Read("materials/" .. name .. ".vtf", "GAME")
@@ -79,7 +86,7 @@ local function TextureId(name)
 		R.stats.textureFails = R.stats.textureFails + 1
 	else
 		local tid = R.nextTexture
-		local ok, line = gmsky.RenderTexture(tid, data)
+		local ok, line = gmsky.RenderTexture(tid, data, linear and true or false)
 		if ok then
 			R.nextTexture = tid + 1
 			id = tid
@@ -90,15 +97,17 @@ local function TextureId(name)
 			gmsky.Log("render: texture " .. name .. " not sent: " .. tostring(line))
 		end
 	end
-	R.textures[name] = id
+	R.textures[key] = id
 	return id
 end
 
--- What Skyrim needs from a material: texture id, flags, alpha reference.
+-- What Skyrim needs from a material: texture id, flags, alpha reference, normal map id, phong
+-- exponent and boost (G5b bundle: $bumpmap unless $ssbump; $phong, $phongexponent (5),
+-- $phongboost (1), $basemapalphaphongmask).
 local function MaterialInfo(name)
 	local info = R.materials[name]
 	if info then return info end
-	info = { tex = 0, flags = 0, aref = 0 }
+	info = { tex = 0, flags = 0, aref = 0, bump = 0, phongExp = 0, phongBoost = 0 }
 	local mat = Material(name)
 	if mat and not mat:IsError() then
 		local f = mat:GetInt("$flags") or 0
@@ -110,6 +119,19 @@ local function MaterialInfo(name)
 		local tex = mat:GetTexture("$basetexture")
 		if tex and not tex:IsError() then
 			info.tex = TextureId(tex:GetName())
+		end
+		if (mat:GetInt("$ssbump") or 0) == 0 then
+			local bump = mat:GetTexture("$bumpmap")
+			if bump and not bump:IsError() then
+				info.bump = TextureId(bump:GetName(), true)
+			end
+		end
+		if (mat:GetInt("$phong") or 0) ~= 0 then
+			info.flags = info.flags + 0x20
+			local e, b = mat:GetFloat("$phongexponent"), mat:GetFloat("$phongboost")
+			info.phongExp = (e and e > 0) and e or 5
+			info.phongBoost = (b and b > 0) and b or 1
+			if (mat:GetInt("$basemapalphaphongmask") or 0) ~= 0 then info.flags = info.flags + 0x40 end
 		end
 	else
 		gmsky.Log("render: material " .. tostring(name) .. " not found (drawn white)")
@@ -142,19 +164,29 @@ local function Prepare(key, model, skin)
 					else
 						verts[nv + 4], verts[nv + 5], verts[nv + 6] = 0, 0, 1
 					end
-					verts[nv + 7], verts[nv + 8] = v.u or 0, v.v or 0
+					-- Tangent + handedness: userdata (tangent x, y, z, handedness), else tangent.
+					local ud, t = v.userdata, v.tangent
+					if ud and ud[1] then
+						verts[nv + 7], verts[nv + 8], verts[nv + 9], verts[nv + 10] = ud[1], ud[2], ud[3], ud[4] or 1
+					elseif t then
+						verts[nv + 7], verts[nv + 8], verts[nv + 9], verts[nv + 10] = t.x, t.y, t.z, 1
+					else
+						verts[nv + 7], verts[nv + 8], verts[nv + 9], verts[nv + 10] = 0, 0, 0, 1
+					end
+					verts[nv + 11], verts[nv + 12] = v.u or 0, v.v or 0
 					for k = 1, 4 do
 						local bw = w and w[k]
-						verts[nv + 7 + 2 * k] = bw and bw.bone or 0
-						verts[nv + 8 + 2 * k] = bw and bw.weight or 0
+						verts[nv + 11 + 2 * k] = bw and bw.bone or 0
+						verts[nv + 12 + 2 * k] = bw and bw.weight or 0
 					end
-					nv = nv + 16
+					nv = nv + 20
 					corners = corners + 1
 				end
 				local info = MaterialInfo(m.material)
 				parts[np + 1], parts[np + 2], parts[np + 3], parts[np + 4], parts[np + 5] =
 					first, corners - first, info.tex, info.flags, info.aref
-				np = np + 5
+				parts[np + 6], parts[np + 7], parts[np + 8] = info.bump, info.phongExp, info.phongBoost
+				np = np + 8
 			end
 		end
 		for b = 0, bones - 1 do
@@ -269,8 +301,10 @@ function R.Frame()
 	end
 	-- The camera Garry's Mod draws this frame with (for held objects, step G6).
 	local v = render.GetViewSetup and render.GetViewSetup()
+	local switches = (R.normalFlip:GetBool() and 0x2 or 0) + (R.normals:GetBool() and 0 or 0x4)
+		+ (R.phong:GetBool() and 0 or 0x8) + (R.shadows:GetBool() and 0 or 0x10)
 	if v and v.origin and v.angles then
-		gmsky.RenderFrame(fn, flat, v.origin.x, v.origin.y, v.origin.z, v.angles.p, v.angles.y, v.angles.r)
+		gmsky.RenderFrame(fn, flat, v.origin.x, v.origin.y, v.origin.z, v.angles.p, v.angles.y, v.angles.r, switches)
 	else
 		gmsky.RenderFrame(fn, flat)
 	end

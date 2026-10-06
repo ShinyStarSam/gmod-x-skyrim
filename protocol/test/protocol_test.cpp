@@ -117,11 +117,11 @@ static void TestRenderRing() {
     // A model: header, one part, 4 vertices on 2 bones, 2 triangles.
     std::vector<uint8_t> model(sizeof(GmskyRndModel) + sizeof(GmskyRndPart) + 4 * sizeof(GmskyRndVertex) + 6 * 4);
     GmskyRndModel mh{5, 4, 6, 1, 2, 0};
-    GmskyRndPart part{0, 6, 7, GMSKY_RND_MAT_ALPHATEST, 0.5f, 0};
+    GmskyRndPart part{0, 6, 7, GMSKY_RND_MAT_ALPHATEST, 0.5f, 0, 0.0f, 0.0f};
     std::memcpy(model.data(), &mh, sizeof(mh));
     std::memcpy(model.data() + sizeof(mh), &part, sizeof(part));
     for (int k = 0; k < 4; ++k) {
-        GmskyRndVertex v{{float(k), 1, 2}, {0, 0, 1}, 0.25f, 0.75f, {uint8_t(k & 1), 0, 0, 0}, {255, 0, 0, 0}};
+        GmskyRndVertex v{{float(k), 1, 2}, {0, 0, 1}, {1, 0, 0, 1}, 0.25f, 0.75f, {uint8_t(k & 1), 0, 0, 0}, {255, 0, 0, 0}};
         std::memcpy(model.data() + sizeof(mh) + sizeof(part) + k * sizeof(v), &v, sizeof(v));
     }
     const uint32_t idx[6] = {0, 1, 2, 0, 2, 3};

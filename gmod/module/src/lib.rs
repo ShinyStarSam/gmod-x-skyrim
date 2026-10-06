@@ -1385,12 +1385,16 @@ unsafe fn push_result(a: &Api, l: *mut State, r: Result<String, String>) -> c_in
     2
 }
 
-/// gmsky.RenderTexture(id, vtf_bytes) -> ok, line: decodes a .vtf and sends it to Skyrim.
+/// gmsky.RenderTexture(id, vtf_bytes [, linear]) -> ok, line: decodes a .vtf and sends it to
+/// Skyrim; `linear` true for a normal map (not a colour).
 unsafe extern "C" fn l_render_texture(l: *mut State) -> c_int {
     guarded(l, |a, side| {
         let id = (a.tonumber)(l, 1) as u32;
         let r = match lua::to_bytes(a, l, 2) {
-            Some(bytes) => with_render_out(side, |o| o.add_texture(id, &bytes)).and_then(|r| r),
+            Some(bytes) => {
+                let linear = (a.toboolean)(l, 3) != 0;
+                with_render_out(side, |o| o.add_texture(id, &bytes, linear)).and_then(|r| r)
+            }
             None => Err(format!("texture {id}: no file data")),
         };
         push_result(a, l, r)
@@ -1398,7 +1402,7 @@ unsafe extern "C" fn l_render_texture(l: *mut State) -> c_int {
 }
 
 /// gmsky.RenderModel(id, bone_count, vertices, parts, bind_poses) -> ok, line: flat number tables
-/// (16 per corner, 5 per part, 12 per bone; render_out.rs).
+/// (20 per corner, 8 per part, 12 per bone; render_out.rs).
 unsafe extern "C" fn l_render_model(l: *mut State) -> c_int {
     guarded(l, |a, side| {
         let (id, bones) = ((a.tonumber)(l, 1) as u32, (a.tonumber)(l, 2) as u32);
@@ -1410,7 +1414,7 @@ unsafe extern "C" fn l_render_model(l: *mut State) -> c_int {
     })
 }
 
-/// gmsky.RenderFrame(frame_number, flat [, eye_x, eye_y, eye_z, pitch, yaw, roll]) -> objects
+/// gmsky.RenderFrame(frame_number, flat [, eye_x, eye_y, eye_z, pitch, yaw, roll [, switches]]) -> objects
 /// sent: per object model id, colour, bone count, entity, flags, 12 numbers per bone (world); the
 /// optional view is Garry's Mod's camera for this frame. Uses the anchor and origin epoch this
 /// module holds.
@@ -1429,7 +1433,8 @@ unsafe extern "C" fn l_render_frame(l: *mut State) -> c_int {
             let link = LINK.lock().unwrap_or_else(|e| e.into_inner());
             (link.epoch, link.anchor)
         };
-        let n = with_render_out(side, |o| o.frame(frame, &flat, epoch, anchor, view)).unwrap_or(0);
+        let switches = if (a.type_)(l, 9) == LUA_TNUMBER { (a.tonumber)(l, 9) as u32 } else { 0 };
+        let n = with_render_out(side, |o| o.frame(frame, &flat, epoch, anchor, view, switches)).unwrap_or(0);
         (a.pushnumber)(l, n as f64);
         1
     })

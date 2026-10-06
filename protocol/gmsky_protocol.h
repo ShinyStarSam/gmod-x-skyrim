@@ -505,7 +505,7 @@ typedef struct GmskyOverlaySlotHdr {  // written by Garry's Mod into its own slo
 // (tail = head) and adds 1 to reader_epoch; Garry's Mod then sends RESET and everything again.
 #define GMSKY_RND_SHM_NAME L"Local\\GmodSkyrim_render_v1"
 #define GMSKY_RND_MAGIC 0x444E524Du  // "MRND"
-#define GMSKY_RND_VERSION 2u  // 2: the frame carries Garry's Mod's view; objects their entity and flags (G5a + G6)
+#define GMSKY_RND_VERSION 3u  // 2: the frame carries Garry's Mod's view; objects their entity and flags (G5a + G6); 3: tangents, normal maps, phong (G5b bundle)
 #define GMSKY_RND_RING_BYTES (64u << 20)
 #define GMSKY_RND_HEAD_OFF 0x1000u
 #define GMSKY_RND_TAIL_OFF 0x1040u
@@ -531,9 +531,19 @@ typedef struct GmskyOverlaySlotHdr {  // written by Garry's Mod into its own slo
 #define GMSKY_RND_MAT_ALPHATEST 0x4u
 #define GMSKY_RND_MAT_SELFILLUM 0x8u
 #define GMSKY_RND_MAT_NOCULL 0x10u
+#define GMSKY_RND_MAT_PHONG 0x20u                // phong shine (exponent, boost in the part)
+#define GMSKY_RND_MAT_BASEALPHA_PHONGMASK 0x40u  // the shine's mask is the base texture's alpha (else the normal map's)
+
+// GmskyRndTexture.flags
+#define GMSKY_RND_TEXF_LINEAR 0x1u  // not colour: read as is, not as sRGB (normal maps)
 
 // GmskyRndFrame.flags
-#define GMSKY_RND_FRAME_VIEW 0x1u  // view_eye / view_angles are valid
+#define GMSKY_RND_FRAME_VIEW 0x1u         // view_eye / view_angles are valid
+// Switches from Garry's Mod's console, to compare in game (G5b bundle):
+#define GMSKY_RND_FRAME_FLIP_GREEN 0x2u   // normal maps' green channel points the other way (gmsky_render_normal_flip 1)
+#define GMSKY_RND_FRAME_NO_NORMALS 0x4u   // normal maps off (gmsky_render_normals 0)
+#define GMSKY_RND_FRAME_NO_PHONG 0x8u     // phong shine off (gmsky_render_phong 0)
+#define GMSKY_RND_FRAME_NO_SHADOWS 0x10u  // shadows off (gmsky_render_shadows 0)
 // GmskyRndObject.flags
 #define GMSKY_RND_OBJ_HELD 0x1u    // held by the player (physgun, gravity gun, +use): placed relative to the camera
 
@@ -561,7 +571,7 @@ typedef struct GmskyRndTexture {
     uint32_t width, height;
     uint32_t format;           // GMSKY_RND_TEX_*
     uint32_t bytes;            // pixel bytes that follow (exactly what the format and size need)
-    uint32_t flags;            // reserved, 0
+    uint32_t flags;            // GMSKY_RND_TEXF_*
 } GmskyRndTexture;
 
 typedef struct GmskyRndModel {
@@ -579,12 +589,15 @@ typedef struct GmskyRndPart {  // triangles drawn with one material
     uint32_t texture_id;       // 0 = none (white)
     uint32_t flags;            // GMSKY_RND_MAT_*
     float alpha_ref;           // GMSKY_RND_MAT_ALPHATEST: pixels below this alpha are dropped
-    uint32_t reserved;
+    uint32_t normal_texture_id;  // the part's $bumpmap (a GMSKY_RND_TEXF_LINEAR texture); 0 = none
+    float phong_exponent;      // GMSKY_RND_MAT_PHONG: $phongexponent
+    float phong_boost;         // GMSKY_RND_MAT_PHONG: $phongboost
 } GmskyRndPart;
 
 typedef struct GmskyRndVertex {
     float pos[3];              // model space (rest pose), Garry's Mod units
     float normal[3];
+    float tangent[4];          // xyz model space, w handedness (+1 / -1): binormal = w x (normal x tangent)
     float u, v;
     uint8_t bones[4];          // bone numbers (< bone_count)
     uint8_t weights[4];        // 0-255, summing to 255
@@ -719,9 +732,10 @@ GMSKY_ASSERT(offsetof(GmskyRenderCtl, writes_refused) == 40);
 GMSKY_ASSERT(sizeof(GmskyRndReset) == 8);
 GMSKY_ASSERT(sizeof(GmskyRndTexture) == 24);
 GMSKY_ASSERT(sizeof(GmskyRndModel) == 24);
-GMSKY_ASSERT(sizeof(GmskyRndPart) == 24);
-GMSKY_ASSERT(sizeof(GmskyRndVertex) == 40);
-GMSKY_ASSERT(offsetof(GmskyRndVertex, bones) == 32);
+GMSKY_ASSERT(sizeof(GmskyRndPart) == 32);
+GMSKY_ASSERT(sizeof(GmskyRndVertex) == 56);
+GMSKY_ASSERT(offsetof(GmskyRndVertex, u) == 40);
+GMSKY_ASSERT(offsetof(GmskyRndVertex, bones) == 48);
 GMSKY_ASSERT(sizeof(GmskyRndForget) == 8);
 GMSKY_ASSERT(sizeof(GmskyRndFrame) == 56);
 GMSKY_ASSERT(offsetof(GmskyRndFrame, view_eye) == 32);

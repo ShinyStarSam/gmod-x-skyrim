@@ -23,6 +23,15 @@
 // camera, in front of Skyrim's camera of this frame (SkyCraft's rule for the player's body, sent
 // relative to the feet the camera follows); every object's motion vectors use its own matrices of
 // the frame before, so TAA sees objects move.
+//
+// G5b bundle: shadows (SkyCraft's, MIT). Skyrim's sun cascades are copied the moment Skyrim has
+// drawn them (a hook on BSShadowDirectionalLight's Render, vtable entry 0x0A) and read by our pixel
+// shader (SkyrimSunShadow). Our objects go into our own sun shadow map (SetSunShadowMatrix), used
+// by our pixel shader (they shadow themselves and each other) and by a full-screen multiply pass
+// before them (OverlayPS) that takes the sun's share of light from Skyrim's pixels our objects
+// block; Skyrim's own shadow mask, once a probe shows it is usable, avoids double shadows. Normal
+// maps ($bumpmap, tangent per corner) and phong shine ($phong, exponent, boost, mask) in the object
+// shader. Garry's Mod's console switches (frame flags) turn each off live.
 #include "World.h"
 
 #include "Draw.h"
@@ -46,6 +55,11 @@ namespace gmsky::World
 		constexpr float kCubeDrop = 60.0f;       // centre this far below the camera
 		constexpr int kMaxLights = 16;           // SkyCraft's number
 		constexpr float kPi = 3.14159265f;
+		// Our sun shadow map (SkyCraft's numbers): objects within kShadowRadius (sideways from the
+		// sun) of the camera, kShadowSize texels across, kShadowDepth either way along the sun.
+		constexpr UINT kShadowSize = 2048;
+		constexpr float kShadowRadius = 64.0f * 70.0f;
+		constexpr float kShadowDepth = 12000.0f;
 
 		template <class T>
 		void Release(T*& a_ptr)
@@ -88,19 +102,36 @@ cbuffer Frame : register(b0)
 	float4 camForward;
 	float4 lightPos[MAX_LIGHTS];      // camera-relative; w: 1 / radius
 	float4 lightColor[MAX_LIGHTS];
+	row_major float4x4 lightViewProj;     // camera-relative Skyrim units -> our sun shadow map
+	row_major float4x4 invViewProj;       // screen (ndc x, y, Skyrim depth) -> camera-relative Skyrim units
+	float4 shadowParams;                  // x: sun shadows on, y: normal offset (units), z: shadow map texel (uv), w: depth bias
+	float4 shadowExtra;                   // x: Skyrim's shadow mask usable, y: squared reach of our shadow map (units)
+	row_major float4x4 skyShadowProj[2];  // Skyrim's sun shadow cascades: camera-relative -> shadow map uv, depth
+	float4 skyShadowSplits;               // cascade 0 end, cascade 1 end (view depth), -, cascade count
+	float4 skyShadowParams;               // slice of cascade 0, slice of cascade 1, texel size (uv), +1 standard depth / -1 reversed
+	float4 depthParams;                   // near, far, reversed
+	float4 screen;                        // 1 / width, 1 / height
+	float4 switches;                      // x: normal maps' green the other way, y: normal maps on, z: phong on
 };
 cbuffer Object : register(b1)
 {
 	float4 objOffset;  // xyz: the anchor (Skyrim's origin) relative to the camera, Skyrim units; w: Skyrim units per Garry's Mod unit
-	uint4  objInfo;    // x: the object's first matrix in boneRows (x 3 rows); y: GMSKY_RND_MAT_* of this part; z: held
+	uint4  objInfo;    // x: the object's first matrix in boneRows (x 3 rows); y: GMSKY_RND_MAT_* of this part; z: held; w: has a normal map
 	float4 objColor;   // the object's tint
-	float4 objAlpha;   // x: alpha reference (alpha-tested parts)
+	float4 objAlpha;   // x: alpha reference (alpha-tested parts); y: phong exponent; z: phong boost
 	float4 held[3];    // held objects: camera-relative position then -> now (rows of [rotation | translation])
 };
 StructuredBuffer<float4> boneRows : register(t0);      // every matrix of the frame, 3 rows each
 Texture2D albedo : register(t1);
 StructuredBuffer<float4> prevBoneRows : register(t2);  // the same objects' matrices on the frame before
+Texture2D normalMap : register(t3);                    // the part's $bumpmap (linear)
+Texture2D<float> shadowMap : register(t4);             // our objects seen from the sun
+Texture2DArray<float> skyrimShadowMaps : register(t5); // Skyrim's sun cascades, copied
+Texture2D<float> sceneDepth : register(t6);            // Skyrim's depth (the shadow pass on Skyrim)
+Texture2D skyrimMask : register(t7);                   // Skyrim's screen-space shadow mask (r: sun, 1 = lit)
 SamplerState albedoSampler : register(s0);
+SamplerState pointSampler : register(s1);
+SamplerComparisonState shadowSampler : register(s2);
 
 struct PSOut
 {
@@ -163,6 +194,7 @@ struct ModelIn
 {
 	float3 pos : POSITION;
 	float3 normal : NORMAL;
+	float4 tangent : TANGENT;
 	float2 uv : TEXCOORD0;
 	uint4  bones : BLENDINDICES;
 	float4 weights : BLENDWEIGHT;
@@ -171,10 +203,13 @@ struct ModelOut
 {
 	float4 pos : SV_Position;
 	float3 normal : NORMAL;
+	float3 tangent : TANGENT;
 	float2 uv : TEXCOORD0;
 	float4 curClip : TEXCOORD1;
 	float4 prevClip : TEXCOORD2;
 	float3 rel : TEXCOORD3;  // camera-relative Skyrim position
+	float  viewZ : TEXCOORD4;
+	nointerpolation float handed : TEXCOORD5;
 };
 
 float3 Held(float3 p)
@@ -182,9 +217,15 @@ float3 Held(float3 p)
 	return float3(dot(held[0], float4(p, 1.0)), dot(held[1], float4(p, 1.0)), dot(held[2], float4(p, 1.0)));
 }
 
-ModelOut ModelVS(ModelIn i)
+float3 HeldDir(float3 d)
 {
-	float3 p = 0, q = 0, n = 0;
+	return float3(dot(held[0].xyz, d), dot(held[1].xyz, d), dot(held[2].xyz, d));
+}
+
+// Bends a corner by its bones: position now (p), on the frame before (q), normal and tangent now.
+void Skin(ModelIn i, out float3 p, out float3 q, out float3 n, out float3 t)
+{
+	p = 0, q = 0, n = 0, t = 0;
 	float4 hp = float4(i.pos, 1.0);
 	[unroll] for (int k = 0; k < 4; ++k) {
 		float w = i.weights[k];
@@ -193,25 +234,62 @@ ModelOut ModelVS(ModelIn i)
 			float4 r0 = boneRows[b], r1 = boneRows[b + 1], r2 = boneRows[b + 2];
 			p += w * float3(dot(r0, hp), dot(r1, hp), dot(r2, hp));
 			n += w * float3(dot(r0.xyz, i.normal), dot(r1.xyz, i.normal), dot(r2.xyz, i.normal));
+			t += w * float3(dot(r0.xyz, i.tangent.xyz), dot(r1.xyz, i.tangent.xyz), dot(r2.xyz, i.tangent.xyz));
 			float4 s0 = prevBoneRows[b], s1 = prevBoneRows[b + 1], s2 = prevBoneRows[b + 2];
 			q += w * float3(dot(s0, hp), dot(s1, hp), dot(s2, hp));
 		}
 	}
+}
+
+ModelOut ModelVS(ModelIn i)
+{
+	float3 p, q, n, t;
+	Skin(i, p, q, n, t);
 	ModelOut o;
 	float3   rel = objOffset.xyz + p * objOffset.w;  // Garry's Mod and Skyrim share their axes (Z up)
 	float3   prevRel = objOffset.xyz + q * objOffset.w;
 	if (objInfo.z != 0) {
 		// Held: the same place in front of Skyrim's camera as it had in front of Garry's Mod's.
 		rel = Held(rel);
-		n = float3(dot(held[0].xyz, n), dot(held[1].xyz, n), dot(held[2].xyz, n));
+		n = HeldDir(n);
+		t = HeldDir(t);
 	}
 	o.pos = mul(viewProj, float4(rel, 1.0));
 	o.normal = n;
+	o.tangent = t;
+	o.handed = i.tangent.w;
 	o.uv = i.uv;
 	o.rel = rel;
+	o.viewZ = o.pos.w;
 	o.curClip = o.pos;
 	o.prevClip = objInfo.z != 0 ? o.pos : mul(prevViewProj, float4(prevRel, 1.0));  // held: no motion on screen
 	return o;
+}
+
+// Our objects into our sun shadow map (depth only; alpha-tested texels don't cast).
+struct ShadowOut
+{
+	float4 pos : SV_Position;
+	float2 uv : TEXCOORD0;
+};
+ShadowOut ShadowVS(ModelIn i)
+{
+	float3 p, q, n, t;
+	Skin(i, p, q, n, t);
+	float3 rel = objOffset.xyz + p * objOffset.w;
+	if (objInfo.z != 0) {
+		rel = Held(rel);
+	}
+	ShadowOut o;
+	o.pos = mul(lightViewProj, float4(rel, 1.0));
+	o.uv = i.uv;
+	return o;
+}
+void ShadowPS(ShadowOut i)
+{
+	if ((objInfo.y & 0x4u) && albedo.SampleLevel(albedoSampler, i.uv, 0).a * objColor.a < objAlpha.x) {
+		discard;
+	}
 }
 
 // Ambient from Skyrim's six directional colours, as its own lighting shader applies them.
@@ -223,21 +301,58 @@ float3 Ambient(float3 n)
 	     + n2.z * (n.z >= 0 ? ambient[4].rgb : ambient[5].rgb);
 }
 
-// Skyrim's light on a Garry's Mod surface (SkyCraft's Lighting, HDR path, without Minecraft's
-// sky and block light).
-float3 Lighting(float3 rel, float3 n)
+// How much sun reaches a camera-relative point past our objects: 1 lit, 0 shadowed (SkyCraft's
+// SunShadow). n pushes the lookup off the surface so faces don't shadow themselves.
+float SunShadow(float3 rel, float3 n)
 {
-	float3 lit = Ambient(n) + sunColor.rgb * saturate(dot(n, sunDir.xyz));
-	uint count = (uint)sunColor.w;
-	for (uint k = 0; k < count; ++k) {
-		float3 d = lightPos[k].xyz - rel;
-		float  f = saturate(length(d) * lightPos[k].w);
-		lit += lightColor[k].rgb * ((1.0 - f * f) * saturate(dot(n, normalize(d))));
+	if (shadowParams.x < 0.5) {
+		return 1.0;
 	}
-	return max(lit, 0.0);
+	float4 lp = mul(lightViewProj, float4(rel + n * shadowParams.y, 1.0));
+	float  edge = max(abs(lp.x), abs(lp.y));
+	if (edge >= 1.0 || lp.z >= 1.0) {
+		return 1.0;
+	}
+	float2 uv = float2(lp.x * 0.5 + 0.5, 0.5 - lp.y * 0.5);
+	float  ref = lp.z - shadowParams.w;
+	float  lit = 0.0;
+	[unroll] for (int y = -1; y <= 1; ++y) {
+		[unroll] for (int x = -1; x <= 1; ++x) {
+			lit += shadowMap.SampleCmpLevelZero(shadowSampler, uv + float2(x, y) * shadowParams.z, ref);
+		}
+	}
+	return lerp(1.0, lit / 9.0, saturate((1.0 - edge) * 8.0));  // fades out towards the map's edge
 }
 
-PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
+// How much sun reaches a camera-relative point past Skyrim's own geometry, from the shadow maps
+// Skyrim rendered for the sun this frame (SkyCraft's SkyrimSunShadow): 1 lit, 0 shadowed.
+float SkyrimSunShadow(float3 rel, float3 n, float viewZ)
+{
+	if (skyShadowSplits.w < 0.5) {
+		return 1.0;
+	}
+	uint cascade = viewZ < skyShadowSplits.x ? 0 : 1;
+	if (cascade >= (uint)skyShadowSplits.w || viewZ >= (cascade == 0 ? skyShadowSplits.x : skyShadowSplits.y)) {
+		return 1.0;  // beyond Skyrim's shadow range
+	}
+	float4 ls = mul(skyShadowProj[cascade], float4(rel + n * 6.0, 1.0));
+	ls.xyz /= ls.w;
+	if (any(ls.xy <= 0.0) || any(ls.xy >= 1.0)) {
+		return 1.0;
+	}
+	float slice = cascade == 0 ? skyShadowParams.x : skyShadowParams.y;
+	float lit = 0.0;
+	[unroll] for (int y = -1; y <= 1; ++y) {
+		[unroll] for (int x = -1; x <= 1; ++x) {
+			float d = skyrimShadowMaps.SampleLevel(pointSampler, float3(ls.xy + float2(x, y) * skyShadowParams.z, slice), 0);
+			lit += skyShadowParams.w > 0.0 ? (ls.z - 0.0005 <= d ? 1.0 : 0.0) : (ls.z + 0.0005 >= d ? 1.0 : 0.0);
+		}
+	}
+	float end = skyShadowSplits.w > 1.5 ? skyShadowSplits.y : skyShadowSplits.x;
+	return lerp(lit / 9.0, 1.0, saturate((viewZ - end * 0.85) / (end * 0.15)));  // fade out at the far end
+}
+
+PSOut ModelPS(ModelOut i)
 {
 	PSOut  po;
 	float4 t = albedo.Sample(albedoSampler, i.uv) * objColor;
@@ -245,13 +360,50 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 	if (flags & 0x4u) {  // GMSKY_RND_MAT_ALPHATEST
 		clip(t.a - objAlpha.x);
 	}
-	float3 n = normalize(i.normal);
-	float3 viewerN = dot(n, i.rel) > 0 ? -n : n;  // a face seen from behind (no culling yet) is lit from our side
+	float3 geo = normalize(i.normal);
+	float  side = dot(geo, i.rel) > 0 ? -1.0 : 1.0;  // a face seen from behind (no culling yet) is lit from our side
+	geo *= side;
+	float3 n = geo;
+	float  mask = 1.0;
+	float3 tan = i.tangent - geo * dot(geo, i.tangent);
+	if (objInfo.w != 0 && switches.y > 0.5 && dot(tan, tan) > 1e-8) {
+		// Normal map: tangent-space normal onto the surface (B = handedness x (N x T)).
+		float4 nm = normalMap.Sample(albedoSampler, i.uv);
+		float3 tn = nm.xyz * 2.0 - 1.0;
+		tn.y = switches.x > 0.5 ? -tn.y : tn.y;
+		float3 T = normalize(tan);
+		float3 B = cross(geo, T) * i.handed * side;
+		n = normalize(T * tn.x + B * tn.y + geo * max(tn.z, 0.05));
+		mask = nm.a;
+	}
+	if (flags & 0x40u) {  // GMSKY_RND_MAT_BASEALPHA_PHONGMASK
+		mask = t.a;
+	}
 	float3 c;
+	float3 L = sunDir.xyz;
+	float  sunVisible = shadowParams.x > 0.5 ? SunShadow(i.rel, geo) * SkyrimSunShadow(i.rel, geo, i.viewZ) : 1.0;
 	if (flags & 0x8u) {  // self-illuminated
 		c = t.rgb;
 	} else {
-		c = t.rgb * Lighting(i.rel, viewerN);
+		float3 lit = Ambient(n) + sunColor.rgb * (saturate(dot(n, L)) * sunVisible);
+		float3 spec = 0;
+		bool   phong = (flags & 0x20u) && switches.z > 0.5;
+		float3 V = normalize(-i.rel);
+		if (phong && dot(geo, L) > 0.0) {
+			spec += sunColor.rgb * sunVisible * pow(saturate(dot(reflect(-L, n), V)), max(objAlpha.y, 1.0));
+		}
+		uint count = (uint)sunColor.w;
+		for (uint k = 0; k < count; ++k) {
+			float3 d = lightPos[k].xyz - i.rel;
+			float  f = saturate(length(d) * lightPos[k].w);
+			float3 l = normalize(d);
+			float3 power = lightColor[k].rgb * (1.0 - f * f);
+			lit += power * saturate(dot(n, l));
+			if (phong && dot(geo, l) > 0.0) {
+				spec += power * pow(saturate(dot(reflect(-l, n), V)), max(objAlpha.y, 1.0));
+			}
+		}
+		c = t.rgb * max(lit, 0.0) + spec * (objAlpha.z * mask);
 	}
 	if (fogNear.w > 0.5) {
 		float f = min(pow(saturate(length(i.rel) * fogRange.x - fogRange.y), fogRange.z), fogRange.w);
@@ -264,8 +416,54 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 	}
 	po.color = float4(c, a);
 	po.motion = float4(Motion(i.curClip, i.prevClip), 0.0, 1.0);
-	po.normal = EncodeSkyrimNormal(viewerN);
+	po.normal = EncodeSkyrimNormal(n);
 	return po;
+}
+
+// ---- Full-screen passes ----
+float4 FullVS(uint id : SV_VertexID) : SV_Position
+{
+	float2 uv = float2((id << 1) & 2, id & 2);
+	return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
+}
+
+// Our objects' shadows on Skyrim (SkyCraft's OverlayPS, without its contact shadows): each pixel's
+// position comes back from Skyrim's depth; where our objects hide it from the sun, the sun's share
+// of its light is taken away. Drawn with a multiplying blend before our objects themselves.
+float4 OverlayPS(float4 pos : SV_Position) : SV_Target
+{
+	float2 uv = pos.xy * screen.xy;
+	float  d = sceneDepth.SampleLevel(pointSampler, uv, 0);
+	bool   isSky = depthParams.z > 0.5 ? d <= 1e-6 : d >= 0.999999;
+	if (isSky) {
+		discard;
+	}
+	float4 h = mul(invViewProj, float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d, 1.0));
+	float3 rel = h.xyz / h.w;
+	float3 n = normalize(cross(ddy(rel), ddx(rel)));
+	n = dot(n, rel) > 0 ? -n : n;
+	float shadow = dot(rel, rel) > shadowExtra.y ? 1.0 : SunShadow(rel, n);
+	if (shadow > 0.999) {
+		discard;
+	}
+	float  skyrimLit = shadowExtra.x > 0.5 ? saturate(skyrimMask.SampleLevel(pointSampler, uv, 0).r) : 1.0;
+	float3 lumW = float3(0.2125, 0.7154, 0.0721);
+	float  ambL = dot(Ambient(n), lumW);
+	float  sunL = dot(sunColor.rgb, lumW) * saturate(dot(n, sunDir.xyz));
+	float  keep = (ambL + 0.02) / (ambL + sunL + 0.02);
+	return float4(lerp(1.0, keep, (1.0 - shadow) * skyrimLit).xxx, 1.0);
+}
+
+// 16 samples of Skyrim's shadow mask across the screen (SkyCraft's probe points), to see whether it
+// holds usable values before trusting it.
+static const float2 kProbe[16] = {
+	float2(0.1, 0.1), float2(0.3, 0.1), float2(0.5, 0.1), float2(0.7, 0.1), float2(0.9, 0.1),
+	float2(0.2, 0.35), float2(0.5, 0.35), float2(0.8, 0.35),
+	float2(0.2, 0.65), float2(0.5, 0.65), float2(0.8, 0.65),
+	float2(0.1, 0.9), float2(0.3, 0.9), float2(0.5, 0.9), float2(0.7, 0.9), float2(0.9, 0.9) };
+float MaskProbePS(float4 pos : SV_Position) : SV_Target
+{
+	return skyrimMask.SampleLevel(pointSampler, kProbe[(uint)pos.x], 0).r;
 }
 )";
 
@@ -286,6 +484,16 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			float camForward[4];
 			float lightPos[kMaxLights][4];
 			float lightColor[kMaxLights][4];
+			float lightViewProj[4][4];
+			float invViewProj[4][4];
+			float shadowParams[4];
+			float shadowExtra[4];
+			float skyShadowProj[2][4][4];
+			float skyShadowSplits[4];
+			float skyShadowParams[4];
+			float depthParams[4];
+			float screen[4];
+			float switches[4];
 		};
 		static_assert(sizeof(FrameConstants) % 16 == 0);
 
@@ -334,6 +542,41 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			UINT capacity = 0;
 		};
 		RowBuffer g_bones, g_prevBones;
+		// G5b: shadows.
+		ID3D11VertexShader* g_shadowVs = nullptr;
+		ID3D11PixelShader* g_shadowPs = nullptr;
+		ID3D11VertexShader* g_fullVs = nullptr;
+		ID3D11PixelShader* g_overlayPs = nullptr;
+		ID3D11PixelShader* g_maskProbePs = nullptr;
+		ID3D11SamplerState* g_pointSampler = nullptr;
+		ID3D11SamplerState* g_shadowSampler = nullptr;
+		ID3D11RasterizerState* g_shadowRaster = nullptr;
+		ID3D11BlendState* g_multiplyBlend = nullptr;
+		ID3D11BlendState* g_noBlend = nullptr;
+		ID3D11Texture2D* g_shadowTex = nullptr;
+		ID3D11DepthStencilView* g_shadowDsv = nullptr;
+		ID3D11ShaderResourceView* g_shadowSrv = nullptr;
+		// Skyrim's sun cascades, copied the moment Skyrim finishes rendering them, with each
+		// cascade's transform and split as they were then (SkyCraft's CascadeSnapshot).
+		ID3D11Texture2D* g_sunShadowCopy = nullptr;
+		ID3D11ShaderResourceView* g_sunShadowCopySrv = nullptr;
+		struct CascadeSnapshot
+		{
+			float m[4][4];
+			float split;
+			uint32_t slice;
+		};
+		CascadeSnapshot g_cascades[2]{};
+		uint32_t g_cascadeCount = 0;
+		int64_t g_cascadeQpc = 0;
+		std::atomic<uint32_t> g_cascadeCaptures{ 0 };
+		// The shadow mask probe (16 samples, read back a few frames later without waiting).
+		ID3D11Texture2D* g_maskProbeTex = nullptr;
+		ID3D11RenderTargetView* g_maskProbeRtv = nullptr;
+		ID3D11Texture2D* g_maskProbeStaging = nullptr;
+		bool g_maskProbePending = false;
+		int64_t g_maskProbeQpc = 0;
+		bool g_maskUsable = false;
 		bool g_initFailed = false;
 		bool g_hooked = false;
 		bool g_targetsChecked = false, g_targetsOk = false;
@@ -397,6 +640,11 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			double heldDegSum = 0, heldDegMax = 0, heldUnitsSum = 0, heldUnitsMax = 0, heldAgeSum = 0;
 			// G5a
 			uint32_t pointLights = 0;
+			// G5b bundle
+			uint64_t shadowFrames = 0, shadowCasters = 0, overlayFrames = 0, skyrimCascadeFrames = 0, normalMapCalls = 0, phongCalls = 0;
+			uint32_t switches = 0;
+			bool maskUsable = false;
+			const char* shadowWhy = "";
 		};
 		std::mutex g_seenLock;
 		Seen g_seen;
@@ -423,14 +671,28 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 				return false;
 			}
 			ID3DBlob *cubeVsBlob = nullptr, *cubePsBlob = nullptr, *modelVsBlob = nullptr, *modelPsBlob = nullptr;
+			ID3DBlob *shadowVsBlob = nullptr, *shadowPsBlob = nullptr, *fullVsBlob = nullptr, *overlayPsBlob = nullptr, *maskPsBlob = nullptr;
 			if (!Compile("CubeVS", "vs_5_0", &cubeVsBlob) || !Compile("CubePS", "ps_5_0", &cubePsBlob) || !Compile("ModelVS", "vs_5_0", &modelVsBlob) ||
-				!Compile("ModelPS", "ps_5_0", &modelPsBlob)) {
-				Release(cubeVsBlob);
-				Release(cubePsBlob);
-				Release(modelVsBlob);
+				!Compile("ModelPS", "ps_5_0", &modelPsBlob) || !Compile("ShadowVS", "vs_5_0", &shadowVsBlob) || !Compile("ShadowPS", "ps_5_0", &shadowPsBlob) ||
+				!Compile("FullVS", "vs_5_0", &fullVsBlob) || !Compile("OverlayPS", "ps_5_0", &overlayPsBlob) || !Compile("MaskProbePS", "ps_5_0", &maskPsBlob)) {
+				for (auto* b : { cubeVsBlob, cubePsBlob, modelVsBlob, modelPsBlob, shadowVsBlob, shadowPsBlob, fullVsBlob, overlayPsBlob, maskPsBlob }) {
+					if (b) {
+						b->Release();
+					}
+				}
 				g_initFailed = true;
 				return false;
 			}
+			a_device->CreateVertexShader(shadowVsBlob->GetBufferPointer(), shadowVsBlob->GetBufferSize(), nullptr, &g_shadowVs);
+			a_device->CreatePixelShader(shadowPsBlob->GetBufferPointer(), shadowPsBlob->GetBufferSize(), nullptr, &g_shadowPs);
+			a_device->CreateVertexShader(fullVsBlob->GetBufferPointer(), fullVsBlob->GetBufferSize(), nullptr, &g_fullVs);
+			a_device->CreatePixelShader(overlayPsBlob->GetBufferPointer(), overlayPsBlob->GetBufferSize(), nullptr, &g_overlayPs);
+			a_device->CreatePixelShader(maskPsBlob->GetBufferPointer(), maskPsBlob->GetBufferSize(), nullptr, &g_maskProbePs);
+			Release(shadowVsBlob);
+			Release(shadowPsBlob);
+			Release(fullVsBlob);
+			Release(overlayPsBlob);
+			Release(maskPsBlob);
 			a_device->CreateVertexShader(cubeVsBlob->GetBufferPointer(), cubeVsBlob->GetBufferSize(), nullptr, &g_cubeVs);
 			a_device->CreatePixelShader(cubePsBlob->GetBufferPointer(), cubePsBlob->GetBufferSize(), nullptr, &g_cubePs);
 			a_device->CreateVertexShader(modelVsBlob->GetBufferPointer(), modelVsBlob->GetBufferSize(), nullptr, &g_modelVs);
@@ -444,11 +706,12 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			const D3D11_INPUT_ELEMENT_DESC modelElements[] = {
 				{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(GmskyRndVertex, pos), D3D11_INPUT_PER_VERTEX_DATA, 0 },
 				{ "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(GmskyRndVertex, normal), D3D11_INPUT_PER_VERTEX_DATA, 0 },
+				{ "TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, offsetof(GmskyRndVertex, tangent), D3D11_INPUT_PER_VERTEX_DATA, 0 },
 				{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(GmskyRndVertex, u), D3D11_INPUT_PER_VERTEX_DATA, 0 },
 				{ "BLENDINDICES", 0, DXGI_FORMAT_R8G8B8A8_UINT, 0, offsetof(GmskyRndVertex, bones), D3D11_INPUT_PER_VERTEX_DATA, 0 },
 				{ "BLENDWEIGHT", 0, DXGI_FORMAT_R8G8B8A8_UNORM, 0, offsetof(GmskyRndVertex, weights), D3D11_INPUT_PER_VERTEX_DATA, 0 },
 			};
-			a_device->CreateInputLayout(modelElements, 5, modelVsBlob->GetBufferPointer(), modelVsBlob->GetBufferSize(), &g_modelLayout);
+			a_device->CreateInputLayout(modelElements, 6, modelVsBlob->GetBufferPointer(), modelVsBlob->GetBufferSize(), &g_modelLayout);
 			Release(cubeVsBlob);
 			Release(cubePsBlob);
 			Release(modelVsBlob);
@@ -495,6 +758,8 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			rd.CullMode = D3D11_CULL_NONE;  // Source's face winding not checked yet; back faces are lit from our side
 			rd.DepthClipEnable = TRUE;
 			a_device->CreateRasterizerState(&rd, &g_raster);
+			rd.DepthClipEnable = FALSE;  // shadow casters beyond the map's depth range still cast (SkyCraft)
+			a_device->CreateRasterizerState(&rd, &g_shadowRaster);
 
 			D3D11_DEPTH_STENCIL_DESC dd{};
 			dd.DepthEnable = TRUE;
@@ -530,6 +795,12 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			ab.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
 			ab.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
 			a_device->CreateBlendState(&ab, &g_addBlend);
+			ab.RenderTarget[0].SrcBlend = D3D11_BLEND_ZERO;  // result = what's there x our colour (shadows on Skyrim)
+			ab.RenderTarget[0].DestBlend = D3D11_BLEND_SRC_COLOR;
+			a_device->CreateBlendState(&ab, &g_multiplyBlend);
+			D3D11_BLEND_DESC nb{};
+			nb.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+			a_device->CreateBlendState(&nb, &g_noBlend);
 
 			D3D11_SAMPLER_DESC smp{};
 			smp.Filter = D3D11_FILTER_ANISOTROPIC;
@@ -537,6 +808,30 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			smp.AddressU = smp.AddressV = smp.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
 			smp.MaxLOD = D3D11_FLOAT32_MAX;
 			a_device->CreateSamplerState(&smp, &g_sampler);
+			smp.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+			smp.AddressU = smp.AddressV = smp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+			a_device->CreateSamplerState(&smp, &g_pointSampler);
+			smp.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+			smp.ComparisonFunc = D3D11_COMPARISON_LESS_EQUAL;
+			a_device->CreateSamplerState(&smp, &g_shadowSampler);
+
+			// The shadow mask probe: 16 samples into a 16x1 float target, read back later.
+			D3D11_TEXTURE2D_DESC pd{};
+			pd.Width = 16;
+			pd.Height = 1;
+			pd.MipLevels = pd.ArraySize = 1;
+			pd.Format = DXGI_FORMAT_R32_FLOAT;
+			pd.SampleDesc.Count = 1;
+			pd.Usage = D3D11_USAGE_DEFAULT;
+			pd.BindFlags = D3D11_BIND_RENDER_TARGET;
+			a_device->CreateTexture2D(&pd, nullptr, &g_maskProbeTex);
+			if (g_maskProbeTex) {
+				a_device->CreateRenderTargetView(g_maskProbeTex, nullptr, &g_maskProbeRtv);
+			}
+			pd.Usage = D3D11_USAGE_STAGING;
+			pd.BindFlags = 0;
+			pd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+			a_device->CreateTexture2D(&pd, nullptr, &g_maskProbeStaging);
 
 			// A 1x1 white texture for parts without one.
 			const uint32_t white = 0xFFFFFFFFu;
@@ -554,7 +849,9 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			}
 
 			const bool ok = g_cubeVs && g_cubePs && g_cubeLayout && g_modelVs && g_modelPs && g_modelLayout && g_frameCb && g_objectCb && g_cubeVb && g_raster &&
-			                g_depthWrite && g_depthWriteRev && g_depthRead && g_depthReadRev && g_solidBlend && g_alphaBlend && g_addBlend && g_sampler && g_whiteSrv;
+			                g_depthWrite && g_depthWriteRev && g_depthRead && g_depthReadRev && g_solidBlend && g_alphaBlend && g_addBlend && g_sampler && g_whiteSrv &&
+			                g_shadowVs && g_shadowPs && g_fullVs && g_overlayPs && g_maskProbePs && g_pointSampler && g_shadowSampler && g_shadowRaster && g_multiplyBlend &&
+			                g_noBlend && g_maskProbeRtv && g_maskProbeStaging;
 			if (!ok) {
 				logger::error("in-frame drawing: failed to create its graphics objects");
 				g_initFailed = true;
@@ -562,7 +859,7 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			}
 			g_device = a_device;
 			g_device->AddRef();
-			logger::info("in-frame drawing: ready (test cube {}, model drawing on, Skyrim's light, held objects follow the camera)", kTestCube ? "on" : "off");
+			logger::info("in-frame drawing: ready (test cube {}, model drawing on, Skyrim's light, held objects follow the camera, shadows, normal maps, phong)", kTestCube ? "on" : "off");
 			return true;
 		}
 
@@ -861,6 +1158,8 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			}
 			a_fc.sunColor[3] = float(count);
 			a_seen.pointLights = uint32_t(count);
+			a_fc.shadowParams[0] = (!interior && dirLight && a_fc.sunDir[2] > 0.03f) ? 1.0f : 0.0f;
+			a_seen.shadowWhy = interior ? "interior" : !dirLight ? "no directional light" : a_fc.sunDir[2] <= 0.03f ? "sun below the horizon" : "";
 
 			// What Skyrim gave us, now and then, for tuning.
 			static RE::TESObjectCELL* loggedCell = nullptr;
@@ -877,6 +1176,298 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 					a_fc.sunColor[1], a_fc.sunColor[2], sunFade, up[0], up[1], up[2], down[0], down[1], down[2], east[0], east[1], east[2], count,
 					a_fc.fogNear[3] > 0.5f ? "on" : "off", fogNearD, fogFarD, fogPower, fogMax);
 			}
+		}
+
+		// ---- G5b: shadows (SkyCraft's, MIT) ----
+
+		bool EnsureShadowMap()
+		{
+			if (g_shadowDsv) {
+				return true;
+			}
+			D3D11_TEXTURE2D_DESC td{};
+			td.Width = td.Height = kShadowSize;
+			td.MipLevels = 1;
+			td.ArraySize = 1;
+			td.Format = DXGI_FORMAT_R32_TYPELESS;
+			td.SampleDesc.Count = 1;
+			td.Usage = D3D11_USAGE_DEFAULT;
+			td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+			D3D11_DEPTH_STENCIL_VIEW_DESC dv{};
+			dv.Format = DXGI_FORMAT_D32_FLOAT;
+			dv.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+			D3D11_SHADER_RESOURCE_VIEW_DESC sv{};
+			sv.Format = DXGI_FORMAT_R32_FLOAT;
+			sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+			sv.Texture2D.MipLevels = 1;
+			if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_shadowTex)) || FAILED(g_device->CreateDepthStencilView(g_shadowTex, &dv, &g_shadowDsv)) ||
+				FAILED(g_device->CreateShaderResourceView(g_shadowTex, &sv, &g_shadowSrv))) {
+				logger::error("shadows: our sun shadow map {}x{} failed", kShadowSize, kShadowSize);
+				Release(g_shadowSrv);
+				Release(g_shadowDsv);
+				Release(g_shadowTex);
+				return false;
+			}
+			logger::info("shadows: our sun shadow map ready ({}x{}, {:.0f} Skyrim units across)", kShadowSize, kShadowSize, 2.0f * kShadowRadius);
+			return true;
+		}
+
+		// An orthographic view down the sun's rays, centred on the camera and snapped to whole
+		// shadow texels so shadow edges hold still as the camera moves; it follows the sun in
+		// quarter-degree steps (SkyCraft's SetSunShadowMatrix).
+		void SetSunShadowMatrix(FrameConstants& a_fc, const RE::NiPoint3& a_cam)
+		{
+			static double stable[3] = { 0.0, 0.0, 0.0 };
+			const double now[3] = { -a_fc.sunDir[0], -a_fc.sunDir[1], -a_fc.sunDir[2] };  // the way sunlight travels
+			const double cosStep = stable[0] * now[0] + stable[1] * now[1] + stable[2] * now[2];
+			if (cosStep < 0.99999) {
+				std::memcpy(stable, now, sizeof(stable));
+			}
+			const double f[3] = { stable[0], stable[1], stable[2] };
+			const double up[3] = { 0.0, std::fabs(f[2]) > 0.99 ? 1.0 : 0.0, std::fabs(f[2]) > 0.99 ? 0.0 : 1.0 };
+			double r[3] = { f[1] * up[2] - f[2] * up[1], f[2] * up[0] - f[0] * up[2], f[0] * up[1] - f[1] * up[0] };
+			const double rl = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+			for (auto& c : r) {
+				c /= rl;
+			}
+			const double u[3] = { r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0] };
+			const double texel = 2.0 * kShadowRadius / kShadowSize;
+			const double a = r[0] * a_cam.x + r[1] * a_cam.y + r[2] * a_cam.z;
+			const double b = u[0] * a_cam.x + u[1] * a_cam.y + u[2] * a_cam.z;
+			const double offX = a - std::floor(a / texel) * texel, offY = b - std::floor(b / texel) * texel;
+			auto& m = a_fc.lightViewProj;
+			for (int k = 0; k < 3; ++k) {
+				m[0][k] = float(r[k] / kShadowRadius);
+				m[1][k] = float(u[k] / kShadowRadius);
+				m[2][k] = float(f[k] / (2.0 * kShadowDepth));
+				m[3][k] = 0.0f;
+			}
+			m[0][3] = float(offX / kShadowRadius);
+			m[1][3] = float(offY / kShadowRadius);
+			m[2][3] = 0.5f;
+			m[3][3] = 1.0f;
+			Set4(a_fc.shadowParams, 1.0f, float(texel * 1.5), 1.0f / kShadowSize, float(3.0 / (2.0 * kShadowDepth)));
+			a_fc.shadowExtra[1] = (kShadowRadius * 1.5f) * (kShadowRadius * 1.5f);
+		}
+
+		DXGI_FORMAT DepthReadFormat(DXGI_FORMAT a_typeless)
+		{
+			switch (a_typeless) {
+			case DXGI_FORMAT_R16_TYPELESS:
+			case DXGI_FORMAT_D16_UNORM:
+				return DXGI_FORMAT_R16_UNORM;
+			case DXGI_FORMAT_R24G8_TYPELESS:
+			case DXGI_FORMAT_D24_UNORM_S8_UINT:
+				return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+			case DXGI_FORMAT_R32_TYPELESS:
+			case DXGI_FORMAT_D32_FLOAT:
+				return DXGI_FORMAT_R32_FLOAT;
+			case DXGI_FORMAT_R32G8X24_TYPELESS:
+				return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+			default:
+				return DXGI_FORMAT_UNKNOWN;
+			}
+		}
+
+		// Right after Skyrim renders the sun's shadow maps: copy its first two cascades and their
+		// transforms (SkyCraft's CaptureSunShadows).
+		void CaptureSunShadows(RE::BSShadowLight* a_sun)
+		{
+			auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
+			if (!g_device || !renderer || !a_sun) {
+				return;
+			}
+			auto& descs = a_sun->GetRuntimeData().shadowmapDescriptors;
+			const auto count = std::min<std::uint32_t>(descs.size(), 2);
+			if (count == 0) {
+				return;
+			}
+			auto* context = reinterpret_cast<ID3D11DeviceContext*>(renderer->GetRuntimeData().context);
+			// Where they went: the depth buffer still bound, else the shared shadow map array.
+			ID3D11Resource* src = nullptr;
+			ID3D11DepthStencilView* bound = nullptr;
+			context->OMGetRenderTargets(0, nullptr, &bound);
+			if (bound) {
+				bound->GetResource(&src);
+				Release(bound);
+			}
+			if (!src) {
+				auto* tex = reinterpret_cast<ID3D11Texture2D*>(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS].texture);
+				if (tex) {
+					tex->AddRef();
+					src = tex;
+				}
+			}
+			if (!src) {
+				return;
+			}
+			D3D11_TEXTURE2D_DESC sd{};
+			static_cast<ID3D11Texture2D*>(src)->GetDesc(&sd);
+			if (!g_sunShadowCopy) {
+				D3D11_TEXTURE2D_DESC cd = sd;
+				cd.ArraySize = 2;
+				cd.MipLevels = 1;
+				cd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+				cd.Usage = D3D11_USAGE_DEFAULT;
+				cd.CPUAccessFlags = 0;
+				cd.MiscFlags = 0;
+				D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+				vd.Format = DepthReadFormat(sd.Format);
+				vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+				vd.Texture2DArray.MipLevels = 1;
+				vd.Texture2DArray.ArraySize = 2;
+				const bool ok = vd.Format != DXGI_FORMAT_UNKNOWN && sd.SampleDesc.Count == 1 && SUCCEEDED(g_device->CreateTexture2D(&cd, nullptr, &g_sunShadowCopy)) &&
+				                SUCCEEDED(g_device->CreateShaderResourceView(g_sunShadowCopy, &vd, &g_sunShadowCopySrv));
+				logger::info("shadows: capturing Skyrim's sun cascades from a {}x{} x{} format {} depth array ({})", sd.Width, sd.Height, sd.ArraySize,
+					static_cast<int>(sd.Format), ok ? "ok" : "can't read that format");
+				if (!ok) {
+					Release(g_sunShadowCopySrv);
+					Release(g_sunShadowCopy);
+					Release(src);
+					return;
+				}
+			}
+			D3D11_TEXTURE2D_DESC cd{};
+			g_sunShadowCopy->GetDesc(&cd);
+			if (cd.Width != sd.Width || cd.Height != sd.Height || cd.Format != sd.Format) {
+				Release(g_sunShadowCopySrv);
+				Release(g_sunShadowCopy);
+				Release(src);
+				return;  // made again next time
+			}
+			const auto& dsl = static_cast<RE::BSShadowDirectionalLight*>(a_sun)->GetShadowDirectionalLightRuntimeData();
+			for (std::uint32_t k = 0; k < count; ++k) {
+				const UINT slice = descs[k].shadowmapIndex;
+				if (slice < sd.ArraySize) {
+					context->CopySubresourceRegion(g_sunShadowCopy, D3D11CalcSubresource(0, k, 1), 0, 0, 0, src, D3D11CalcSubresource(0, slice, sd.MipLevels), nullptr);
+				}
+				std::memcpy(g_cascades[k].m, &descs[k].lightTransform.m, sizeof(g_cascades[k].m));
+				g_cascades[k].split = k < 3 ? dsl.endSplitDistances[k] : 0.0f;
+				g_cascades[k].slice = slice;
+			}
+			g_cascadeCount = count;
+			g_cascadeQpc = Qpc();
+			g_cascadeCaptures.fetch_add(1, std::memory_order_relaxed);
+			Release(src);
+		}
+
+		// Skyrim's sun cascades for this frame, re-based on the camera (SkyCraft's SetSkyrimShadows).
+		// Returns the copied shadow maps to read, or null.
+		ID3D11ShaderResourceView* SetSkyrimShadows(FrameConstants& a_fc, const RE::NiPoint3& a_cam)
+		{
+			a_fc.skyShadowSplits[3] = 0.0f;
+			if (!g_sunShadowCopySrv || g_cascadeCount == 0 || QpcMs(Qpc() - g_cascadeQpc) > 1000.0) {
+				return nullptr;  // not captured lately (Skyrim doesn't redraw them every frame, but within a second)
+			}
+			D3D11_TEXTURE2D_DESC td{};
+			g_sunShadowCopy->GetDesc(&td);
+			bool standard = true;
+			for (std::uint32_t k = 0; k < g_cascadeCount; ++k) {
+				const auto& m = g_cascades[k].m;
+				// Row-vector convention (v * M, translation in the last row) unless the matrix says otherwise.
+				const bool rowVector = std::fabs(m[0][3]) + std::fabs(m[1][3]) + std::fabs(m[2][3]) < 1e-6f;
+				auto at = [&](int a_r, int a_c) { return double(rowVector ? m[a_r][a_c] : m[a_c][a_r]); };  // as v * M
+				for (int out = 0; out < 4; ++out) {
+					for (int in = 0; in < 3; ++in) {
+						a_fc.skyShadowProj[k][out][in] = float(at(in, out));
+					}
+					a_fc.skyShadowProj[k][out][3] = float(at(3, out) + at(0, out) * a_cam.x + at(1, out) * a_cam.y + at(2, out) * a_cam.z);
+				}
+				if (k == 0) {
+					// Depth grows along the sunlight (standard) or against it (reversed).
+					const double g = at(0, 2) * -a_fc.sunDir[0] + at(1, 2) * -a_fc.sunDir[1] + at(2, 2) * -a_fc.sunDir[2];
+					standard = g > 0.0;
+					static bool logged = false;
+					if (!logged) {
+						logged = true;
+						const float u = a_fc.skyShadowProj[0][0][3], v = a_fc.skyShadowProj[0][1][3], z = a_fc.skyShadowProj[0][2][3], w = a_fc.skyShadowProj[0][3][3];
+						logger::info("shadows: Skyrim's sun: {} cascades, slices {} {}, maps {}x{} format {}, splits {:.0f} {:.0f}; matrix {}, depth {}; camera at uv ({:.3f}, {:.3f}) depth {:.4f} w {:.3f}",
+							g_cascadeCount, g_cascades[0].slice, g_cascadeCount > 1 ? g_cascades[1].slice : 0, td.Width, td.Height, static_cast<int>(td.Format),
+							g_cascades[0].split, g_cascades[1].split, rowVector ? "row-vector" : "column-vector", standard ? "standard" : "reversed", u / w, v / w, z / w, w);
+					}
+				}
+			}
+			a_fc.skyShadowSplits[0] = g_cascades[0].split;
+			a_fc.skyShadowSplits[1] = g_cascadeCount > 1 ? g_cascades[1].split : g_cascades[0].split;
+			a_fc.skyShadowSplits[3] = float(g_cascadeCount);
+			Set4(a_fc.skyShadowParams, 0.0f, g_cascadeCount > 1 ? 1.0f : 0.0f, 1.0f / float(std::max<UINT>(td.Width, 1)), standard ? 1.0f : -1.0f);
+			return g_sunShadowCopySrv;
+		}
+
+		// 4x4 inverse (row-major), for turning Skyrim's depth back into positions (SkyCraft's Invert).
+		bool Invert(const float a_m[4][4], float a_out[4][4])
+		{
+			double m[16], inv[16];
+			for (int k = 0; k < 16; ++k) {
+				m[k] = a_m[k / 4][k % 4];
+			}
+			inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+			inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+			inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+			inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+			inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+			inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+			inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+			inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+			inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+			inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+			inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+			inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+			inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+			inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+			inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+			inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+			const double det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+			if (std::fabs(det) < 1e-30) {
+				return false;
+			}
+			for (int k = 0; k < 16; ++k) {
+				a_out[k / 4][k % 4] = float(inv[k] / det);
+			}
+			return true;
+		}
+
+		// Skyrim's shadow mask: probed every 5 s (16 samples, read back without waiting); used only
+		// if it holds 0-1 values with some lit (SkyCraft's ReadProbe).
+		void MaskProbe(ID3D11DeviceContext* a_context, ID3D11ShaderResourceView* a_mask)
+		{
+			if (g_maskProbePending) {
+				D3D11_MAPPED_SUBRESOURCE mapped{};
+				if (a_context->Map(g_maskProbeStaging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped) == S_OK) {
+					std::array<float, 16> v{};
+					std::memcpy(v.data(), mapped.pData, sizeof(v));
+					a_context->Unmap(g_maskProbeStaging, 0);
+					g_maskProbePending = false;
+					std::ranges::sort(v);
+					const bool usable = v[0] >= -0.001f && v[15] <= 1.001f && v[15] > 0.5f;
+					if (usable != g_maskUsable || g_maskProbeQpc == 0) {
+						logger::info("shadows: Skyrim's shadow mask probe: min {:.3f} median {:.3f} max {:.3f} -> {}", v[0], v[8], v[15],
+							usable ? "used (no double shadows)" : "not used");
+					}
+					g_maskUsable = usable;
+				}
+				return;
+			}
+			if (!a_mask || (g_maskProbeQpc && QpcMs(Qpc() - g_maskProbeQpc) < 5000.0)) {
+				return;
+			}
+			g_maskProbeQpc = Qpc();
+			D3D11_VIEWPORT vp{ 0, 0, 16, 1, 0, 1 };
+			a_context->OMSetRenderTargets(1, &g_maskProbeRtv, nullptr);
+			a_context->RSSetViewports(1, &vp);
+			a_context->RSSetState(g_raster);
+			a_context->OMSetBlendState(g_noBlend, nullptr, 0xFFFFFFFF);
+			a_context->OMSetDepthStencilState(nullptr, 0);
+			a_context->IASetInputLayout(nullptr);
+			a_context->VSSetShader(g_fullVs, nullptr, 0);
+			a_context->PSSetShader(g_maskProbePs, nullptr, 0);
+			a_context->PSSetShaderResources(7, 1, &a_mask);
+			a_context->PSSetSamplers(1, 1, &g_pointSampler);
+			a_context->Draw(3, 0);
+			a_context->CopyResource(g_maskProbeStaging, g_maskProbeTex);
+			ID3D11ShaderResourceView* none = nullptr;
+			a_context->PSSetShaderResources(7, 1, &none);
+			g_maskProbePending = true;
 		}
 
 		// ---- G3a: Garry's Mod's models and textures onto the graphics card ----
@@ -929,7 +1520,7 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			if (h.format == GMSKY_RND_TEX_RGBA8) {
 				// Source's colour textures are sRGB; Skyrim makes the smaller mip levels.
 				td.MipLevels = 0;
-				td.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+				td.Format = (h.flags & GMSKY_RND_TEXF_LINEAR) ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 				td.BindFlags |= D3D11_BIND_RENDER_TARGET;
 				td.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
 				if (FAILED(g_device->CreateTexture2D(&td, nullptr, &a_out.tex)) || FAILED(g_device->CreateShaderResourceView(a_out.tex, nullptr, &a_out.srv))) {
@@ -945,7 +1536,10 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 				return false;
 			}
 			td.MipLevels = 1;
-			td.Format = h.format == GMSKY_RND_TEX_BC1 ? DXGI_FORMAT_BC1_UNORM_SRGB : h.format == GMSKY_RND_TEX_BC2 ? DXGI_FORMAT_BC2_UNORM_SRGB : DXGI_FORMAT_BC3_UNORM_SRGB;
+			const bool lin = (h.flags & GMSKY_RND_TEXF_LINEAR) != 0;
+			td.Format = h.format == GMSKY_RND_TEX_BC1 ? (lin ? DXGI_FORMAT_BC1_UNORM : DXGI_FORMAT_BC1_UNORM_SRGB) :
+			            h.format == GMSKY_RND_TEX_BC2 ? (lin ? DXGI_FORMAT_BC2_UNORM : DXGI_FORMAT_BC2_UNORM_SRGB) :
+			                                            (lin ? DXGI_FORMAT_BC3_UNORM : DXGI_FORMAT_BC3_UNORM_SRGB);
 			td.Usage = D3D11_USAGE_IMMUTABLE;
 			const UINT blockBytes = h.format == GMSKY_RND_TEX_BC1 ? 8 : 16;
 			D3D11_SUBRESOURCE_DATA init{ a_src.pixels.data(), (h.width / 4) * blockBytes, 0 };
@@ -1004,7 +1598,8 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 				t.serial = src.serial;
 				if (UploadTexture(a_context, src, t)) {
 					++a_seen.textureUploads;
-					logger::info("in-frame drawing: texture {} uploaded: {}x{} format {}", id, src.header.width, src.header.height, src.header.format);
+					logger::info("in-frame drawing: texture {} uploaded: {}x{} format {}{}", id, src.header.width, src.header.height, src.header.format,
+						(src.header.flags & GMSKY_RND_TEXF_LINEAR) ? " (linear: normal map)" : "");
 				} else {
 					++a_seen.uploadFailures;
 					logger::warn("in-frame drawing: texture {} could not be uploaded ({}x{} format {})", id, src.header.width, src.header.height, src.header.format);
@@ -1098,8 +1693,18 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			return true;
 		}
 
+		// Shader resources the passes read besides the model's own.
+		struct PassInputs
+		{
+			bool shadows = false;                             // our shadow map pass + Skyrim's darkening pass
+			ID3D11ShaderResourceView* skyrimShadows = nullptr;  // Skyrim's sun cascades (copied)
+			ID3D11ShaderResourceView* sceneDepth = nullptr;   // Skyrim's depth
+			ID3D11ShaderResourceView* mask = nullptr;         // Skyrim's shadow mask
+			D3D11_VIEWPORT viewport{};
+		};
+
 		void DrawModels(ID3D11DeviceContext* a_context, const RE::NiPoint3& a_cam, const RE::NiMatrix3& a_rot, const FrameConstants& a_fc, bool a_reversed,
-			ID3D11RenderTargetView* const* a_solidTargets, UINT a_solidCount, ID3D11DepthStencilView* a_dsv, Seen& a_seen)
+			ID3D11RenderTargetView* const* a_solidTargets, UINT a_solidCount, ID3D11DepthStencilView* a_dsv, const PassInputs& a_in, Seen& a_seen)
 		{
 			const auto& frame = Render::NewestFrame();
 			a_seen.gmodFrame = frame.valid ? frame.header.frame : 0;
@@ -1151,7 +1756,102 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			a_context->PSSetConstantBuffers(0, 2, cbs);
 			ID3D11ShaderResourceView* vsSrvs[3] = { g_bones.srv, nullptr, g_prevBones.srv };
 			a_context->VSSetShaderResources(0, 3, vsSrvs);
-			a_context->PSSetSamplers(0, 1, &g_sampler);
+			ID3D11SamplerState* samplers[3] = { g_sampler, g_pointSampler, g_shadowSampler };
+			a_context->PSSetSamplers(0, 3, samplers);
+			const UINT stride = sizeof(GmskyRndVertex), zero = 0;
+			ID3D11ShaderResourceView* noSrvs[8]{};
+
+			// Fills the object's constants for one part (the held correction applies in every pass).
+			auto setObject = [&](const GmskyRndObject& o, const GmskyRndPart& part, bool isHeld, bool hasNormal) {
+				ObjectConstants oc{};
+				oc.offset[0] = offset[0], oc.offset[1] = offset[1], oc.offset[2] = offset[2], oc.offset[3] = perGmod;
+				oc.info[0] = o.first_matrix;
+				oc.info[1] = part.flags;
+				oc.info[2] = isHeld ? 1u : 0u;
+				oc.info[3] = hasNormal ? 1u : 0u;
+				for (int c = 0; c < 4; ++c) {
+					oc.color[c] = float((o.color >> (8 * c)) & 0xFF) / 255.0f;
+				}
+				oc.alpha[0] = part.alpha_ref;
+				oc.alpha[1] = part.phong_exponent;
+				oc.alpha[2] = part.phong_boost;
+				std::memcpy(oc.held, held, sizeof(held));
+				D3D11_MAPPED_SUBRESOURCE mapped{};
+				if (FAILED(a_context->Map(g_objectCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+					return false;
+				}
+				std::memcpy(mapped.pData, &oc, sizeof(oc));
+				a_context->Unmap(g_objectCb, 0);
+				return true;
+			};
+			auto textureOf = [&](uint32_t a_id) -> ID3D11ShaderResourceView* {
+				const auto tex = g_gpuTextures.find(a_id);
+				return tex != g_gpuTextures.end() && tex->second.srv ? tex->second.srv : nullptr;
+			};
+
+			if (a_in.shadows) {
+				// Our objects into our sun shadow map (solid and alpha-tested parts cast; see-through ones don't).
+				a_context->PSSetShaderResources(0, 8, noSrvs);
+				a_context->OMSetRenderTargets(0, nullptr, g_shadowDsv);
+				a_context->ClearDepthStencilView(g_shadowDsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
+				D3D11_VIEWPORT svp{ 0, 0, float(kShadowSize), float(kShadowSize), 0, 1 };
+				a_context->RSSetViewports(1, &svp);
+				a_context->RSSetState(g_shadowRaster);
+				a_context->OMSetDepthStencilState(g_depthWrite, 0);
+				a_context->VSSetShader(g_shadowVs, nullptr, 0);
+				a_context->PSSetShader(g_shadowPs, nullptr, 0);
+				for (const auto& o : frame.objects) {
+					const auto it = g_gpuModels.find(o.model_id);
+					if (it == g_gpuModels.end() || !it->second.vb || o.matrix_count != it->second.bones) {
+						continue;
+					}
+					const auto& m = it->second;
+					const bool isHeld = (o.flags & GMSKY_RND_OBJ_HELD) && canHold;
+					a_context->IASetVertexBuffers(0, 1, &m.vb, &stride, &zero);
+					a_context->IASetIndexBuffer(m.ib, DXGI_FORMAT_R32_UINT, 0);
+					for (const auto& part : m.parts) {
+						if (part.flags & (GMSKY_RND_MAT_TRANSLUCENT | GMSKY_RND_MAT_ADDITIVE) || !setObject(o, part, isHeld, false)) {
+							continue;
+						}
+						ID3D11ShaderResourceView* srv = textureOf(part.texture_id);
+						srv = srv ? srv : g_whiteSrv;
+						a_context->PSSetShaderResources(1, 1, &srv);
+						a_context->DrawIndexed(part.index_count, part.first_index, 0);
+					}
+					++a_seen.shadowCasters;
+				}
+				++a_seen.shadowFrames;
+
+				// Their shadows on Skyrim: a full-screen multiply pass over Skyrim's colour (no depth bound,
+				// so Skyrim's depth can be read).
+				if (a_in.sceneDepth) {
+					a_context->PSSetShaderResources(0, 8, noSrvs);
+					a_context->OMSetRenderTargets(1, a_solidTargets, nullptr);
+					a_context->RSSetViewports(1, &a_in.viewport);
+					a_context->RSSetState(g_raster);
+					a_context->OMSetBlendState(g_multiplyBlend, nullptr, 0xFFFFFFFF);
+					a_context->OMSetDepthStencilState(nullptr, 0);
+					a_context->IASetInputLayout(nullptr);
+					a_context->VSSetShader(g_fullVs, nullptr, 0);
+					a_context->PSSetShader(g_overlayPs, nullptr, 0);
+					ID3D11ShaderResourceView* overlaySrvs[4] = { g_shadowSrv, nullptr, a_in.sceneDepth, a_in.mask };
+					a_context->PSSetShaderResources(4, 4, overlaySrvs);
+					a_context->Draw(3, 0);
+					++a_seen.overlayFrames;
+					a_context->PSSetShaderResources(0, 8, noSrvs);
+				}
+				// Back to the model passes.
+				a_context->IASetInputLayout(g_modelLayout);
+				a_context->VSSetShader(g_modelVs, nullptr, 0);
+				a_context->PSSetShader(g_modelPs, nullptr, 0);
+				a_context->RSSetViewports(1, &a_in.viewport);
+				a_context->RSSetState(g_raster);
+				a_context->OMSetBlendState(g_solidBlend, nullptr, 0xFFFFFFFF);
+				a_context->OMSetDepthStencilState(a_reversed ? g_depthWriteRev : g_depthWrite, 0);
+			}
+			if (a_in.skyrimShadows) {
+				++a_seen.skyrimCascadeFrames;
+			}
 
 			bool counted = false, heldCounted = false;
 			// Pass 0: solid and alpha-tested parts (depth written, motion vectors and normals).
@@ -1160,6 +1860,8 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			for (int pass = 0; pass < 2; ++pass) {
 				if (pass == 0) {
 					a_context->OMSetRenderTargets(a_solidCount, a_solidTargets, a_dsv);
+					ID3D11ShaderResourceView* shadowSrvs[2] = { a_in.shadows ? g_shadowSrv : nullptr, a_in.skyrimShadows };
+					a_context->PSSetShaderResources(4, 2, shadowSrvs);
 				}
 				for (const auto& o : frame.objects) {
 					const auto it = g_gpuModels.find(o.model_id);
@@ -1187,7 +1889,6 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 							a_seen.heldAgeSum += QpcMs(q.QuadPart - frame.header.qpc);
 						}
 					}
-					const UINT stride = sizeof(GmskyRndVertex), zero = 0;
 					a_context->IASetVertexBuffers(0, 1, &m.vb, &stride, &zero);
 					a_context->IASetIndexBuffer(m.ib, DXGI_FORMAT_R32_UINT, 0);
 					for (const auto& part : m.parts) {
@@ -1195,25 +1896,16 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 						if (blended != (pass == 1)) {
 							continue;
 						}
-						ObjectConstants oc{};
-						oc.offset[0] = offset[0], oc.offset[1] = offset[1], oc.offset[2] = offset[2], oc.offset[3] = perGmod;
-						oc.info[0] = o.first_matrix;
-						oc.info[1] = part.flags;
-						oc.info[2] = isHeld ? 1u : 0u;
-						for (int c = 0; c < 4; ++c) {
-							oc.color[c] = float((o.color >> (8 * c)) & 0xFF) / 255.0f;
-						}
-						oc.alpha[0] = part.alpha_ref;
-						std::memcpy(oc.held, held, sizeof(held));
-						D3D11_MAPPED_SUBRESOURCE mapped{};
-						if (FAILED(a_context->Map(g_objectCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+						ID3D11ShaderResourceView* normalSrv = part.normal_texture_id ? textureOf(part.normal_texture_id) : nullptr;
+						if (!setObject(o, part, isHeld, normalSrv != nullptr)) {
 							continue;
 						}
-						std::memcpy(mapped.pData, &oc, sizeof(oc));
-						a_context->Unmap(g_objectCb, 0);
-						const auto tex = g_gpuTextures.find(part.texture_id);
-						ID3D11ShaderResourceView* srv = tex != g_gpuTextures.end() && tex->second.srv ? tex->second.srv : g_whiteSrv;
+						ID3D11ShaderResourceView* srv = textureOf(part.texture_id);
+						srv = srv ? srv : g_whiteSrv;
 						a_context->PSSetShaderResources(1, 1, &srv);
+						a_context->PSSetShaderResources(3, 1, &normalSrv);
+						a_seen.normalMapCalls += normalSrv ? 1 : 0;
+						a_seen.phongCalls += (part.flags & GMSKY_RND_MAT_PHONG) ? 1 : 0;
 						if (pass == 1) {
 							a_context->OMSetBlendState((part.flags & GMSKY_RND_MAT_ADDITIVE) ? g_addBlend : g_alphaBlend, nullptr, 0xFFFFFFFF);
 							++a_seen.blendedCalls;
@@ -1390,6 +2082,35 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			seen.reversed = reversed;
 			seen.depthFrom = probeKnown ? "probe" : "matrix";
 			GatherLighting(fc, cam, seen);
+
+			// G5b bundle: Garry's Mod's console switches (frame flags), shadows, Skyrim's depth back to positions.
+			const auto& newest = Render::NewestFrame();
+			const uint32_t sw = newest.valid ? newest.header.flags : 0;
+			seen.switches = sw;
+			Set4(fc.switches, (sw & GMSKY_RND_FRAME_FLIP_GREEN) ? 1.0f : 0.0f, (sw & GMSKY_RND_FRAME_NO_NORMALS) ? 0.0f : 1.0f, (sw & GMSKY_RND_FRAME_NO_PHONG) ? 0.0f : 1.0f, 0.0f);
+			D3D11_TEXTURE2D_DESC sceneDesc{};
+			sceneTex->GetDesc(&sceneDesc);
+			Set4(fc.screen, 1.0f / float(sceneDesc.Width), 1.0f / float(sceneDesc.Height), 0.0f, 0.0f);
+			const auto& frustum = camera->GetRuntimeData2().viewFrustum;
+			Set4(fc.depthParams, frustum.fNear, frustum.fFar, reversed ? 1.0f : 0.0f, 0.0f);
+			PassInputs in;
+			in.sceneDepth = reinterpret_cast<ID3D11ShaderResourceView*>(depth.depthSRV);
+			in.mask = reinterpret_cast<ID3D11ShaderResourceView*>(rd.renderTargets[RE::RENDER_TARGETS::kSHADOW_MASK].SRV);
+			in.viewport = D3D11_VIEWPORT{ 0, 0, float(sceneDesc.Width), float(sceneDesc.Height), 0, 1 };
+			const bool wantShadows = fc.shadowParams[0] > 0.5f && !(sw & GMSKY_RND_FRAME_NO_SHADOWS);
+			if (sw & GMSKY_RND_FRAME_NO_SHADOWS) {
+				seen.shadowWhy = "gmsky_render_shadows 0";
+			}
+			in.shadows = wantShadows && EnsureShadowMap() && Invert(fc.viewProj, fc.invViewProj);
+			if (in.shadows) {
+				SetSunShadowMatrix(fc, cam);
+				in.skyrimShadows = SetSkyrimShadows(fc, cam);
+				fc.shadowExtra[0] = (g_maskUsable && in.mask) ? 1.0f : 0.0f;
+			} else {
+				fc.shadowParams[0] = 0.0f;
+				fc.skyShadowSplits[3] = 0.0f;
+			}
+			seen.maskUsable = g_maskUsable;
 			if constexpr (kTestCube) {
 				float clip[4];
 				for (int r = 0; r < 4; ++r) {
@@ -1407,6 +2128,9 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			StateBackup backup;
 			backup.Save(context);
 			SyncGpu(context, seen);
+			if (fc.shadowParams[0] > 0.5f) {
+				MaskProbe(context, in.mask);
+			}
 			D3D11_MAPPED_SUBRESOURCE mapped{};
 			if (SUCCEEDED(context->Map(g_frameCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
 				std::memcpy(mapped.pData, &fc, sizeof(fc));
@@ -1441,7 +2165,7 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 				context->PSSetConstantBuffers(0, 1, &g_frameCb);
 				context->Draw(36, 0);
 			}
-			DrawModels(context, cam, R, fc, reversed, targets, targetCount, dsv, seen);
+			DrawModels(context, cam, R, fc, reversed, targets, targetCount, dsv, in, seen);
 			backup.Restore(context);
 
 			{
@@ -1455,6 +2179,17 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			}
 			g_drawn.fetch_add(1, std::memory_order_relaxed);
 		}
+
+		// BSShadowDirectionalLight::Render: the sun's shadow maps are complete when it returns (SkyCraft's hook).
+		struct SunShadowRenderHook
+		{
+			static void thunk(RE::BSShadowLight* a_this, std::uint32_t& a_index)
+			{
+				func(a_this, a_index);
+				CaptureSunShadows(a_this);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
 
 		struct RenderWorldHook
 		{
@@ -1486,6 +2221,9 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 		}
 		RenderWorldHook::func = SKSE::GetTrampoline().write_call<5>(site, RenderWorldHook::thunk);
 		g_hooked = true;
+		REL::Relocation<std::uintptr_t> sunVtbl{ RE::VTABLE_BSShadowDirectionalLight[0] };
+		SunShadowRenderHook::func = sunVtbl.write_vfunc(0x0A, SunShadowRenderHook::thunk);
+		logger::info("shadows: hooked the sun's shadow map rendering (BSShadowDirectionalLight entry 0x0A)");
 		logger::info("in-frame drawing: hooked after Main::RenderWorld (test cube {})", kTestCube ? "on" : "off");
 	}
 
@@ -1513,7 +2251,9 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 			g_seen.uploadMsMax = 0;
 			g_seen.heldDrawn = g_seen.heldNoView = g_seen.heldFrames = 0;
 			g_seen.heldDegSum = g_seen.heldDegMax = g_seen.heldUnitsSum = g_seen.heldUnitsMax = g_seen.heldAgeSum = 0;
+			g_seen.shadowFrames = g_seen.shadowCasters = g_seen.overlayFrames = g_seen.skyrimCascadeFrames = g_seen.normalMapCalls = g_seen.phongCalls = 0;
 		}
+		const auto captures = g_cascadeCaptures.exchange(0);
 		std::string cube;
 		if (seen.cubeValid) {
 			cube = std::format("; cube at ({:.1f}, {:.1f}, {:.1f}), camera ({:.1f}, {:.1f}, {:.1f}), {:.0f} units away, {}", seen.cube[0], seen.cube[1], seen.cube[2],
@@ -1534,6 +2274,16 @@ PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 				seen.framesDrawn, objectsDrawn, seen.triangles, seen.drawCalls, seen.blendedCalls, seen.pointLights, seen.skippedEpoch, seen.frameEpoch, seen.originEpoch,
 				seen.skippedNoOrigin, seen.skippedUnknown, seen.skippedBones, seen.gpuModels, seen.gpuTextures, seen.modelUploads, seen.textureUploads, seen.uploadFailures,
 				seen.uploadMsMax, seen.gmodFrame, first);
+		}
+		if (seen.gmodFrame) {
+			std::string sw;
+			if (seen.switches & GMSKY_RND_FRAME_FLIP_GREEN) sw += " normal_flip";
+			if (seen.switches & GMSKY_RND_FRAME_NO_NORMALS) sw += " no_normals";
+			if (seen.switches & GMSKY_RND_FRAME_NO_PHONG) sw += " no_phong";
+			if (seen.switches & GMSKY_RND_FRAME_NO_SHADOWS) sw += " no_shadows";
+			logger::info("in-frame drawing: shadows {} frames ({} casters, {} darkening passes on Skyrim){}; Skyrim's sun cascades used {} frames ({} captured); Skyrim's shadow mask {}; parts with a normal map {}, with phong {}; switches:{}",
+				seen.shadowFrames, seen.shadowCasters, seen.overlayFrames, seen.shadowFrames ? "" : std::format(" (off: {})", seen.shadowWhy), seen.skyrimCascadeFrames,
+				captures, seen.maskUsable ? "used" : "not used", seen.normalMapCalls, seen.phongCalls, sw.empty() ? " none" : sw);
 		}
 		if (seen.heldDrawn || seen.heldNoView) {
 			const double n = double(std::max<uint64_t>(seen.heldFrames, 1));

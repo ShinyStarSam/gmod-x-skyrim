@@ -10,10 +10,12 @@ use std::collections::{HashMap, VecDeque};
 
 /// Biggest texture side sent (the VTF's biggest mip level no larger than this).
 pub const MAX_TEXTURE: u32 = 1024;
-/// Numbers per corner in RenderModel's flat table: position 3, normal 3, u, v, 4 x (bone, weight).
-pub const VERTEX_NUMBERS: usize = 16;
-/// Numbers per part: first corner, corner count, texture id, GMSKY_RND_MAT_* flags, alpha reference.
-pub const PART_NUMBERS: usize = 5;
+/// Numbers per corner in RenderModel's flat table: position 3, normal 3, tangent 4 (xyz,
+/// handedness), u, v, 4 x (bone, weight).
+pub const VERTEX_NUMBERS: usize = 20;
+/// Numbers per part: first corner, corner count, texture id, GMSKY_RND_MAT_* flags, alpha
+/// reference, normal map texture id, phong exponent, phong boost.
+pub const PART_NUMBERS: usize = 8;
 /// Numbers before each object's matrices in RenderFrame's flat table: model id, colour, bone
 /// count, entity number, GMSKY_RND_OBJ_* flags.
 pub const OBJECT_NUMBERS: usize = 5;
@@ -35,12 +37,12 @@ pub fn compose(a: &M34, b: &M34) -> M34 {
     out
 }
 
-/// One corner from 16 numbers. Up to 4 (bone, weight) pairs become 0-255 weights summing to 255
+/// One corner from 20 numbers. Up to 4 (bone, weight) pairs become 0-255 weights summing to 255
 /// (rounding left-over goes to the heaviest); bones past `bone_count` and a corner without any
 /// weight go on bone 0.
 pub fn vertex_from(n: &[f64], bone_count: u32) -> Vertex {
     let mut pairs: Vec<(u8, f64)> = (0..4)
-        .map(|k| (n[8 + 2 * k], n[9 + 2 * k]))
+        .map(|k| (n[12 + 2 * k], n[13 + 2 * k]))
         .filter(|&(b, w)| w > 0.0 && b >= 0.0 && (b as u32) < bone_count)
         .map(|(b, w)| (b as u8, w))
         .collect();
@@ -61,8 +63,9 @@ pub fn vertex_from(n: &[f64], bone_count: u32) -> Vertex {
     Vertex {
         pos: [n[0] as f32, n[1] as f32, n[2] as f32],
         normal: [n[3] as f32, n[4] as f32, n[5] as f32],
-        u: n[6] as f32,
-        v: n[7] as f32,
+        tangent: [n[6] as f32, n[7] as f32, n[8] as f32, if n[9] < 0.0 { -1.0 } else { 1.0 }],
+        u: n[10] as f32,
+        v: n[11] as f32,
         bones,
         weights,
     }
@@ -128,11 +131,14 @@ impl RenderOut {
         }
     }
 
-    /// A texture from a VTF file. Returns a line for the log.
-    pub fn add_texture(&mut self, id: u32, file: &[u8]) -> Result<String, String> {
+    /// A texture from a VTF file; `linear`: not a colour (a normal map), read as is by Skyrim.
+    /// Returns a line for the log.
+    pub fn add_texture(&mut self, id: u32, file: &[u8], linear: bool) -> Result<String, String> {
         let img = vtf::decode(file, MAX_TEXTURE)?;
-        let msg = encode_texture(&Texture { id, width: img.width, height: img.height, format: TEX_RGBA8, bytes: img.rgba.len() as u32, flags: 0 }, &img.rgba);
-        let line = format!("texture {id}: {}x{} (level {} of {}x{}), VTF format {}", img.width, img.height, img.mip, img.full_width, img.full_height, img.format);
+        let flags = if linear { TEXF_LINEAR } else { 0 };
+        let msg = encode_texture(&Texture { id, width: img.width, height: img.height, format: TEX_RGBA8, bytes: img.rgba.len() as u32, flags }, &img.rgba);
+        let line = format!("texture {id}: {}x{} (level {} of {}x{}), VTF format {}{}", img.width, img.height, img.mip, img.full_width, img.full_height, img.format,
+                           if linear { ", linear (normal map)" } else { "" });
         self.textures.insert(id, msg);
         self.pending.push_back((MSG_TEXTURE, id));
         self.service();
@@ -153,7 +159,8 @@ impl RenderOut {
         let parts: Vec<Part> = parts
             .chunks(PART_NUMBERS)
             .filter(|p| p.len() == PART_NUMBERS)
-            .map(|p| Part { first_index: p[0] as u32, index_count: p[1] as u32, texture_id: p[2] as u32, flags: p[3] as u32, alpha_ref: p[4] as f32, reserved: 0 })
+            .map(|p| Part { first_index: p[0] as u32, index_count: p[1] as u32, texture_id: p[2] as u32, flags: p[3] as u32, alpha_ref: p[4] as f32,
+                            normal_texture_id: p[5] as u32, phong_exponent: p[6] as f32, phong_boost: p[7] as f32 })
             .collect();
         let msg = encode_model(id, bone_count, &parts, &vertices, &indices);
         decode_model(&msg).map_err(|e| format!("model {id} refused before sending: {e}"))?;
@@ -169,7 +176,7 @@ impl RenderOut {
     /// number, GMSKY_RND_OBJ_* flags, then 12 numbers per bone (`GetBoneMatrix`, world). Each
     /// becomes bone x poseToBone, relative to the anchor. `view`: Garry's Mod's camera for this
     /// frame (eye in world units, pitch / yaw / roll). Returns the objects sent.
-    pub fn frame(&mut self, frame: u64, flat: &[f64], epoch: u32, anchor: [f64; 3], view: Option<([f64; 3], [f64; 3])>) -> u32 {
+    pub fn frame(&mut self, frame: u64, flat: &[f64], epoch: u32, anchor: [f64; 3], view: Option<([f64; 3], [f64; 3])>, switches: u32) -> u32 {
         self.service();
         if epoch == 0 {
             self.counts.frames_no_epoch += 1;
@@ -206,7 +213,8 @@ impl RenderOut {
             }
             objects.push(Object { model_id: model, first_matrix: first, matrix_count: bones as u32, color, flags, entity });
         }
-        let mut header = Frame { frame, qpc: now_qpc(), origin_epoch: epoch, ..Default::default() };
+        let switches = switches & (FRAME_FLIP_GREEN | FRAME_NO_NORMALS | FRAME_NO_PHONG | FRAME_NO_SHADOWS);
+        let mut header = Frame { frame, qpc: now_qpc(), origin_epoch: epoch, flags: switches, ..Default::default() };
         if let Some((eye, angles)) = view {
             header.flags |= FRAME_VIEW;
             header.view_eye = [(eye[0] - anchor[0]) as f32, (eye[1] - anchor[1]) as f32, (eye[2] - anchor[2]) as f32];
@@ -245,17 +253,19 @@ mod tests {
 
     #[test]
     fn weights_sum_to_255() {
-        let mut n = vec![0.0; 16];
-        n[8..14].copy_from_slice(&[0.0, 0.5, 1.0, 0.3, 2.0, 0.2]);
+        let mut n = vec![0.0; 20];
+        n[6..10].copy_from_slice(&[0.0, 1.0, 0.0, -1.0]);
+        n[12..18].copy_from_slice(&[0.0, 0.5, 1.0, 0.3, 2.0, 0.2]);
         let v = vertex_from(&n, 3);
+        assert_eq!(v.tangent, [0.0, 1.0, 0.0, -1.0]);
         assert_eq!(v.bones[..3], [0, 1, 2]);
         assert_eq!(v.weights.iter().map(|&w| w as u32).sum::<u32>(), 255);
         assert_eq!(v.weights[..3], [127, 77, 51]); // 128 + 77 + 51 = 256: the heaviest gives one back
         // No weights, or a bone past the model's: bone 0, full weight.
-        let v = vertex_from(&[0.0; 16], 1);
-        assert_eq!((v.bones[0], v.weights[0]), (0, 255));
-        let mut n = vec![0.0; 16];
-        n[8..10].copy_from_slice(&[7.0, 1.0]);
+        let v = vertex_from(&[0.0; 20], 1);
+        assert_eq!((v.bones[0], v.weights[0], v.tangent[3]), (0, 255, 1.0));
+        let mut n = vec![0.0; 20];
+        n[12..14].copy_from_slice(&[7.0, 1.0]);
         assert_eq!(vertex_from(&n, 2).weights[0], 255);
     }
 
@@ -289,22 +299,22 @@ mod tests {
         vtf.extend_from_slice(&[0, 0, 1, 0, 0, 0, 0]);
         vtf.resize(80, 0);
         vtf.extend(std::iter::repeat([10u8, 20, 30, 255]).take(16).flatten());
-        assert!(out.add_texture(5, &vtf).unwrap().contains("4x4"));
+        assert!(out.add_texture(5, &vtf, false).unwrap().contains("4x4"));
         // One triangle on bone 0 of 1; poseToBone moves by (-1, 0, 0).
         let mut verts = Vec::new();
         for x in [0.0, 1.0, 0.0] {
-            verts.extend_from_slice(&[x, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+            verts.extend_from_slice(&[x, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         }
-        assert!(out.add_model(9, 1, &verts, &[0.0, 3.0, 5.0, 0.0, 0.0], &identity_with([-1.0, 0.0, 0.0])).is_ok());
-        assert!(out.add_model(10, 1, &verts[..16], &[], &identity_with([0.0; 3])).is_err(), "not whole triangles");
+        assert!(out.add_model(9, 1, &verts, &[0.0, 3.0, 5.0, MAT_PHONG as f64, 0.0, 6.0, 20.0, 2.0], &identity_with([-1.0, 0.0, 0.0])).is_ok());
+        assert!(out.add_model(10, 1, &verts[..20], &[], &identity_with([0.0; 3])).is_err(), "not whole triangles");
         // The bone at (101, 2, 3) in the world, the anchor at (100, 0, 0): (1, 2, 3) - 1 in x.
         let mut flat = vec![9.0, 4294967295.0, 1.0, 17.0, OBJ_HELD as f64];
         flat.extend(identity_with([101.0, 2.0, 3.0]));
         flat.extend_from_slice(&[42.0, 0.0, 1.0, 18.0, 0.0]); // unknown model
         flat.extend(identity_with([0.0; 3]));
         let view = Some(([110.0, 5.0, 64.0], [10.0, 90.0, 0.0]));
-        assert_eq!(out.frame(1, &flat, 3, [100.0, 0.0, 0.0], view), 1);
-        assert_eq!(out.frame(2, &flat, 0, [0.0; 3], view), 0, "no epoch, no frame");
+        assert_eq!(out.frame(1, &flat, 3, [100.0, 0.0, 0.0], view, FRAME_NO_PHONG | 0x8000), 1);
+        assert_eq!(out.frame(2, &flat, 0, [0.0; 3], view, 0), 0, "no epoch, no frame");
 
         let reader = RenderMapping::open_named(&name).unwrap();
         let mut kinds = vec![];
@@ -313,8 +323,13 @@ mod tests {
             if kind == MSG_FRAME {
                 let (f, o, m) = decode_frame(p).unwrap();
                 assert_eq!((f.origin_epoch, o.len(), o[0].model_id, o[0].color, o[0].entity, o[0].flags), (3, 1, 9, 0xFFFF_FFFF, 17, OBJ_HELD));
-                assert_eq!((f.flags, f.view_eye, f.view_angles), (FRAME_VIEW, [10.0, 5.0, 64.0], [10.0, 90.0, 0.0]), "view relative to the anchor");
+                assert_eq!((f.flags, f.view_eye, f.view_angles), (FRAME_VIEW | FRAME_NO_PHONG, [10.0, 5.0, 64.0], [10.0, 90.0, 0.0]), "view relative to the anchor, switches kept, unknown bits dropped");
                 assert_eq!([m[0].m[0][3], m[0].m[1][3], m[0].m[2][3]], [0.0, 2.0, 3.0]);
+            }
+            if kind == MSG_MODEL {
+                let m = decode_model(p).unwrap();
+                assert_eq!((m.parts[0].normal_texture_id, m.parts[0].phong_exponent, m.parts[0].phong_boost, m.parts[0].flags), (6, 20.0, 2.0, MAT_PHONG));
+                assert_eq!(m.vertices[0].tangent, [1.0, 0.0, 0.0, 1.0]);
             }
             if kind == MSG_TEXTURE {
                 let (t, px) = decode_texture(p).unwrap();
@@ -324,7 +339,7 @@ mod tests {
         assert_eq!(kinds, vec![MSG_RESET, MSG_TEXTURE, MSG_MODEL, MSG_FRAME]);
 
         reader.attach_reader();
-        out.frame(3, &flat, 3, [100.0, 0.0, 0.0], None);
+        out.frame(3, &flat, 3, [100.0, 0.0, 0.0], None, 0);
         let mut again = vec![];
         reader.read(u64::MAX, |kind, _| again.push(kind)).unwrap();
         assert_eq!(again, vec![MSG_RESET, MSG_TEXTURE, MSG_MODEL, MSG_FRAME]);

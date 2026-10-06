@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::*};
 
 pub const SHM_NAME: &str = r"Local\GmodSkyrim_render_v1";
 pub const MAGIC: u32 = 0x444E_524D; // "MRND"
-pub const VERSION: u32 = 2; // 2: the frame carries Garry's Mod's view; objects their entity and flags (G5a + G6)
+pub const VERSION: u32 = 3; // 2: the frame carries Garry's Mod's view; objects their entity and flags (G5a + G6); 3: tangents, normal maps, phong
 pub const RING_BYTES: usize = 64 << 20;
 pub const HEAD_OFF: usize = 0x1000;
 pub const TAIL_OFF: usize = 0x1040;
@@ -36,8 +36,16 @@ pub const MAT_ADDITIVE: u32 = 0x2;
 pub const MAT_ALPHATEST: u32 = 0x4;
 pub const MAT_SELFILLUM: u32 = 0x8;
 pub const MAT_NOCULL: u32 = 0x10;
+pub const MAT_PHONG: u32 = 0x20;
+pub const MAT_BASEALPHA_PHONGMASK: u32 = 0x40;
+pub const TEXF_LINEAR: u32 = 0x1;
 
 pub const FRAME_VIEW: u32 = 0x1;
+/// Switches from Garry's Mod's console (see gmsky_protocol.h).
+pub const FRAME_FLIP_GREEN: u32 = 0x2;
+pub const FRAME_NO_NORMALS: u32 = 0x4;
+pub const FRAME_NO_PHONG: u32 = 0x8;
+pub const FRAME_NO_SHADOWS: u32 = 0x10;
 pub const OBJ_HELD: u32 = 0x1;
 
 pub const FORGET_MODEL: u32 = 1;
@@ -94,7 +102,9 @@ pub struct Part {
     pub texture_id: u32,
     pub flags: u32,
     pub alpha_ref: f32,
-    pub reserved: u32,
+    pub normal_texture_id: u32,
+    pub phong_exponent: f32,
+    pub phong_boost: f32,
 }
 
 #[repr(C)]
@@ -102,6 +112,8 @@ pub struct Part {
 pub struct Vertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
+    /// xyz model space, w handedness (+1 / -1).
+    pub tangent: [f32; 4],
     pub u: f32,
     pub v: f32,
     pub bones: [u8; 4],
@@ -156,9 +168,10 @@ const _: () = {
     assert!(size_of::<Reset>() == 8);
     assert!(size_of::<Texture>() == 24);
     assert!(size_of::<Model>() == 24);
-    assert!(size_of::<Part>() == 24);
-    assert!(size_of::<Vertex>() == 40);
-    assert!(offset_of!(Vertex, bones) == 32);
+    assert!(size_of::<Part>() == 32);
+    assert!(size_of::<Vertex>() == 56);
+    assert!(offset_of!(Vertex, u) == 40);
+    assert!(offset_of!(Vertex, bones) == 48);
     assert!(size_of::<Forget>() == 8);
     assert!(size_of::<Frame>() == 56);
     assert!(offset_of!(Frame, view_eye) == 32);
@@ -474,8 +487,8 @@ mod tests {
     }
 
     fn cube_model(id: u32) -> Vec<u8> {
-        let parts = [Part { first_index: 0, index_count: 6, texture_id: 7, flags: MAT_ALPHATEST, alpha_ref: 0.5, reserved: 0 }];
-        let vertex = |x: f32, b: u8| Vertex { pos: [x, 1.0, 2.0], normal: [0.0, 0.0, 1.0], u: 0.25, v: 0.75, bones: [b, 0, 0, 0], weights: [255, 0, 0, 0] };
+        let parts = [Part { first_index: 0, index_count: 6, texture_id: 7, flags: MAT_ALPHATEST, alpha_ref: 0.5, normal_texture_id: 0, phong_exponent: 0.0, phong_boost: 0.0 }];
+        let vertex = |x: f32, b: u8| Vertex { pos: [x, 1.0, 2.0], normal: [0.0, 0.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0], u: 0.25, v: 0.75, bones: [b, 0, 0, 0], weights: [255, 0, 0, 0] };
         let verts = [vertex(0.0, 0), vertex(1.0, 1), vertex(2.0, 1), vertex(3.0, 0)];
         encode_model(id, 2, &parts, &verts, &[0, 1, 2, 0, 2, 3])
     }
@@ -497,7 +510,7 @@ mod tests {
         assert!(decode_model(&bad).unwrap_err().contains("past 4 vertices"));
         assert!(decode_model(&cube_model(5)[..30]).is_err());
         let mut bone = cube_model(5);
-        bone[size_of::<Model>() + size_of::<Part>() + 32] = 2; // vertex 0 on bone 2 of 2
+        bone[size_of::<Model>() + size_of::<Part>() + 48] = 2; // vertex 0 on bone 2 of 2
         assert!(decode_model(&bone).unwrap_err().contains("bone 2"));
 
         let px: Vec<u8> = (0..(8 * 4 / 2) as u8).collect(); // 8x4 BC1 = 2 blocks = 16 bytes

@@ -50,7 +50,7 @@ fn push_box(lo: [f32; 3], hi: [f32; 3], bone: u8, verts: &mut Vec<Vertex>, indic
                 p[axis] = if side == 1 { hi[axis] } else { lo[axis] };
                 p[u] = if cu == 1 { hi[u] } else { lo[u] };
                 p[v] = if cv == 1 { hi[v] } else { lo[v] };
-                verts.push(Vertex { pos: p, normal, u: cu as f32, v: cv as f32, bones: [bone, 0, 0, 0], weights: [255, 0, 0, 0] });
+                verts.push(Vertex { pos: p, normal, tangent: [0.0, 0.0, 0.0, 1.0], u: cu as f32, v: cv as f32, bones: [bone, 0, 0, 0], weights: [255, 0, 0, 0] });
             }
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
@@ -97,7 +97,7 @@ fn main() {
     let mut indices = Vec::new();
     push_box([-32.0, -4.0, -4.0], [0.0, 4.0, 4.0], 0, &mut verts, &mut indices);
     push_box([0.0, -4.0, -4.0], [32.0, 4.0, 4.0], 1, &mut verts, &mut indices);
-    let parts = [Part { first_index: 0, index_count: indices.len() as u32, texture_id: 1, flags: 0, alpha_ref: 0.0, reserved: 0 }];
+    let parts = [Part { first_index: 0, index_count: indices.len() as u32, texture_id: 1, flags: 0, alpha_ref: 0.0, normal_texture_id: 0, phong_exponent: 0.0, phong_boost: 0.0 }];
     let model = encode_model(1, 2, &parts, &verts, &indices);
     let px = checker();
     let texture = encode_texture(&Texture { id: 1, width: 64, height: 64, format: TEX_RGBA8, bytes: px.len() as u32, flags: 0 }, &px);
