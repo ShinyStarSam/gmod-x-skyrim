@@ -2499,6 +2499,17 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
     in both orders (the records seem to sit in the neighbour's list), so the fix is proven by the
     crash going away, not by that count. InfMap2 is only
     general reference from here on (the user), so differing from its order needs no special case.
+- **S2c. "Still in the engine" vs the other side's mesh (built and tested 2026-10-06, test 122).**
+  In single-player the server and client share one heap; a destroyed mesh's memory was often re-used
+  by the other side's new mesh, and the waiting side waited for seconds (test 121's holds).
+  `gmsky.PhysAlive` now also needs the mesh's game data to be empty (cleared by `PhysDestroyObject`
+  before the delete; set on every new object). Test 122: no hold over 60 ticks.
+- **S2d. Wait for touching dead meshes too (planned and built 2026-10-06 after test 122's crash).**
+  Test 122 crashed in the **dead** list of a chunk retired in the same tick as its upper neighbour
+  was built: a dead mesh has no game data, so the filter can't keep the new neighbour away from it.
+  The test-118 box rule ignored face-sharing neighbours on purpose; now a new chunk also waits for a
+  dead mesh touching its box (face, edge or corner). Costs at most one tick (the server deletes at the
+  next physics step).
 - **S3. Props, ragdolls and grenades on it.** Mostly free once S2 works. Added: a prop moving into
   a chunk that isn't built yet is frozen for that moment and released with its speed (like the
   player's hold; InfMap2 doesn't need this because it makes its terrain itself, instantly; we

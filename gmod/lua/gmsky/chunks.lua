@@ -71,20 +71,25 @@ function C.Destroyed(key, name, phys, why, lo, hi)
 		lo and string.format("; world box (%.0f, %.0f, %.0f) - (%.0f, %.0f, %.0f)", lo.x, lo.y, lo.z, hi.x, hi.y, hi.z) or ""))
 end
 
+-- Grows a box so that boxes meeting at a face, edge or corner overlap.
+local TOUCH = Vector(1, 1, 1)
+
 -- Boxes overlap by more than half a unit (chunks sharing a face don't count).
 local function Overlap(alo, ahi, blo, bhi)
 	return alo.x < bhi.x - 0.5 and blo.x < ahi.x - 0.5 and alo.y < bhi.y - 0.5 and blo.y < ahi.y - 0.5
 		and alo.z < bhi.z - 0.5 and blo.z < ahi.z - 0.5
 end
 
--- nil if no old mesh of `key`, and none overlapping the world box `lo`-`hi` (if given), is still in
--- the engine (each departure logged once); otherwise a line naming those still there. Gone = no
+-- nil if no old mesh of `key`, and none overlapping or touching the world box `lo`-`hi` (if given),
+-- is still in the engine (each departure logged once); otherwise a line naming those still there.
+-- Touching counts too (test 122): a dead mesh has no game data, so the engine's filter can't keep
+-- it apart from a new neighbour sharing its face, and the dead one's list overflowed. Gone = no
 -- longer looks alive, or its address now belongs to another physics object (freed and reused, by
 -- this side or, test 121, by the other side: one heap in single-player; gmsky.PhysAlive tells).
 function C.StillInEngine(key, lo, hi)
 	local mine = {}
 	for addr, d in pairs(C.dead) do
-		if d.key == key or (lo and d.lo and Overlap(lo, hi, d.lo, d.hi)) then mine[#mine + 1] = addr end
+		if d.key == key or (lo and d.lo and Overlap(lo - TOUCH, hi + TOUCH, d.lo, d.hi)) then mine[#mine + 1] = addr end
 	end
 	if #mine == 0 then return nil end
 	local owners = gmsky.PhysAlive and Owners() or {}
@@ -127,14 +132,13 @@ function C.StepLog(ent, after, flagFirst, nextStep)
 		return (SysTime() - t0) * 1000
 	end
 	local wlo, whi = ent:GetPos() + ent:GetBoxLo(), ent:GetPos() + ent:GetBoxHi()
-	local pad = Vector(1, 1, 1)
 	local names, physs, touching = {}, {}, {}
 	for _, e in ipairs(ents.FindByClass("gmsky_chunk")) do
 		local p = e ~= ent and e:GetPhysicsObject()
 		if p and IsValid(p) then
 			physs[#physs + 1], names[#names + 1] = p, e:ChunkName()
 			-- Touching = boxes meet at a face, edge or corner.
-			if Overlap(wlo - pad, whi + pad, e:GetPos() + e:GetBoxLo(), e:GetPos() + e:GetBoxHi()) then touching[#touching + 1] = #physs end
+			if Overlap(wlo - TOUCH, whi + TOUCH, e:GetPos() + e:GetBoxLo(), e:GetPos() + e:GetBoxHi()) then touching[#touching + 1] = #physs end
 		end
 	end
 	local ply = player.GetAll()[1]

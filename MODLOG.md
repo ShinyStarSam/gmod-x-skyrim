@@ -1881,3 +1881,8 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 - **S2c works:** 43 holds, **none over 60 ticks** (test 121: four of 251-354 ticks). 241 departures were recognised as "its memory now holds a new object ... the other side's".
 - **The crash:** in one server tick, `-15 -9 -6` changed fingerprint and was retired ("leaves the physics engine": dead, queued until the next physics step, no game data), and the chunk directly **above** it, `-15 -9 -5`, was built (its own old mesh was gone). The last line: `-15 -9 -5 after EnableMotion(false) ... next: SetMass(50000)`. The overflowing list is the **dead** `-15 -9 -6`'s. A dead mesh has no game data, so the filter can't say "no" (test 116); the wait rule (test 118) only waited for dead meshes **overlapping** the new box, and on purpose ignored ones sharing a face.
 - Getting stuck in geometry: nothing logs it yet (no "stuck" detection exists).
+## 2026-10-06 S2d: a new chunk also waits for a dead mesh touching it (not tested in game)
+
+**Changed:** `gmod/lua/gmsky/chunks.lua`: `C.StillInEngine` grows the new chunk's box by 1 unit (`TOUCH`), so a dead mesh sharing a face, edge or corner blocks the build too (before: only overlapping ones). At most one tick on the server.
+**Why:** test 122's crash (see above). Plan: `docs/DESIGN.md` S2d.
+**Tested how:** `gmod_harness.exe`: HARNESS PASSED (chunks not exercised). **Not tested in game.**
