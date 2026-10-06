@@ -1,5 +1,9 @@
 # STATUS
 
+**2026-10-06, after in-game tests 101-103: BLOCKED on Garry's Mod's physics crash again** (physics
+props on Skyrim's ground, plan `docs/DESIGN.md` "One collision system", step S1). See "The current
+problem". Waiting for the user's choice of the next experiment.
+
 **2026-10-06: the indoor shadow problem below is solved (test 93: Community Shaders' formula agrees
 with Skyrim's own shadow mask on 99.86% of points). Kept below as a record.**
 Written 2026-10-04 after in-game test 31; rewritten 2026-10-05 after in-game test 37 (blocked on
@@ -100,7 +104,8 @@ Single-player and offline only.
 
 - (By choice, not a bug) ending noclip under Skyrim's ground: you fall "under the earth" like in
   Source until Skyrim moves you back up; the user likes it, keep it.
-- Garry's Mod physics props/ragdolls fall through Skyrim's ground (traces only).
+- Garry's Mod physics props/ragdolls fall through Skyrim's ground (traces only; measured in test
+  100; fix blocked, see "The current problem").
 - Not started: Garry's Mod's hands/weapon/HUD in Skyrim (Phase 2),
   combat, save/load consistency.
 
@@ -111,6 +116,59 @@ health). Skyrim's player is a puppet. Skyrim owns the world, NPCs, quests and sa
 publishes the origin.
 
 ## The current problem
+
+### Physics ground crashes Garry's Mod (2026-10-06, tests 101-103; blocked)
+
+**What we did:** to make Garry's Mod's physics props, ragdolls and grenades land on Skyrim's ground
+(today they fall ~16,300 units to gm_flatmap's floor: test 100, 67 floor crossings by 25 objects
+in 70 s), the plan is one collision system like InfMap2's (a Garry's Mod addon for huge maps,
+`reference/infmap2`): Skyrim's triangles as Garry's Mod physics objects (`PhysicsFromMesh`) that the
+player, props and bullets all use. Step S1 tests the old engine crash first:
+`gmsky_test_physground old|infmap` builds a ~3,200-triangle physics mesh of Skyrim's triangles
+around the player every 0.5 s and removes the previous one after the new one exists.
+**What we expected:** `old` (tests 12-17's entity setup) crashes; `infmap` (InfMap2's chunk setup:
+mass 50000, `FVPHYSICS_CONSTRAINT_STATIC`, `FVPHYSICS_NO_SELF_COLLISIONS`, `FL_STATICPROP`,
+`FSOLID_FORCE_WORLD_ALIGNED`, custom collision checks) survives 10 minutes.
+**What happened:** both crashed within seconds (old: build 5; infmap: build 6), in exactly tests
+12-17's place.
+
+**Evidence:**
+- Dumps `GarrysMod/crashes/gmod_win64_20261006_022401_1_accessviolation.mdmp` (old) and
+  `..._022524_...` (infmap): `0xc0000005` write past a heap block at `vphysics.dll+0xaaff0`;
+  `rbp=0xfffd r12=0xffff r13=0xfffe rcx=0x2fff7` (a sorted list with 16-bit numbering, full at
+  65,532 items); inner chain `0x97c9b ← 0x99523 ← 0x97912 ← 0x977b8 ← 0x96cea … 0xa0728 ← 0x98cfc`,
+  reached from `server.dll+0x2eb909` (`CollisionRulesChanged` → `RecheckCollisionFilter`). Identical
+  in both dumps and to tests 12-17.
+- Logs (`build/logs-ingame-test-101/` = run 1, `-103/` = run 2): run 2's player stood **still**
+  (speed 0) at the same spot for all 6 builds, so each new mesh was the same triangles in the same
+  place as the previous one, which still existed (Garry's Mod deletes removed entities at the end
+  of the tick). The player touched the test mesh in 35 of 157 ticks. `ShouldCollide` ran (2,578
+  calls in 2 s).
+- A Lua error the user saw: almost certainly our log line after each build (`PhysObj:GetGameFlags`
+  doesn't exist; fixed). It ran after every setup call and didn't cause the crash.
+
+**What this rules out:** the player moving is **not** needed (run 2). InfMap2's settings don't help.
+**Pattern that fits every run so far (not proven):** a new mesh created **overlapping an existing
+mesh**, where **something touches both** (the player). Test 16 (pieces never overlapped, 272 builds)
+never crashed; the 2026-10-04 overlap experiment (overlap, nobody touching) survived; tests 12-15
+rebuilt pieces where old pieces still were; InfMap2 never puts two meshes of one chunk in the same
+place.
+
+**Ideas not tried yet (in the order I'd suggest; one variable each):**
+1. **No overlap: destroy the old mesh's physics before building the new one** (`PhysicsDestroy()`
+   on the old entity first, which is immediate, unlike `Remove()`). Same test otherwise. If it
+   survives 10 minutes, the trigger is the overlap, and the real design must never let two meshes
+   share space: chunks on a fixed lattice that never overlap (as test 16, which survived), and a
+   changed chunk is replaced by destroying first, then building in the same tick.
+2. **Overlap, nobody touching:** the same as run 2 but the box 2,000 units away from the player.
+   Tells us whether "something touches both" is needed.
+3. **Smaller meshes** (512 triangles, as tests 12-15): only if 1 and 2 don't explain it.
+4. **A different kind of physics object:** the map's own ground is a *static* object in the
+   physics engine; `PhysicsFromMesh` makes a movable one that we freeze. Our Rust module could
+   create static objects through the engine's physics interface (`CreatePolyObjectStatic`). More
+   work, unknown risk; only if 1-3 fail.
+5. If none works: a different route for props (see `docs/DESIGN.md` fallbacks), decided with the
+   user.
 
 ### Solved (2026-10-06, test 93): how Skyrim reads its indoor shadow maps
 
@@ -305,6 +363,9 @@ percentile), = 94/255.
   (`server.dll+0x2eb909`), whenever a piece was created near the moving player. **Replaced** by
   Lua triangle collision (steps A–B), which creates no physics objects. Don't go back to physics
   objects for Skyrim's world near the player.
+- **InfMap2's chunk setup for the physics mesh (S1, test 103, 2026-10-06):** crashed the same way
+  as our old setup (test 101), within 6 builds, with the player standing still. The settings make
+  no difference.
 - **Lift rule using the highest point under the footprint:** popped the player onto object
   spikes up to 23×/s (test 17). Now judged at the player's centre (test 18: 0 lifts).
 - **Grids centred where the player was:** fast players outran them (test 20). Now centred ahead.

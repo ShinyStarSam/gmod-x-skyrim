@@ -21,6 +21,10 @@ gmsky.Include("liveoverlay")
 gmsky.Include("binds")
 -- Geometry route step G3b: Garry's Mod's objects drawn by Skyrim itself (gmsky_render).
 gmsky.Include("render")
+-- Step S0 (one collision system): client-only physics objects against Skyrim's ground (log only).
+gmsky.Include("props")
+-- Step S1 (one collision system): physics ground experiment (gmsky_test_physground).
+gmsky.Include("physground")
 
 local frames = 0
 hook.Add("Think", "gmsky_count_frames", function()

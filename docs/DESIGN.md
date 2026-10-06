@@ -2142,6 +2142,214 @@ model's real skin materials for every model (the wiki lists a `skin` argument); 
 `GetModelMeshes` costs on a big model (it is cached per model, so once); whether the hook point
 SkyCraft uses behaves the same with our plugin's other hooks.
 
+### One collision system: Skyrim's world as Garry's Mod physics (planned 2026-10-06, waiting for the user's go-ahead)
+
+**History of this plan.** A first version (same day) kept the player on the trace ground and
+added physics ground for props only, with the player filtered out. The user rejected running two
+systems side by side and pointed at **InfMap2** (`https://codeberg.org/googer/infmap2`, read in
+`reference/infmap2`, commit `8077c17`, not tracked) as the way to do it properly.
+
+**The problem in plain words.** Garry's Mod has two ways of asking "is something there?":
+*traces* (an invisible line or box swept through the world: player movement, bullets) and its
+*physics engine* (`vphysics.dll`: props, ragdolls, grenades, AR2 balls). Today Skyrim's world
+answers traces only (the `gmsky_field` entity answers `TestCollision` from the Rust triangle
+store, step D), so physics objects fall through it to gm_flatmap's floor far below.
+
+**What InfMap2 does.** InfMap2 makes huge maps in Garry's Mod. Its terrain is **ordinary physics
+objects**: one `inf_chunk` entity per chunk (20,000 units), its triangles made with
+`PhysicsFromMesh` (about 2,300 triangles in `gm_inf_bliss`), on the server **and** on the client
+(the client needs them to predict the player's movement). Player movement, bullets, props,
+ragdolls and vehicles all collide with that one thing. **One system.** The chunk entity's recipe
+(`lua/entities/inf_chunk.lua`):
+- `PhysicsFromMesh(triangles)`, then `SetSolid(SOLID_VPHYSICS)`, `SetMoveType(MOVETYPE_NONE)`,
+  `EnableCustomCollisions()`;
+- on its physics object: `EnableMotion(false)`, `SetMass(50000)`, game flags
+  `FVPHYSICS_CONSTRAINT_STATIC` and `FVPHYSICS_NO_SELF_COLLISIONS`;
+- `AddSolidFlags(FSOLID_FORCE_WORLD_ALIGNED)`, `AddFlags(FL_STATICPROP)`,
+  `AddEFlags(EFL_KEEP_ON_RECREATE_ENTITIES)`, `DrawShadow(false)`; the physgun can't pick it up;
+  an empty chunk gets a zero box in `COLLISION_GROUP_WORLD`;
+- a chunk is made the moment any entity enters a chunk that has none, and removed (every 60 s)
+  when no entity is in it any more.
+Its other half is for maps bigger than Source's ±16,384 limit: every entity carries a chunk
+number ("megapos"), all chunks physically sit on top of each other at the map's middle, a
+`ShouldCollide` hook lets only things in the same chunk touch, and Lua's position functions
+(`GetPos`, `SetPos`, traces, ...) are replaced to add the chunk offset back.
+
+**Why we didn't do this before: the crash.** Tests 12-17 built Skyrim's ground with
+`PhysicsFromMesh` and Garry's Mod crashed 5 times in `vphysics.dll+0xaaff0` (a 16-bit list in the
+physics engine overflowing), every time when a new piece was created under the **moving**
+player (STATUS.md "Known engine bug"). InfMap2 creates chunks under moving players and is a
+public Workshop addon, so either its recipe avoids the crash, or its chunks are created so rarely
+(one per 20,000 units) that it seldom happens, or our data triggers something theirs doesn't. **We
+don't know which.** Our build had none of InfMap2's settings (no `FVPHYSICS_CONSTRAINT_STATIC`,
+`FVPHYSICS_NO_SELF_COLLISIONS`, `FL_STATICPROP`, mass, world-aligned flag) and built far more
+often (a new piece every few hundred units). So the first step tries to crash it on purpose.
+
+**Licence.** InfMap2 has **no licence file** (checked 2026-10-06). Without one, its code is all
+rights reserved by default: we read it to learn how it works and write our own code; we copy no
+code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on it.
+
+**Steps, each tested on its own:**
+
+- **S0. Measure the problem (logs only, no fix).** Once a second, for every physics object that
+  isn't the player or ours (props, ragdoll parts, grenades): class, model, position, speed,
+  awake/asleep, and its height above Skyrim's ground straight under it (`gmsky.Sweep` down from
+  2,000 units above; "no ground known" if its region hasn't arrived). A line the moment one first
+  goes more than 32 units below: `props: FELL THROUGH <model> at (...), ground z, prop z, speed`.
+  Logged once: gm_flatmap's real floor under the player (where props end up). On the client too:
+  how many client-only physics objects exist (client death ragdolls, gibs).
+  *Test:* spawn 5 props, drop a grenade, throw a prop with the physgun. *Expect:* each logs
+  `FELL THROUGH`. This is the number every later step must bring to zero.
+- **S1. Crash experiment: InfMap2's recipe on Skyrim's real triangles** (Skyrim + Garry's Mod,
+  as tests 12-15 crashed with). New Rust function `gmsky.RegionTris(rx, ry, rz)` (one region's
+  triangles, for Lua) and console command `gmsky_test_physground <old|infmap>`: every half second
+  it builds the regions around the player into one physics entity and removes the previous one,
+  **with the player colliding with it** (no filter; it sits exactly on top of the trace ground,
+  the same triangles). Each build is logged before and after, so a crash names the build. A fresh
+  Garry's Mod for each run:
+  1. *Control, `old`:* our tests 12-17 entity setup. We **expect a crash** within minutes (4 of 4
+     runs that built under a moving player crashed). If it survives 5 minutes / 600 builds of
+     walking, sprinting and jumping, the bug can't be reproduced this way: I say so and stop.
+  2. *`infmap`:* InfMap2's recipe exactly. *Pass:* no crash in 10 minutes / 1,200 builds.
+  3. *`infmap` with props:* a stack of props resting and one bouncing on the entity while it is
+     rebuilt under them. *Pass:* no crash; props stay on top.
+  If run 2 or 3 crashes, this route is blocked: I record it, write STATUS.md, and we decide
+  together. If run 2 passes, I can also (optional, your call) find which of InfMap2's settings is
+  the one that matters, by switching them off one at a time.
+- **S2. Physics ground from Skyrim's regions (`gmsky_ground physics`).** New file
+  `gmod/lua/gmsky/physground.lua`: InfMap2-style chunk entities, each holding the triangles of a
+  block of 2×2×2 Skyrim regions (1,024 Skyrim units, ~544 Garry's Mod units; about 150 entities
+  for today's area instead of 1,199; the size is a guess to tune from build times). Built on the
+  server and, from the same Rust store (one module per process), on the client. Nearest the
+  player first, then near other physics objects, at most 2 builds or 2 ms per tick. A chunk is
+  rebuilt only when one of its regions' triangles really changed (a per-region version number in
+  the store, so Skyrim's 1 s refresh of nearby regions doesn't rebuild unchanged ground).
+  The player's existing "waiting for Skyrim's collision" hold now waits for the chunk under its
+  feet. Switch: `gmsky_ground physics` / `shapes` (today's) for comparison only, one at a time,
+  never both; the trace field is off in physics mode.
+  *Logs, once a second:* chunks built / kept / removed, triangles, build ms (slowest), on both
+  sides; "player standing on physics ground"; holds. *Test:* the test 23 walk (a building's walls,
+  stairs, an arch, an interior through a load door, trees, fences, a fast physgun launch) in
+  physics mode. *Pass:* no crash, feels the same as `shapes`, holds rare and short.
+- **S3. Props, ragdolls and grenades on it.** Mostly free once S2 works. Added: a prop moving into
+  a chunk that isn't built yet is frozen for that moment and released with its speed (like the
+  player's hold; InfMap2 doesn't need this because it makes its terrain itself, instantly; we
+  wait for Skyrim's data). Chunks stay while a physics object rests on them, like InfMap2's
+  "remove when nothing is in it". Client-only physics (if S0 found any) collides with the client
+  copy. *Test:* S0's test. *Pass:* 0 `FELL THROUGH`; props rest, roll down slopes, stack; a
+  grenade bounces; a Garry's Mod ragdoll lands.
+- **S4. Props live in Skyrim's world and in Skyrim's save** (the user's choice, 2026-10-06; its
+  own steps P1-P5 below).
+- **S5. Remove the trace ground.** After you've confirmed S2-S3 in play: `gmsky_field`'s shapes
+  path, the ray-grid mode and their switches go; Skyrim's world is then only physics objects. The
+  Rust sweep stays only if something still uses it (S0's log; otherwise it goes too). Skyrim's
+  NPC stand-ins are trace-only and are not part of this plan (props hitting NPCs comes after).
+
+**S4 in detail: props saved in Skyrim's world and Skyrim's save (planned 2026-10-06).**
+The user's goal: place a prop in Windhelm, travel to Solitude and back, and the prop is still
+exactly where it was; saving and loading Skyrim keeps the props consistent with that save.
+
+*The rule that makes this robust:* a prop's real home is a **place in Skyrim**: a worldspace
+(Tamriel, an exterior) or an interior cell, plus a Skyrim position. Its Garry's Mod position is
+only worked out from that while you are near it. Windhelm and Solitude are far further apart than
+Garry's Mod's map can hold (about 200,000 Skyrim units ≈ 106,000 Garry's Mod units; the map holds
+±16,384), so props far away cannot stay in Garry's Mod at all. They are **unloaded** into a
+record and **loaded** back when you come near, the same way Skyrim itself unloads far cells.
+
+*Three states for every saved thing:*
+1. **Active:** a normal Garry's Mod entity, simulated, on built physics ground.
+2. **Waiting:** a Garry's Mod entity whose physics ground isn't built yet: frozen, speed kept
+   (S3's hold). A prop the player froze with the physgun stays frozen either way (a separate
+   "frozen by you" flag, so we never unfreeze it).
+3. **Unloaded:** only a record, no entity. Happens when it is more than 10,000 Skyrim units from
+   the player (≈ 5,300 Garry's Mod units, so with the player up to 8,000 from the map's middle it
+   still fits inside ±16,384), or in a different worldspace / cell (a load door). Loaded again
+   (as Waiting) when within 8,000 (the gap stops a prop flickering in and out at the edge).
+
+*What a record holds:* a permanent id; the place (worldspace or cell, by Skyrim form ID, saved
+in a load-order-safe way through SKSE's form ID resolving); the Skyrim position of the group's
+first entity; and the group itself as **Garry's Mod's own duplicator data** (the system Sandbox's
+saves and Advanced Duplicator use): model, skin, colour, material, bodygroups, frozen state,
+ragdoll poses, and the constraints (welds, ropes) between the entities, positions relative to the
+first entity. Using the duplicator means anything it can copy is saved the way Garry's Mod
+itself would, and constrained contraptions load and unload as one piece. Compressed
+(`util.Compress`). Not saved: things that only exist for a moment (grenades, AR2 balls, rockets,
+gibs), Garry's Mod NPCs (later, if wanted).
+
+*The re-centre* (the old S4 choice): option (a). Every Active and Waiting entity moves with the
+player by the same shift in the same tick (speeds kept, constrained groups together). Their
+Skyrim positions don't change, because the anchor moves by the same amount. InfMap2's chunk
+numbers (option b) are not needed: anything that wouldn't fit is unloaded instead.
+
+*Who keeps the records: Skyrim, inside its save.* Two ways were compared:
+- **(A) Everything in Skyrim's save (chosen, the robust one).** SKSE lets a plugin write its own
+  data next to each save (the "co-save", `.skse`, written and deleted together with the save by
+  SKSE). All records go in there. A save then carries its props wherever it goes (copied, cloud
+  synced, deleted), and loading an older save brings back exactly that save's props. Nothing is
+  written into the Garry's Mod install (AGENTS.md rule 4).
+- **(B) SkyCraft's planned way.** SkyCraft's design (`docs/DESIGN.md` §11, not built in SkyCraft)
+  stores only a save id in Skyrim's save and keeps the data on the other game's side, keyed by
+  that id. Smaller saves, but the two can drift apart (a copied or deleted save, a missing file),
+  and here it would mean writing into Garry's Mod's `data` folder.
+- Also considered: one invisible Skyrim object (a marker) per prop, so Skyrim's own save tracks
+  where it is. Rejected for now: two places to keep in step (the marker and our data), and more of
+  Skyrim's engine to get right.
+
+*How the records stay current (the protocol):* Skyrim holds every record in memory. Garry's Mod
+sends a record whenever a saved thing changes state (spawned, removed, unloaded, came to rest,
+frozen / unfrozen) and once a second for anything still moving, through a new byte ring Garry's
+Mod → Skyrim. When Skyrim saves, it first asks Garry's Mod for a final flush and waits up to
+250 ms for it (logged; if it times out the save uses records at most 1 s old, and says so). When a
+save is loaded, Skyrim tells Garry's Mod to remove every saved-thing entity **without** recording
+them (so the loaded save wins), then sends the records near the player. A new game starts empty.
+If Garry's Mod is restarted mid-session, Skyrim sends the records again. **Skyrim's save is the
+truth for the world's props; Garry's Mod is still the truth for the player** (AGENTS.md).
+
+*Collision far from the player:* Skyrim only collects collision ±2,800 Skyrim units around the
+player today. Active things farther out need ground too, so Skyrim also collects the regions
+around each Active, moving thing (it knows where they are from the records). Things at rest
+don't need it until something wakes them; they are Waiting until their ground is there.
+
+**P steps (after S3), each tested on its own:**
+- **P1. Skyrim position for every saved thing, and the re-centre moves them.** Logged every
+  second per thing: Garry's Mod position, Skyrim position (must not change during a re-centre).
+  *Test:* `gmsky_recentre_at 500`, place props, walk around. *Pass:* props stay put, Skyrim
+  positions identical (to 0.1 unit) before and after every re-centre.
+- **P2. Unload and load by distance and place, records kept in Garry's Mod for now.** *Test:*
+  place a prop and a welded contraption, walk 12,000 Skyrim units away (unload logged), come
+  back (load logged), then into a house and out again. *Pass:* same Skyrim position to 0.1 unit,
+  same rotation, welds intact.
+- **P3. Records in Skyrim.** The new ring; Skyrim's record table; Skyrim sends records back.
+  *Test:* place props, restart Garry's Mod only. *Pass:* props come back where they were.
+- **P4. Skyrim's save.** SKSE co-save writing / reading / clearing, the flush on save, clearing on
+  load. *Test:* your scenario: a prop in Windhelm, save, fast-travel to Solitude, place one there,
+  save, fast-travel back (the Windhelm prop is there), load the first save (no Solitude prop),
+  quit Skyrim and load again. *Pass:* every prop exactly where that save had it.
+- **P5. Collision around far moving things** (Skyrim harvests near Active things). *Test:* push a
+  prop down a long hill away from you. *Pass:* it rolls all the way, 0 `FELL THROUGH`.
+
+**Not sure:** whether Garry's Mod's duplicator gives positions relative to a chosen entity cleanly
+(`duplicator.SetLocalPos`); whether pasting re-creates every addon entity correctly (Sandbox
+props and ragdolls certainly, others depend on the addon); how big records get (estimate: under
+1 KB compressed per prop); whether SKSE's save callback can wait 250 ms without trouble.
+
+**Differences from InfMap2:** our triangles come from Skyrim (streamed, can arrive late, so holds)
+instead of a height function; chunks of 2×2×2 Skyrim regions (~544 units) instead of 20,000
+units; chunks rebuilt when Skyrim's data changes (InfMap2 never rebuilds); our re-centre plus
+unloading far props instead of chunk numbers; props saved in Skyrim's save (InfMap2 relies on
+Garry's Mod's own saves); no code copied (no licence).
+**Differences from SkyCraft:** SkyCraft adds Skyrim's shapes to Minecraft's collision query (one
+system there too); Garry's Mod's physics engine has no query to hook, so we build physics objects.
+SkyCraft has no crash to test for, no physics props, and no floating origin.
+SkyCraft's save design keeps only an id in Skyrim's save (and never built it); we keep the
+records themselves in Skyrim's co-save.
+
+**Not sure (to be answered by logs):** whether InfMap2's recipe avoids our crash (S1); build cost
+of Skyrim's densest regions (cities); whether the client's prediction matches the server's exactly
+when both build the same mesh; whether ~150 networked chunk entities cost much bandwidth (they
+never move); how player movement feels on physics meshes compared to the trace sweep (tests 10-16
+walked on them fine).
+
 ## 13. Repo layout
 
 ```

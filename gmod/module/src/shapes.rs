@@ -225,6 +225,34 @@ impl Store {
         self.regions.values().map(|r| r.stair_helpers as u64).sum()
     }
 
+    /// Every stored triangle touching the box lo..hi (relative to the anchor), at most `max`, for
+    /// building a Garry's Mod physics mesh (DESIGN.md "One collision system", S1). A shape touching
+    /// two regions comes from Skyrim in both; identical triangles (to 1/16 unit, same vertex
+    /// order) are returned once.
+    pub fn tris_in_box(&self, lo: [f64; 3], hi: [f64; 3], max: usize) -> Vec<[f64; 9]> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for r in self.regions.values() {
+            if (0..3).any(|k| r.lo[k] > hi[k] || r.lo[k] + r.size < lo[k]) {
+                continue;
+            }
+            for t in &r.tris {
+                if (0..3).any(|k| t.lo[k] > hi[k] || t.hi[k] < lo[k]) {
+                    continue;
+                }
+                let key: [i64; 9] = std::array::from_fn(|i| (t.v[i] * 16.0).round() as i64);
+                if !seen.insert(key) {
+                    continue;
+                }
+                if out.len() >= max {
+                    return out;
+                }
+                out.push(t.v);
+            }
+        }
+        out
+    }
+
     /// Triangles in the region containing p (for the log), or None if it hasn't arrived.
     pub fn tris_at(&self, p: [f64; 3]) -> Option<usize> {
         self.region_of(p).and_then(|k| self.regions.get(&k)).map(|r| r.tris.len())
@@ -437,6 +465,18 @@ mod tests {
         assert_eq!(f(s.sweep([0.0, 0.0, 37.0], [16.0, 16.0, 36.0], [100.0, 0.0, 0.0])), "nil");
         assert_eq!(f(s.sweep([0.0, 0.0, 30.0], [16.0, 16.0, 36.0], [0.0, 0.0, 10.0])), "nil");
         assert_eq!(f(s.sweep([0.0, 0.0, 30.0], [16.0, 16.0, 36.0], [0.0, 0.0, -10.0])), "0.0000 0.00 0.00 1.00");
+    }
+
+    #[test]
+    fn tris_in_box_dedupes_and_limits() {
+        let mut s = floor_store();
+        // The same floor sent again in the neighbouring region: still two triangles.
+        let tris = [[-100.0, -100.0, 0.0, 100.0, -100.0, 0.0, 100.0, 100.0, 0.0], [-100.0, -100.0, 0.0, 100.0, 100.0, 0.0, -100.0, 100.0, 0.0]];
+        s.apply(COL_REGION, &region_payload(1, 0, 0, 1, [136.0, -136.0, -136.0], 272.0, &tris));
+        assert_eq!(s.tris_in_box([-200.0; 3], [200.0; 3], 100).len(), 2);
+        assert_eq!(s.tris_in_box([-200.0; 3], [200.0; 3], 1).len(), 1);
+        // A box above the floor touches nothing.
+        assert_eq!(s.tris_in_box([-50.0, -50.0, 10.0], [50.0, 50.0, 20.0], 100).len(), 0);
     }
 
     #[test]

@@ -1547,3 +1547,63 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 **Result (logs):** "CAMERA FOV: Garry's Mod's 100.0 (4:3 width) on a 1.7778 screen -> Skyrim's 115.63"; every second Skyrim's frustum right 1.5890 = Garry's Mod's half-view tangent 1.5890 (335 of 335 lines): the two views are the same. Sun: 2 cascades, splits 1134 / 10100, cascade 1 from 934, radius 0.0060 uv.
 **Outdoor shadows:** comparison checked, not reversed. Likely too wide a radius for the sun's cascades (one uv radius shared with the indoor maps). Kept as is for now; added to the polish list in DESIGN.md with what to try.
 **Next:** the user's choice (G7 effects, props falling through the ground, polish, or G9 hands / HUD in Skyrim).
+## 2026-10-06 Plan: physics props on Skyrim's ground (plan only, no code)
+
+**Changed:** `docs/DESIGN.md`: new section "Physics props on Skyrim's ground": P0 measure (`FELL THROUGH` log), P1 crash experiment (`gmsky_test_physground`: control / collision filter on / props on it), P2 per-region physics ground from the Rust store, built only near physics objects, filtered from the player, P3 hold props until their ground exists, P4 props follow a re-centre, P5 client-side ragdolls. Fallbacks if P1 fails, and every difference from SkyCraft.
+**Why:** user: time to tackle props falling through the ground properly.
+**Read first:** SkyCraft `docs/DESIGN.md`: its items and mobs use Minecraft's collision query, so it has no method for a separate physics engine to copy. Our own history: tests 12-17 (`vphysics.dll` crash, new physics object under the moving player).
+**Tested how:** nothing to test (plan only).
+**Still broken / not tested:** everything in the plan. The key guess (a collision filter between the player and the physics ground avoids the crash) is unproven; P1 tests it.
+**Next:** the user's go-ahead, then P0.
+## 2026-10-06 Plan replaced: one collision system, InfMap2's way (plan only, no code)
+
+**Changed:** `docs/DESIGN.md`: the "Physics props on Skyrim's ground" section (two systems: trace ground for the player, physics ground for props) is replaced by "One collision system: Skyrim's world as Garry's Mod physics": S0 measure (`FELL THROUGH`), S1 crash experiment (`gmsky_test_physground old|infmap`, player colliding, control expected to crash), S2 InfMap2-style chunk entities from Skyrim's regions on server and client (`gmsky_ground physics`), S3 props/ragdolls/grenades with holds, S4 re-centre (user's choice: move everything, or InfMap2's chunk numbers), S5 remove the trace ground.
+**Why:** user: do it properly instead of two simultaneous systems; look at InfMap2 (`https://codeberg.org/googer/infmap2`).
+**Read first:** InfMap2 commit `8077c17`, cloned to `reference/infmap2` (gitignored): `lua/entities/inf_chunk.lua` (its terrain is `PhysicsFromMesh` chunk entities that everything collides with, with flags our tests 12-17 never set: `FVPHYSICS_CONSTRAINT_STATIC`, `FVPHYSICS_NO_SELF_COLLISIONS`, mass 50000, `FL_STATICPROP`, `FSOLID_FORCE_WORLD_ALIGNED`), `ish/physics.lua` (`ShouldCollide` by chunk), `isv/map.lua`, `isv/wrapping.lua`, `isv/contraptions.lua`. **No licence file:** ideas only, no code copied.
+**Tested how:** nothing to test (plan only).
+**Still broken / not tested:** all of it. Whether InfMap2's recipe avoids our `vphysics.dll` crash is unknown; S1 tests it before anything else is built.
+**Next:** the user's go-ahead and S4 choice, then S0.
+## 2026-10-06 Plan: props saved in Skyrim's world and save (S4 / P1-P5); S0 measurement built (not tested in game)
+
+**Changed (plan):** `docs/DESIGN.md` "One collision system": S4 is now "props live in Skyrim's world and in Skyrim's save": a prop's home is a Skyrim place (worldspace or interior cell + Skyrim position); Active / Waiting / Unloaded states (unload beyond 10,000 Skyrim units or in another place, load within 8,000); records hold Garry's Mod's own duplicator data (constraints included); the re-centre moves Active and Waiting things (option a); records kept by Skyrim in SKSE's co-save (chosen over SkyCraft's planned "id in the save, data on the other side", and over invisible Skyrim markers); flush on save, clear-then-resend on load. Steps P1-P5 with tests, ending with the user's Windhelm / Solitude scenario.
+**Changed (S0, code):** new `gmod/lua/gmsky/props.lua`, included by `server.lua` and `client.lua`. Measurement only, changes nothing in play. Server: every tick, each free physics object (move type VPHYSICS, not ours, not parented) has its centre's movement since the last tick tested as a line against Skyrim's triangles (`gmsky.Sweep`, zero-size box); crossing a floor going down logs `props: FELL THROUGH`, anything else `props: PASSED THROUGH` (first 20 in full, then counted). Not tested on a tick where the anchor changed. Once a second: watched / awake counts, crossings this second and in total, and up to 6 objects with position, speed, awake, height above Skyrim's ground below (or "NO Skyrim surface within 4000 below" / "not arrived"), height above gm_flatmap's own floor. Once: the map's floor under the player. Client: the same for client-only physics objects (entity index below 0).
+**Why:** S0 of the plan: a number for "props fall through" before anything is fixed.
+**Tested how:** `cargo build --release`; `gmod_harness.exe`.
+**Result:** HARNESS PASSED (196 checks); both sides load `props.lua` without errors (the harness has no physics objects, so no `props:` lines).
+**Not tested in game.** Not sure: whether the client's entity list includes client-only ragdolls; the line tests add a few sweeps to the shapes status' count (said in the line).
+**Next:** in-game test 99 (S0), then S1.
+## 2026-10-06 In-game test 100 (S0, logs `build/logs-ingame-test-100/`): every prop falls through, as expected
+
+(The launcher had already saved an earlier unsaved run as `logs-ingame-test-99`; this run is 100.)
+**Tested how:** user spawned props and threw things, about 70 s, Skyrim + Garry's Mod.
+**Result (server log, 93 `props:` lines, 0 errors):** 25 objects watched at most, up to 20 awake at once. **67 FELL THROUGH, 8 PASSED THROUGH** in total; detailed lines (first 20) for bluebarrel001 (15), canister01a (2), canister02a (2), oildrum001_explosive (1). Typical: crossed Skyrim's ground at speed 179-215, a few units below the surface, normal (0.07, -0.12, 0.99). Many objects crossed **2-3 surfaces** on the way down (Skyrim's collision has several layers stacked under the ground there). gm_flatmap's own floor is at z -16,288; the player at z 15.6: every prop ended **resting on the map's floor ~16,300 units below**, asleep ("13 above the map's floor").
+**Client:** no `props:` lines: no client-only physics objects were seen (none made, or the client's entity list doesn't show them: not known yet).
+**Gap in the log:** only the first 6 objects were listed per second (all barrels), so whether the grenade was watched can't be told. Fixed below (per-class counts).
+**Next:** S1.
+
+## 2026-10-06 S1 crash experiment built (not tested in game)
+
+**Changed:**
+- `gmod/module/src/shapes.rs`: `Store::tris_in_box(lo, hi, max)`: every stored triangle touching a box, duplicates (the same triangle sent in two regions) removed, at most `max`. Test `tris_in_box_dedupes_and_limits`.
+- `gmod/module/src/lib.rs`: `gmsky.TrisInBox(lx, ly, lz, hx, hy, hz, max)` -> flat list (9 numbers per triangle), count.
+- New `gmod/lua/gmsky/physground.lua` (both sides): entity `gmsky_physground_test` and console command `gmsky_test_physground old|infmap|off`. Every 0.5 s the server builds a physics mesh (`PhysicsFromMesh`) of Skyrim's triangles within 768 x 768 x 512 units of the player's feet, at the anchor, and then removes the previous one; the client builds its copy from the same store. The player collides with it (no filter). `old` = tests 12-17's setup (commit 911fb85, same calls in the same order); `infmap` = InfMap2's chunk setup as described in DESIGN.md (mass 50000, `FVPHYSICS_CONSTRAINT_STATIC`, `FVPHYSICS_NO_SELF_COLLISIONS`, `FSOLID_FORCE_WORLD_ALIGNED`, `FL_STATICPROP`, `EFL_KEEP_ON_RECREATE_ENTITIES`) plus, as InfMap2 does, custom collision checks on the player and every physics object (undone on `off`). Logs: each build before (`physground: build N (recipe): T triangles ...; player feet ..., speed, on the ground / in the air, on <entity>...`) and after (`built N in X ms: PhysicsFromMesh=..., solid, flags, mass, game flags`); every 5 s: builds, triangles, slowest ms, `ShouldCollide` calls, what the player stood on (ticks per entity class). A re-centre rebuilds at once.
+- `gmod/lua/gmsky/props.lua`: the status line counts every watched class.
+**Why:** S1 of the plan: does InfMap2's setup avoid tests 12-17's `vphysics.dll` crash?
+**Tested how:** `cargo test --release --workspace` (all pass, 22 + 12 module/protocol tests); `cargo build --release`; `gmod_harness.exe`: HARNESS PASSED (196 checks), both sides load `physground.lua`.
+**Not tested in game.** The harness has no physics, so `PhysicsFromMesh` and the flags only run in the real game. Not sure: that the client reads the box before building (it builds as soon as the recipe arrives); duplicates removed only when the vertex order matches.
+**Next:** in-game tests 101-103 (S1 runs 1-3).
+## 2026-10-06 In-game tests 101-103 (S1 runs 1-2): both setups crash the same way. InfMap2's setup does NOT avoid the crash. Stopped, STATUS.md written
+
+**Logs:** `build/logs-ingame-test-101/` and `-102/` are the same run saved twice (identical files): run 1, `old`. `build/logs-ingame-test-103/` (saved by the launcher): run 2, `infmap`. Dumps: `GarrysMod/crashes/gmod_win64_20261006_022401_1_accessviolation.mdmp` (old), `..._022524_...` (infmap), read with scratchpad `dump.py` (read-only).
+**Result:**
+- **Run 1, `old`:** crashed on **build 5** (about 5 s in). Builds 1-4: 3,266-3,274 triangles each, player standing still at home (feet exactly on the surface), on `gmsky_field`. Build 5: 3,281 triangles, player walking (speed 209) and standing on the previous test mesh (`on gmsky_physground_test`).
+- **Run 2, `infmap`:** crashed on **build 6** (about 3.5 s of building). Builds 1-6: 3,223-3,229 triangles, player **standing still** (speed 0) at home the whole time, mostly on `gmsky_field`, 35 of 157 ticks on the test mesh. `ShouldCollide` was called (2,578 times in 2 s), so the custom collision checks were active.
+- **Both dumps are tests 12-17's crash exactly:** write past a block at `vphysics.dll+0xaaff0`, `rbp=0xfffd`, `r12=0xffff`, `r13=0xfffe`, `rcx=0x2fff7` (the 16-bit list full), the same inner chain (`0x97c9b`, `0x99523`, `0x97912`, `0x977b8`, `0x96cea` ... `0xa0728`, `0x98cfc`) up to `server.dll+0x2eb909` (`CollisionRulesChanged`).
+- **The Lua error the user saw:** almost certainly ours, in the "built" log line after each build: `PhysObj:GetGameFlags` doesn't exist. Not a single "built" line was written, for any build, on either side. It ran after every setup call, so it didn't change what was built and isn't the crash. **Fixed:** the line uses `HasGameFlag` for the two flags. User asked to paste the error to confirm.
+**What's new compared with tests 12-17:**
+1. **The player doesn't have to move.** Run 2 crashed with the player standing still (speed 0) for every build. The leading explanation since test 15 ("a new mesh under the *moving* player") is wrong or incomplete.
+2. **It crashes within 5-6 builds**, much faster than before (tests 12-15 needed a whole second grid). What differs: each new mesh here is **built exactly on top of the previous one** (the same triangles in the same place: the player stood still, and the old one is removed only after the new one exists, and Garry's Mod deletes removed entities at the end of the tick) while the player touches them; ~3,200 triangles each (pieces were 512).
+3. InfMap2's settings (mass, static and no-self-collision flags, static-prop flag, custom collision checks) make no difference.
+**Fits every run so far (not proven):** the crash needs a new mesh created **overlapping an existing mesh** at a place where **something touches both** (the player). Test 16 (pieces never overlap; 272 builds) never crashed; the overlap experiment of 2026-10-04 (overlap, nobody touching) survived; tests 12-15 rebuilt pieces where old pieces still were, under the player. InfMap2 never overlaps two meshes in the same chunk, which may be why it doesn't crash.
+**Per AGENTS.md and the plan:** two setups have failed; stopped. STATUS.md "The current problem" rewritten with this evidence and the next experiments. Waiting for the user.
+**Tested how (the fix):** `gmod_harness.exe`: HARNESS PASSED.

@@ -183,7 +183,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 47] = [
+    let funcs: [(&str, lua::CFn); 48] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -201,6 +201,7 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("ShapesKnown", l_shapes_known),
         ("ShapesBounds", l_shapes_bounds),
         ("ShapesStatus", l_shapes_status),
+        ("TrisInBox", l_tris_in_box),
         ("GraphicsInfo", l_graphics_info),
         ("WriteLogFile", l_write_log_file),
         ("D3DState", l_d3d_state),
@@ -947,6 +948,34 @@ unsafe extern "C" fn l_sweep(l: *mut State) -> c_int {
             }
             None => 0,
         }
+    })
+}
+
+/// gmsky.TrisInBox(lx, ly, lz, hx, hy, hz, max) -> list, count: Skyrim's triangles touching the
+/// box (relative to the anchor) as a flat list of numbers, 9 per triangle (3 corners x, y, z),
+/// at most `max` triangles, duplicates removed. Empty when not anchored to the store's epoch.
+unsafe extern "C" fn l_tris_in_box(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let n = |i: c_int| (a.tonumber)(l, i);
+        let max = n(7).max(0.0) as usize;
+        let epoch = anchored_epoch();
+        let tris = with_shapes(|st| {
+            if epoch == 0 || st.origin_epoch != epoch {
+                return Vec::new();
+            }
+            st.tris_in_box([n(1), n(2), n(3)], [n(4), n(5), n(6)], max)
+        });
+        (a.createtable)(l, (tris.len() * 9) as c_int, 0);
+        let mut i = 1;
+        for t in &tris {
+            for v in t {
+                (a.pushnumber)(l, *v);
+                (a.rawseti)(l, -2, i);
+                i += 1;
+            }
+        }
+        (a.pushnumber)(l, tris.len() as f64);
+        2
     })
 }
 

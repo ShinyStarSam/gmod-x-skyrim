@@ -27,6 +27,10 @@ gmsky.Include("respawn")
 gmsky.Include("water")
 -- Geometry route step G6: marks what the player holds, so Skyrim places it relative to its camera.
 gmsky.Include("render")
+-- Step S0 (one collision system): physics objects against Skyrim's ground (log only).
+gmsky.Include("props")
+-- Step S1 (one collision system): physics ground experiment (gmsky_test_physground).
+gmsky.Include("physground")
 if GetPlayer() and T then T.home = T.MeasureRoom(GetPlayer():GetPos() + Vector(0, 0, 40)) end
 local anchored = 0 -- the origin epoch Garry's Mod is anchored to
 local inputOn = false -- input comes from Skyrim's window right now
