@@ -1,0 +1,452 @@
+-- gmsky physics chunks (step S2, DESIGN.md "S2 in detail"). Runs on both sides (server.lua and
+-- client.lua include it).
+--
+-- With `gmsky_ground physics`, Skyrim's collision triangles become Garry's Mod physics objects:
+-- one `gmsky_chunk` entity per block of gmsky_chunk_regions^3 Skyrim regions on a fixed lattice,
+-- every triangle cut exactly at the chunk's faces so chunks never overlap. The player, bullets and
+-- props all collide with them (one system; the trace field is off in this mode, terrain.lua).
+-- InfMap2's chunk recipe (https://codeberg.org/googer/infmap2, lua/entities/inf_chunk.lua; no
+-- licence file, so the recipe is written from DESIGN.md's description, no code copied).
+--
+-- The rule from tests 101-117: a chunk is never built while an earlier mesh of the same chunk is
+-- still in the physics engine. PhysicsDestroy / Remove leave the engine object for ~7 more ticks
+-- (test 117), and a new mesh built over it overflowed vphysics.dll's pair-record list (test 116).
+-- The module checks the engine's memory, read only (gmsky.PhysAddress / gmsky.PhysAlive).
+--
+-- The server decides which chunks exist (all of Skyrim's collection window around the player,
+-- once every region of a chunk has arrived) and rebuilds one only when its regions' content
+-- fingerprint changes (gmsky.ShapesChunkVersion). Each side builds its own physics from the shared
+-- Rust store (one module per process). Logs: gmod_server.log / gmod_client.log.
+
+local gmsky = gmsky
+local C = gmsky.chunks or {}
+gmsky.chunks = C
+
+local RADIUS, BELOW, ABOVE = 5, 3, 2 -- Skyrim's collection window in regions (Collision.cpp kRadius, kBelow, kAbove)
+local BUDGET_MS = 3                  -- builds per tick (server) / frame (client) until this much time is spent; at least one
+local MAX_TRIS = 127474              -- per mesh (as S1c; not sure it binds physics meshes)
+local FALLBACK_TICKS = 10            -- without gmsky.PhysAlive: wait this long after a destroy (test 117 measured 7)
+
+C.chunks = C.chunks or {}            -- server: key -> { ent, ver, empty, tris, big }
+C.stats = C.stats or { builds = 0, rebuilds = 0, removed = 0, empties = 0, engineWaits = 0, worst = 0, tris = 0, mostTris = 0, moved = 0 }
+
+local function Key(cx, cy, cz) return cx .. " " .. cy .. " " .. cz end
+
+-- ---- meshes still in the engine ----------------------------------------------------------------
+-- address ("0x...") -> { key, name, t0, tick0 }. Per side (each Lua state has its own).
+C.dead = C.dead or {}
+
+-- Every physics object's address -> name (to tell a freed and reused address from a lingering
+-- object).
+local function Owners()
+	local owners = {}
+	for _, ent in ipairs(ents.GetAll()) do
+		if IsValid(ent) then
+			for i = 0, math.max(ent:GetPhysicsObjectCount(), 1) - 1 do
+				local p = ent:GetPhysicsObjectNum(i)
+				if not IsValid(p) and i == 0 then p = ent:GetPhysicsObject() end
+				if IsValid(p) then
+					local a = gmsky.PhysAddress(p)
+					if a then owners[a] = string.format("%s %d", ent:GetClass(), ent:EntIndex()) end
+				end
+			end
+		end
+	end
+	return owners
+end
+
+-- Call just before a mesh's physics goes (PhysicsDestroy, or in OnRemove). `key` groups meshes
+-- of the same place; `lo`, `hi` (optional): the mesh's box in Garry's Mod's world, so a new mesh
+-- overlapping it waits even under another key (test 118: after a fast travel the chunk numbers
+-- mean other places, and new chunks were built over the old ones still in the engine). `why` is
+-- for the log.
+function C.Destroyed(key, name, phys, why, lo, hi)
+	if not IsValid(phys) then return end
+	local addr = gmsky.PhysAddress and gmsky.PhysAddress(phys)
+	C.dead[addr or ("tick " .. engine.TickCount() .. " " .. name)] = { key = key, name = name, t0 = SysTime(), tick0 = engine.TickCount(),
+		noaddr = not addr, lo = lo, hi = hi }
+	gmsky.Log(string.format("chunks: %s (%s) leaves the physics engine (%s)%s", name, tostring(addr), why,
+		lo and string.format("; world box (%.0f, %.0f, %.0f) - (%.0f, %.0f, %.0f)", lo.x, lo.y, lo.z, hi.x, hi.y, hi.z) or ""))
+end
+
+-- Boxes overlap by more than half a unit (chunks sharing a face don't count).
+local function Overlap(alo, ahi, blo, bhi)
+	return alo.x < bhi.x - 0.5 and blo.x < ahi.x - 0.5 and alo.y < bhi.y - 0.5 and blo.y < ahi.y - 0.5
+		and alo.z < bhi.z - 0.5 and blo.z < ahi.z - 0.5
+end
+
+-- nil if no old mesh of `key`, and none overlapping the world box `lo`-`hi` (if given), is still in
+-- the engine (each departure logged once); otherwise a line naming those still there. Gone = no
+-- longer looks alive, or its address now belongs to another physics object (freed and reused).
+function C.StillInEngine(key, lo, hi)
+	local mine = {}
+	for addr, d in pairs(C.dead) do
+		if d.key == key or (lo and d.lo and Overlap(lo, hi, d.lo, d.hi)) then mine[#mine + 1] = addr end
+	end
+	if #mine == 0 then return nil end
+	local owners = gmsky.PhysAlive and Owners() or {}
+	local still = {}
+	for _, addr in ipairs(mine) do
+		local d = C.dead[addr]
+		local ms, ticks = (SysTime() - d.t0) * 1000, engine.TickCount() - d.tick0
+		local alive, live, slots = false, 0, 0
+		if d.noaddr or not gmsky.PhysAlive then
+			alive = ticks < FALLBACK_TICKS
+		elseif not owners[addr] then
+			alive, live, slots = gmsky.PhysAlive(addr)
+		end
+		if alive then
+			still[#still + 1] = string.format("%s (%s, its list %d/%d, %.0f ms / %d ticks ago)", d.name, addr, live, slots, ms, ticks)
+		else
+			gmsky.Log(string.format("chunks: %s (%s) gone from the engine %.0f ms, %d ticks after it was destroyed (%s)", d.name, addr, ms, ticks,
+				owners[addr] and ("its memory now belongs to " .. owners[addr]) or (d.noaddr or not gmsky.PhysAlive) and string.format("no address: waited %d ticks", FALLBACK_TICKS) or "no longer looks alive"))
+			C.dead[addr] = nil
+		end
+	end
+	return #still > 0 and table.concat(still, "; ") or nil
+end
+
+-- ---- the chunk entity --------------------------------------------------------------------------
+
+local ENT = {}
+ENT.Type = "anim"
+ENT.Base = "base_anim"
+ENT.Spawnable = false
+
+function ENT:SetupDataTables()
+	self:NetworkVar("Int", 0, "CX")         -- the chunk's place on the lattice
+	self:NetworkVar("Int", 1, "CY")
+	self:NetworkVar("Int", 2, "CZ")
+	self:NetworkVar("Int", 3, "N")          -- regions per side
+	self:NetworkVar("String", 0, "Version") -- the server's fingerprint of its regions when built
+	self:NetworkVar("Vector", 0, "BoxLo")   -- the chunk's box, relative to the anchor
+	self:NetworkVar("Vector", 1, "BoxHi")
+end
+
+function ENT:UpdateTransmitState()
+	return TRANSMIT_ALWAYS -- the client needs it for movement prediction
+end
+
+function ENT:ChunkKey() return Key(self:GetCX(), self:GetCY(), self:GetCZ()) end
+function ENT:ChunkName() return string.format("chunk %d %d %d", self:GetCX(), self:GetCY(), self:GetCZ()) end
+
+-- Builds the physics. False (and the reason) if it can't yet: an earlier mesh of this chunk is
+-- still in the engine. The server passes its triangles (already read) in `flat`.
+function ENT:Build(flat, n)
+	local key, name = self:ChunkKey(), self:ChunkName()
+	local lo, hi = self:GetBoxLo(), self:GetBoxHi()
+	local wlo, whi = self:GetPos() + lo, self:GetPos() + hi
+	local still = C.StillInEngine(key, wlo, whi)
+	if still then return false, still end
+	if CLIENT then
+		-- The server never has two chunks in one place, but the client may see a new chunk before
+		-- the old one's removal arrives: wait for it too.
+		for _, e in ipairs(ents.FindByClass("gmsky_chunk")) do
+			if e ~= self and e.gmskyBuilt and IsValid(e:GetPhysicsObject())
+				and Overlap(wlo, whi, e:GetPos() + e:GetBoxLo(), e:GetPos() + e:GetBoxHi()) then
+				return false, string.format("%s, an older chunk entity here, still has its physics", e:ChunkName())
+			end
+		end
+	end
+	local t0 = SysTime()
+	if not flat then
+		local N = self:GetN()
+		local _, _, ver = gmsky.ShapesChunkVersion(self:GetCX() * N, self:GetCY() * N, self:GetCZ() * N,
+			self:GetCX() * N + N - 1, self:GetCY() * N + N - 1, self:GetCZ() * N + N - 1)
+		if ver ~= self:GetVersion() then
+			C.mismatches = (C.mismatches or 0) + 1
+			gmsky.Log(string.format("chunks: %s: this side's regions differ from the server's (fingerprint %s here, %s there); built from this side's",
+				name, tostring(ver), self:GetVersion()))
+		end
+		flat, n = gmsky.TrisInBox(lo.x, lo.y, lo.z, hi.x, hi.y, hi.z, MAX_TRIS + 1, true)
+	end
+	if n == 0 or n > MAX_TRIS then
+		gmsky.Log(string.format("chunks: %s: %d triangles on this side: not built", name, n))
+		self.gmskyBuilt = true
+		return true
+	end
+	local verts = {}
+	for i = 1, n * 9, 3 do verts[#verts + 1] = { pos = Vector(flat[i], flat[i + 1], flat[i + 2]) } end
+	-- InfMap2's chunk recipe, in its order.
+	self:PhysicsDestroy()
+	local ok = self:PhysicsFromMesh(verts)
+	self:SetSolid(SOLID_VPHYSICS)
+	self:SetMoveType(MOVETYPE_NONE)
+	self:EnableCustomCollisions(true)
+	local phys = self:GetPhysicsObject()
+	if IsValid(phys) then
+		phys:EnableMotion(false)
+		phys:SetMass(50000)
+		phys:AddGameFlag(FVPHYSICS_CONSTRAINT_STATIC)
+		phys:AddGameFlag(FVPHYSICS_NO_SELF_COLLISIONS)
+	end
+	self:DrawShadow(false)
+	self:AddSolidFlags(FSOLID_FORCE_WORLD_ALIGNED)
+	self:AddFlags(FL_STATICPROP)
+	self:AddEFlags(EFL_KEEP_ON_RECREATE_ENTITIES)
+	self.gmskyBuilt, self.gmskyTris = true, n
+	local ms = (SysTime() - t0) * 1000
+	local s = C.stats
+	s.builds, s.tris = s.builds + 1, s.tris + n
+	s.worst, s.mostTris = math.max(s.worst, ms), math.max(s.mostTris, n)
+	if not ok or not IsValid(phys) then
+		gmsky.Log(string.format("chunks: %s: PhysicsFromMesh FAILED (%s, physics object %s), %d triangles", name, tostring(ok), tostring(IsValid(phys)), n))
+	else
+		-- The address lets a crash dump's register be matched to a chunk.
+		gmsky.Log(string.format("chunks: built %s (%s): %d triangles, %.1f ms", name, tostring(gmsky.PhysAddress and gmsky.PhysAddress(phys)), n, ms))
+	end
+	return true
+end
+
+function ENT:Initialize()
+	self:DrawShadow(false)
+	-- The server builds in C.Update, right after spawning; the client in Think.
+end
+
+function ENT:OnRemove()
+	if not self.gmskyRetired then
+		C.Destroyed(self:ChunkKey(), self:ChunkName(), self:GetPhysicsObject(), "entity removed", self:GetPos() + self:GetBoxLo(), self:GetPos() + self:GetBoxHi())
+	end
+end
+
+-- Server: a chunk goes. Its mesh is recorded and its physics destroyed now, before Remove (which
+-- finishes at the end of the tick), so a new mesh of the same chunk built in this same tick
+-- already finds the old one in C.StillInEngine.
+function C.Retire(ent, why)
+	if not IsValid(ent) then return end
+	C.Destroyed(ent:ChunkKey(), ent:ChunkName(), ent:GetPhysicsObject(), why, ent:GetPos() + ent:GetBoxLo(), ent:GetPos() + ent:GetBoxHi())
+	ent.gmskyRetired = true
+	ent:PhysicsDestroy()
+	ent:Remove()
+end
+
+if CLIENT then
+	-- Client builds share a per-frame budget; waits for the engine are logged once per chunk.
+	function ENT:Think()
+		if not self.gmskyBuilt and self:GetN() > 0 then
+			local f = FrameNumber()
+			if C.frame ~= f then C.frame, C.spent, C.frameBuilds = f, 0, 0 end
+			if C.frameBuilds == 0 or C.spent < BUDGET_MS then
+				local t0 = SysTime()
+				local ok, why = self:Build()
+				C.spent, C.frameBuilds = C.spent + (SysTime() - t0) * 1000, C.frameBuilds + 1
+				if not ok then
+					C.stats.engineWaits = C.stats.engineWaits + 1
+					if not self.gmskyWaitLogged then
+						self.gmskyWaitLogged = true
+						gmsky.Log(string.format("chunks: %s waits on this side: still in the engine: %s", self:ChunkName(), why))
+					end
+				end
+			end
+		end
+		-- Follow the entity (re-centre): the physics object doesn't move by itself.
+		local phys = self:GetPhysicsObject()
+		if self.gmskyBuilt and IsValid(phys) then
+			local want = self:GetPos()
+			if phys:GetPos():DistToSqr(want) > 0.0001 then
+				phys:SetPos(want)
+				C.stats.moved = C.stats.moved + 1
+			end
+		end
+		self:SetNextClientThink(CurTime())
+		return true
+	end
+end
+
+scripted_ents.Register(ENT, "gmsky_chunk")
+
+-- Chunks can't be picked up or removed with tools.
+hook.Add("PhysgunPickup", "gmsky_chunks", function(_, ent) if IsValid(ent) and ent:GetClass() == "gmsky_chunk" then return false end end)
+hook.Add("CanTool", "gmsky_chunks", function(_, tr) if IsValid(tr.Entity) and tr.Entity:GetClass() == "gmsky_chunk" then return false end end)
+
+-- Once a second, if anything happened: this side's chunk numbers.
+function C.StatusLine()
+	local s = C.stats
+	local built, waiting = 0, 0
+	for _, e in ipairs(ents.FindByClass("gmsky_chunk")) do
+		if e.gmskyBuilt then built = built + 1 else waiting = waiting + 1 end
+	end
+	local dead = 0
+	for _ in pairs(C.dead) do dead = dead + 1 end
+	local line = string.format("chunks: %d entities (%d built, %d not built yet), %d old meshes still in the engine; this second: %d builds (%d triangles, most %d, slowest %.1f ms), %d engine waits, %d physics moved to their entity%s",
+		built + waiting, built, waiting, dead, s.builds, s.tris, s.mostTris, s.worst, s.engineWaits, s.moved,
+		C.mismatches and string.format(", fingerprint mismatches so far %d", C.mismatches) or "")
+	s.builds, s.tris, s.mostTris, s.worst, s.engineWaits, s.moved = 0, 0, 0, 0, 0, 0
+	return line
+end
+
+if CLIENT then
+	timer.Create("gmsky_chunks_status", 1, 0, function()
+		if #ents.FindByClass("gmsky_chunk") == 0 and next(C.dead) == nil then return end
+		gmsky.Log(C.StatusLine())
+	end)
+end
+
+-- ---- the server: which chunks exist ------------------------------------------------------------
+
+if SERVER then
+	C.size = C.size or CreateConVar("gmsky_chunk_regions", "2", FCVAR_ARCHIVE,
+		"gmsky_ground physics: chunk size in Skyrim regions per side (read when the chunks are cleared)")
+	C.N = C.N or math.max(1, math.floor(C.size:GetFloat()))
+	C.waitingRegions = 0
+
+	-- Removes every chunk (new origin, a switch of ground mode).
+	function C.Clear(why)
+		local n = 0
+		for _, rec in pairs(C.chunks) do
+			if IsValid(rec.ent) then C.Retire(rec.ent, why) n = n + 1 end
+		end
+		C.chunks = {}
+		C.N = math.max(1, math.floor(C.size:GetFloat()))
+		if n > 0 then gmsky.Log(string.format("chunks: all %d chunk entities removed (%s); chunk size now %d regions", n, why, C.N)) end
+	end
+
+	-- The chunk box (relative to the anchor) of chunk (cx, cy, cz).
+	local function Box(bx, by, bz, size, cx, cy, cz)
+		local w = C.N * size
+		local lo = Vector(bx + cx * w, by + cy * w, bz + cz * w)
+		return lo, lo + Vector(w, w, w)
+	end
+
+	-- Every chunk overlapping the player's footprint (from 64 below its feet to 72 above) is
+	-- built or known empty. p is relative to the anchor.
+	function C.ReadyAt(p)
+		local bx, by, bz, size = gmsky.ShapesLattice()
+		if not bx then return false end
+		local w = C.N * size
+		local function c(v, b) return math.floor((v - b) / w) end
+		for cx = c(p.x - 16, bx), c(p.x + 16, bx) do
+			for cy = c(p.y - 16, by), c(p.y + 16, by) do
+				for cz = c(p.z - 64, bz), c(p.z + 72, bz) do
+					local rec = C.chunks[Key(cx, cy, cz)]
+					if not rec or not (rec.empty or rec.big or (IsValid(rec.ent) and rec.ent.gmskyBuilt)) then return false end
+				end
+			end
+		end
+		return true
+	end
+
+	-- Re-centre: every chunk and its physics to the new anchor in the same tick. The shift is at
+	-- least gmsky_recentre_at (8,000) units, further than the chunks reach, so no chunk lands on
+	-- one that hasn't moved yet.
+	function C.MoveAll(anchor)
+		local n, worst = 0, 0
+		for _, rec in pairs(C.chunks) do
+			if IsValid(rec.ent) then
+				rec.ent:SetPos(anchor)
+				local phys = rec.ent:GetPhysicsObject()
+				if IsValid(phys) then
+					phys:SetPos(anchor)
+					worst = math.max(worst, phys:GetPos():Distance(anchor))
+				end
+				n = n + 1
+			end
+		end
+		gmsky.Log(string.format("chunks: re-centre: %d chunks and their physics moved to the new anchor (%.1f, %.1f, %.1f); largest physics position error after the move %.3f units",
+			n, anchor.x, anchor.y, anchor.z, worst))
+	end
+
+	-- Every tick in physics mode (terrain.lua). a = the anchor.
+	function C.Update(ply, a)
+		local bx, by, bz, size = gmsky.ShapesLattice()
+		if not bx then return end
+		local p = ply:GetPos() - a
+		local N = C.N
+		local function r(v, b) return math.floor((v - b) / size) end
+		local prx, pry, prz = r(p.x, bx), r(p.y, by), r(p.z, bz)
+		local function c(region) return math.floor(region / N) end
+		local x0, x1 = c(prx - RADIUS), c(prx + RADIUS)
+		local y0, y1 = c(pry - RADIUS), c(pry + RADIUS)
+		local z0, z1 = c(prz - BELOW), c(prz + ABOVE)
+		local todo = {}
+		C.waitingRegions = 0
+		for cx = x0, x1 do
+			for cy = y0, y1 do
+				for cz = z0, z1 do
+					local key = Key(cx, cy, cz)
+					local arrived, total, ver = gmsky.ShapesChunkVersion(cx * N, cy * N, cz * N, cx * N + N - 1, cy * N + N - 1, cz * N + N - 1)
+					local rec = C.chunks[key]
+					if arrived < total then
+						if not rec then C.waitingRegions = C.waitingRegions + 1 end
+					elseif not rec or rec.ver ~= ver then
+						if rec then
+							-- Skyrim's triangles here changed: the old mesh goes, the new one waits
+							-- until the engine has let go of it.
+							C.stats.rebuilds = C.stats.rebuilds + 1
+							gmsky.Log(string.format("chunks: chunk %s changed (fingerprint %s -> %s): rebuilding; player %s",
+								key, tostring(rec.ver), ver, rec.empty and "-" or string.format("%.0f units from it", (Vector(cx + 0.5, cy + 0.5, cz + 0.5) * N * size + Vector(bx, by, bz)):Distance(p))))
+							C.Retire(rec.ent, "its triangles changed")
+							C.chunks[key] = nil
+						end
+						local lo, hi = Box(bx, by, bz, size, cx, cy, cz)
+						local d = math.max(lo.x - p.x, 0, p.x - hi.x) ^ 2 + math.max(lo.y - p.y, 0, p.y - hi.y) ^ 2 + math.max(lo.z - p.z, 0, p.z - hi.z) ^ 2
+						todo[#todo + 1] = { key = key, cx = cx, cy = cy, cz = cz, ver = ver, lo = lo, hi = hi, d = d }
+					end
+				end
+			end
+		end
+		-- Nearest first, until the budget is spent (at least one build).
+		table.sort(todo, function(u, v) return u.d < v.d end)
+		local t0, built = SysTime(), 0
+		for _, t in ipairs(todo) do
+			if built > 0 and (SysTime() - t0) * 1000 >= BUDGET_MS then break end
+			local still = C.StillInEngine(t.key, a + t.lo, a + t.hi)
+			if still then
+				C.stats.engineWaits = C.stats.engineWaits + 1
+			else
+				local flat, n = gmsky.TrisInBox(t.lo.x, t.lo.y, t.lo.z, t.hi.x, t.hi.y, t.hi.z, MAX_TRIS + 1, true)
+				if n == 0 then
+					C.chunks[t.key] = { ver = t.ver, empty = true }
+					C.stats.empties = C.stats.empties + 1
+				elseif n > MAX_TRIS then
+					C.chunks[t.key] = { ver = t.ver, big = true }
+					gmsky.Log(string.format("chunks: chunk %s has %d triangles, more than %d: NOT built", t.key, n, MAX_TRIS))
+				else
+					local e = ents.Create("gmsky_chunk")
+					e:SetCX(t.cx) e:SetCY(t.cy) e:SetCZ(t.cz) e:SetN(N)
+					e:SetVersion(t.ver)
+					e:SetBoxLo(t.lo) e:SetBoxHi(t.hi)
+					e:SetPos(a)
+					e:SetAngles(Angle(0, 0, 0))
+					e:Spawn()
+					e:Build(flat, n)
+					C.chunks[t.key] = { ent = e, ver = t.ver, tris = n }
+					built = built + 1
+				end
+			end
+		end
+		-- Chunks more than one chunk outside the window go.
+		for key, rec in pairs(C.chunks) do
+			local cx, cy, cz = key:match("^(%-?%d+) (%-?%d+) (%-?%d+)$")
+			cx, cy, cz = tonumber(cx), tonumber(cy), tonumber(cz)
+			if cx < x0 - 1 or cx > x1 + 1 or cy < y0 - 1 or cy > y1 + 1 or cz < z0 - 1 or cz > z1 + 1 then
+				C.Retire(rec.ent, "outside Skyrim's collection window")
+				C.chunks[key] = nil
+				C.stats.removed = C.stats.removed + 1
+			end
+		end
+		-- The entities stay at the anchor (a re-centre moves them in C.MoveAll; this catches anything else).
+		for _, rec in pairs(C.chunks) do
+			if IsValid(rec.ent) and rec.ent:GetPos():DistToSqr(a) > 0.0001 then C.MoveAll(a) break end
+		end
+	end
+
+	-- The server's once-a-second line (terrain.lua's status).
+	function C.ServerStatus()
+		local empty, big = 0, 0
+		for _, rec in pairs(C.chunks) do
+			if rec.empty then empty = empty + 1 elseif rec.big then big = big + 1 end
+		end
+		local s = C.stats
+		local line = string.format("%s; empty chunks %d, too big %d, chunks waiting for regions %d; this second: %d rebuilds, %d removed, %d empties found",
+			C.StatusLine(), empty, big, C.waitingRegions, s.rebuilds, s.removed, s.empties)
+		s.rebuilds, s.removed, s.empties = 0, 0, 0
+		return line
+	end
+
+	-- Every 5 s: the biggest pair-record lists (a list growing towards 65,532 is seen early).
+	timer.Create("gmsky_chunks_lists", 5, 0, function()
+		if next(C.chunks) == nil or not gmsky.physground or not gmsky.physground.ListsLine then return end
+		gmsky.Log("chunks: pair-record" .. gmsky.physground.ListsLine(nil):gsub("^; ", " "))
+	end)
+end

@@ -29,6 +29,8 @@ gmsky.Include("water")
 gmsky.Include("render")
 -- Step S0 (one collision system): physics objects against Skyrim's ground (log only).
 gmsky.Include("props")
+-- Step S2 (one collision system): Skyrim's collision as physics chunks (gmsky_ground physics).
+gmsky.Include("chunks")
 -- Step S1 (one collision system): physics ground experiment (gmsky_test_physground).
 gmsky.Include("physground")
 if GetPlayer() and T then T.home = T.MeasureRoom(GetPlayer():GetPos() + Vector(0, 0, 40)) end

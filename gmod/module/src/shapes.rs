@@ -58,7 +58,20 @@ struct Region {
     lo: [f64; 3],
     size: f64,
     stair_helpers: u32,
+    /// Fingerprint of the region's content as Skyrim sent it (FNV-1a of the triangle bytes): a
+    /// re-sent but unchanged region keeps it, so its physics chunk isn't rebuilt (S2).
+    hash: u64,
 }
+
+/// FNV-1a, 64-bit, continuing from `h`.
+fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
+}
+const FNV_START: u64 = 0xcbf2_9ce4_8422_2325;
 
 impl Region {
     fn cell_index(&self, x: f64, y: f64) -> (i64, i64) {
@@ -142,8 +155,10 @@ impl Store {
                     self.lattice = Some(([lo[0] - h.rx as f64 * size, lo[1] - h.ry as f64 * size, lo[2] - h.rz as f64 * size], size));
                 }
                 let cn = (size / CELL).ceil() as i64 + 2;
+                let body = &p[std::mem::size_of::<ColRegion>()..need];
+                let hash = fnv(fnv(FNV_START, &h.count.to_le_bytes()), body);
                 let mut r = Region { tris: Vec::with_capacity(h.count as usize), stamp: Vec::new(), cells: vec![Vec::new(); (cn * cn) as usize],
-                                     cn, lo, size, stair_helpers: 0 };
+                                     cn, lo, size, stair_helpers: 0, hash };
                 for i in 0..h.count as usize {
                     let t: ColTri = read(p, std::mem::size_of::<ColRegion>() + i * std::mem::size_of::<ColTri>())?;
                     let mut v = [0.0; 9];
@@ -288,6 +303,24 @@ impl Store {
             }
         }
         (arrived, total)
+    }
+
+    /// Like `regions_arrived`, plus a fingerprint of the arrived regions' content (S2: a physics
+    /// chunk is rebuilt only when it changes). Missing regions count too, so a region arriving
+    /// or being dropped changes it.
+    pub fn chunk_version(&self, r0: [i32; 3], r1: [i32; 3]) -> (usize, usize, u64) {
+        let (mut arrived, mut total, mut h) = (0, 0, FNV_START);
+        for x in r0[0]..=r1[0] {
+            for y in r0[1]..=r1[1] {
+                for z in r0[2]..=r1[2] {
+                    total += 1;
+                    let r = self.regions.get(&(x, y, z));
+                    arrived += r.is_some() as usize;
+                    h = fnv(h, &r.map_or(0, |r| r.hash ^ 1).to_le_bytes());
+                }
+            }
+        }
+        (arrived, total, h)
     }
 
     /// Triangles in the region containing p (for the log), or None if it hasn't arrived.
@@ -638,6 +671,29 @@ mod tests {
         assert_eq!(base, [-136.0, -136.0, -136.0]);
         assert_eq!(s.regions_arrived([0, 0, -1], [0, 0, 0]), (2, 2));
         assert_eq!(s.regions_arrived([0, 0, -1], [1, 0, 0]), (2, 4));
+    }
+
+    #[test]
+    fn chunk_version_changes_only_with_content() {
+        let mut s = floor_store();
+        let (a, t, v1) = s.chunk_version([0, 0, -1], [0, 0, 0]);
+        assert_eq!((a, t), (2, 2));
+        // The same region sent again: same fingerprint.
+        let tris = [[-100.0, -100.0, 0.0, 100.0, -100.0, 0.0, 100.0, 100.0, 0.0], [-100.0, -100.0, 0.0, 100.0, 100.0, 0.0, -100.0, 100.0, 0.0]];
+        s.apply(COL_REGION, &region_payload(0, 0, 0, 1, [-136.0; 3], 272.0, &tris));
+        assert_eq!(s.chunk_version([0, 0, -1], [0, 0, 0]).2, v1);
+        // One vertex moved: a new fingerprint.
+        let mut moved = tris;
+        moved[0][2] = 1.0;
+        s.apply(COL_REGION, &region_payload(0, 0, 0, 1, [-136.0; 3], 272.0, &moved));
+        let v2 = s.chunk_version([0, 0, -1], [0, 0, 0]).2;
+        assert_ne!(v2, v1);
+        // An empty region arriving where none was changes it too; a missing one isn't "empty".
+        let (_, _, before) = s.chunk_version([0, 0, -1], [1, 0, 0]);
+        s.apply(COL_REGION, &region_payload(1, 0, 0, 1, [136.0, -136.0, -136.0], 272.0, &[]));
+        let (a, t, after) = s.chunk_version([0, 0, -1], [1, 0, 0]);
+        assert_eq!((a, t), (3, 4));
+        assert_ne!(before, after);
     }
 
     #[test]

@@ -184,7 +184,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 54] = [
+    let funcs: [(&str, lua::CFn); 55] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -205,6 +205,7 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("TrisInBox", l_tris_in_box),
         ("ShapesLattice", l_shapes_lattice),
         ("ShapesRegionsArrived", l_shapes_regions_arrived),
+        ("ShapesChunkVersion", l_shapes_chunk_version),
         ("GraphicsInfo", l_graphics_info),
         ("WriteLogFile", l_write_log_file),
         ("D3DState", l_d3d_state),
@@ -1014,6 +1015,24 @@ unsafe extern "C" fn l_shapes_lattice(l: *mut State) -> c_int {
 
 /// gmsky.ShapesRegionsArrived(rx0, ry0, rz0, rx1, ry1, rz1) -> arrived, total: how many of the
 /// regions in that inclusive range (Skyrim's region numbers) have arrived from Skyrim.
+/// gmsky.ShapesChunkVersion(rx0, ry0, rz0, rx1, ry1, rz1) -> arrived, total, fingerprint ("hex")
+/// of the regions in that range (S2: a physics chunk is rebuilt only when the fingerprint changes).
+/// Nothing has arrived (fingerprint "-") while not anchored to the store's origin.
+unsafe extern "C" fn l_shapes_chunk_version(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let n = |i: c_int| (a.tonumber)(l, i).floor() as i32;
+        let epoch = anchored_epoch();
+        let (arrived, total, hash) = with_shapes(|st| {
+            let r = st.chunk_version([n(1), n(2), n(3)], [n(4), n(5), n(6)]);
+            if epoch != 0 && st.origin_epoch == epoch { (r.0, r.1, Some(r.2)) } else { (0, r.1, None) }
+        });
+        (a.pushnumber)(l, arrived as f64);
+        (a.pushnumber)(l, total as f64);
+        lua::push_str(a, l, &hash.map_or("-".to_string(), |h| format!("{h:016x}")));
+        3
+    })
+}
+
 unsafe extern "C" fn l_shapes_regions_arrived(l: *mut State) -> c_int {
     guarded(l, |a, _| {
         let n = |i: c_int| (a.tonumber)(l, i).floor() as i32;

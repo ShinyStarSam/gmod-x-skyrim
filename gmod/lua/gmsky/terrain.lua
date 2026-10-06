@@ -13,6 +13,9 @@
 -- Step D: with `gmsky_ground shapes` (the default) Skyrim streams its real collision shapes
 -- instead (the gmsky module keeps them; the same entity answers from them). The player is held
 -- while the collision where it stands hasn't arrived. `gmsky_ground grid` = the ray grid.
+-- Step S2: `gmsky_ground physics` = the same shapes as physics chunks (chunks.lua) that the
+-- player, bullets and props all collide with; the trace field is removed in that mode. The player
+-- is held until the chunks under its feet are built.
 -- Re-centre (re-plan step C): when the player gets far from the middle of the map, the player and
 -- the anchor move back by the same amount in one tick. Skyrim's position of the player doesn't
 -- change, and the ground only moves with its entity: nothing is rebuilt or waited for.
@@ -127,8 +130,10 @@ if SERVER then
 		"Re-centre (move the player and the anchor back to the middle of the map) once the player is this far from it along x, y or z; 0 = never")
 	T.recentres = T.recentres or 0
 	T.groundMode = CreateConVar("gmsky_ground", "shapes", FCVAR_ARCHIVE,
-		"shapes = Skyrim's real collision shapes (step D), grid = Skyrim's ray grid (step B)")
+		"shapes = Skyrim's real collision shapes, traced (step D); physics = the same shapes as physics chunks (step S2); grid = Skyrim's ray grid (step B)")
+	-- Skyrim is asked for its shapes in shapes and physics mode.
 	function T.ShapesMode() return T.groundMode:GetString() ~= "grid" end
+	function T.PhysicsMode() return T.groundMode:GetString() == "physics" end
 
 	-- The anchor (the Garry's Mod point matching Skyrim's origin) as a Vector, or nil before the
 	-- first origin. The grids' coordinates are relative to it.
@@ -204,6 +209,7 @@ if SERVER then
 		local na = Vector(nx, ny, nz)
 		ply:SetPos(Vector(pos.x + d.x, pos.y + d.y, pos.z + d.z))
 		if IsValid(T.ent) then T.ent:SetPos(na) end
+		if gmsky.chunks and gmsky.chunks.MoveAll then gmsky.chunks.MoveAll(na) end
 		if T.holdPos then T.holdPos = T.holdPos + d end
 		local after = ply:GetPos()
 		T.recentres = T.recentres + 1
@@ -218,6 +224,7 @@ if SERVER then
 	function T.ClearGround()
 		if IsValid(T.ent) then gmsky.field.UseGrid(T.ent, nil) end
 		T.ground, T.builtId = nil, nil
+		if gmsky.chunks and gmsky.chunks.Clear then gmsky.chunks.Clear("new origin") end
 	end
 
 	function T.UpdateGround(ply, anchored, connected)
@@ -241,6 +248,8 @@ if SERVER then
 			local e = T.ent:GetPos()
 			if math.abs(e.x - a.x) > 0.01 or math.abs(e.y - a.y) > 0.01 or math.abs(e.z - a.z) > 0.01 then T.ent:SetPos(a) end
 		end
+		if T.PhysicsMode() then return T.UpdatePhysics(ply, pos, a, anchored, connected) end
+		if next(gmsky.chunks.chunks) ~= nil then gmsky.chunks.Clear("gmsky_ground " .. T.groundMode:GetString()) end
 		if T.ShapesMode() then return T.UpdateShapes(ply, pos, a, anchored, connected) end
 		-- A new grid for the origin we're anchored to: it is the ground from this tick on.
 		if g and g.epoch == anchored and g.id ~= T.builtId then
@@ -330,6 +339,39 @@ if SERVER then
 		end
 	end
 
+	-- Step S2: Skyrim's shapes as physics chunks (chunks.lua). The trace field goes (one system).
+	-- The player is held until every chunk under its feet is built or known empty.
+	local WAIT_CHUNKS = "waiting for the physics chunks under the player"
+	function T.UpdatePhysics(ply, pos, a, anchored, connected)
+		if IsValid(T.ent) then
+			T.ent:Remove()
+			T.ent = nil
+			T.ground, T.builtId = nil, nil
+			gmsky.Log("terrain: the ground is physics chunks now (gmsky_ground physics): the trace field is removed")
+		end
+		if anchored ~= 0 then gmsky.chunks.Update(ply, a) end
+		local noclip = ply:GetMoveType() == MOVETYPE_NOCLIP
+		if T.holding then
+			if noclip then
+				Release(ply, "noclip")
+			elseif not connected then
+				Release(ply, "Skyrim not connected")
+			else
+				T.heldTicks = T.heldTicks + 1
+			end
+		end
+		local ready = anchored ~= 0 and gmsky.chunks.ReadyAt(pos - a)
+		if ready then
+			if T.holding then
+				gmsky.Log(string.format("terrain: the physics chunks at (%.0f, %.0f, %.0f) are built: released", pos.x, pos.y, pos.z))
+				Release(ply, T.holdWhy)
+			end
+		elseif connected and anchored ~= 0 and not noclip and not T.holding then
+			T.Hold(ply, pos, WAIT_CHUNKS)
+			gmsky.Log(string.format("terrain: HOLD at (%.0f, %.0f, %.0f): %s", pos.x, pos.y, pos.z, WAIT_CHUNKS))
+		end
+	end
+
 	-- While held: no movement, no falling.
 	hook.Add("SetupMove", "gmsky_terrain_hold", function(ply, mv)
 		if not T.holding or not T.holdPos or ply:GetMoveType() == MOVETYPE_NOCLIP then return end
@@ -339,6 +381,15 @@ if SERVER then
 	end)
 
 	function T.GroundStatus(ply)
+		if T.PhysicsMode() then
+			local ground = ply:GetGroundEntity()
+			local out = string.format(" | ground: physics chunks, standing on %s, held ticks %d, re-centres %d%s | %s",
+				(IsValid(ground) and ground:GetClass() == "gmsky_chunk") and ("Skyrim's collision (" .. ground:ChunkName() .. ")")
+					or (IsValid(ground) and ground:GetClass()) or (ground == game.GetWorld() and "the map" or "nothing"),
+				T.stats.holdTicks, T.recentres, T.holding and (", HOLDING (" .. tostring(T.holdWhy) .. ")") or "", gmsky.chunks.ServerStatus())
+			T.stats.lifts, T.stats.holdTicks = 0, 0
+			return out
+		end
 		if T.ShapesMode() then
 			local p, a = ply:GetPos(), T.Anchor() or Vector(0, 0, 0)
 			local ground = ply:GetGroundEntity()

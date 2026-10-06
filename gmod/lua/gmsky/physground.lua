@@ -75,11 +75,11 @@ local function ClearOlder(self)
 		if other ~= self and IsValid(other) and other:GetMode() == REBUILD then
 			if other:GetBuild() > self:GetBuild() and other.gmskyBuilt then return nil end
 			if other:GetBuild() < self:GetBuild() and IsValid(other:GetPhysicsObject()) then
-				local addr = gmsky.PhysAddress and gmsky.PhysAddress(other:GetPhysicsObject())
+				gmsky.chunks.Destroyed("rebuild", string.format("mesh b%d", other:GetBuild()), other:GetPhysicsObject(),
+					string.format("destroyed by build %d", self:GetBuild()))
 				other:PhysicsDestroy()
 				other:SetSolid(SOLID_NONE)
 				destroyed = destroyed + 1
-				if addr then G.Destroyed(string.format("mesh b%d", other:GetBuild()), addr, self) end
 			end
 		end
 	end
@@ -177,7 +177,7 @@ function ENT:BuildMesh()
 	-- the new mesh's pair-record list overflowed against it. Wait (Think retries every tick) and
 	-- log how long it takes to go.
 	if self:GetMode() == REBUILD then
-		local waiting = G.StillInEngine()
+		local waiting = gmsky.chunks.StillInEngine("rebuild")
 		if waiting then
 			local now = SysTime()
 			if not self.gmskyWaiting then
@@ -471,42 +471,6 @@ function G.Remember(name, phys)
 	G.addrs[addr] = name
 end
 
--- Meshes whose physics we destroyed, until the engine lets go of them: address -> { name, t0, tick0 }.
-G.dead = G.dead or {}
-
--- Called right after a mesh's PhysicsDestroy.
-function G.Destroyed(name, addr, by)
-	G.dead[addr] = { name = name, t0 = SysTime(), tick0 = engine.TickCount() }
-	local alive, live, slots = gmsky.PhysAlive(addr)
-	gmsky.Log(string.format("physground: %s (%s) destroyed by build %d: right after PhysicsDestroy the engine %s",
-		name, addr, by:GetBuild(), alive and string.format("STILL HOLDS it (its list %d/%d)", live, slots) or "no longer holds it"))
-end
-
--- nil if every destroyed mesh has left the engine (each departure logged once), otherwise a line
--- naming those still there. An object counts as gone when it no longer looks alive, or when its
--- address now belongs to another physics object (freed and reused).
-function G.StillInEngine()
-	if not gmsky.PhysAlive or next(G.dead) == nil then return nil end
-	local owners = {}
-	for _, np in ipairs(G.AllPhys()) do
-		local a = gmsky.PhysAddress(np[2])
-		if a then owners[a] = np[1] end
-	end
-	local still = {}
-	for addr, d in pairs(G.dead) do
-		local alive, live, slots = gmsky.PhysAlive(addr)
-		local ms, ticks = (SysTime() - d.t0) * 1000, engine.TickCount() - d.tick0
-		if owners[addr] or not alive then
-			gmsky.Log(string.format("physground: %s (%s) gone from the engine %.0f ms, %d ticks after PhysicsDestroy (%s)", d.name, addr, ms, ticks,
-				owners[addr] and ("its memory now belongs to " .. owners[addr]) or "no longer looks alive"))
-			G.dead[addr] = nil
-		else
-			still[#still + 1] = string.format("%s (%s, its list %d/%d, destroyed %.0f ms / %d ticks ago)", d.name, addr, live, slots, ms, ticks)
-		end
-	end
-	return #still > 0 and table.concat(still, "; ") or nil
-end
-
 -- Partners of the player and of one mesh (small lists): for every setup step.
 function G.PartnersStep(what, mesh)
 	if not SERVER or not gmsky.PhysListPartners then return end
@@ -715,6 +679,10 @@ if SERVER then
 
 	concommand.Add("gmsky_test_physground", function(_, _, args)
 		Stop("new command")
+		if gmsky.terrain and gmsky.terrain.PhysicsMode and gmsky.terrain.PhysicsMode() then
+			gmsky.Log("physground: not started: gmsky_ground physics is on (the experiment's meshes would sit in the real chunks)")
+			return
+		end
 		local mode = args[1] == "rebuild" and REBUILD or args[1] == "chunks" and CHUNKS or nil
 		local source = (args[2] == nil or args[2] == "skyrim") and SKYRIM or args[2] == "flat" and FLAT or args[2] == "grid" and GRID or nil
 		if not mode or not source then

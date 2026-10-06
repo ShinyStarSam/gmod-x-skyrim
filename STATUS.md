@@ -2,7 +2,9 @@
 
 **2026-10-06, test 117: UNBLOCKED. The physics crash's cause is found and avoided:** a new mesh
 was built over the old one while the engine still held it (`PhysicsDestroy` always leaves the object
-for 7 more ticks). Waiting until it is gone: 174 builds, no crash. Next step: the user's choice.
+for 7 more ticks). Waiting until it is gone: 174 builds, no crash. **S2 (physics chunks,
+`gmsky_ground physics`) is BLOCKED after two crashes** (test 118: fast travel, fixed; test 119: running,
+right after a neighbouring chunk was rebuilt). See "The current problem". Waiting for the user's choice.
 **Earlier: after in-game tests 101-111: BLOCKED on Garry's Mod's physics crash** (physics props on
 Skyrim's ground, plan `docs/DESIGN.md` "One collision system", step S1c). See "The current
 problem". **Ghidra (2026-10-06) found the cause:** a per-object list of collision pair records
@@ -126,7 +128,44 @@ publishes the origin.
 
 ## The current problem
 
-### Physics ground crashes Garry's Mod (2026-10-06, tests 101-111; blocked)
+### S2 physics chunks crash after a chunk rebuild while running (2026-10-06, test 119; blocked)
+
+**Goal:** `gmsky_ground physics` (S2): Skyrim's collision as kept physics chunks, one system for
+the player, bullets and props. Test 118 showed it works for walking and props (the player stood on
+chunks the whole time, barrels came to rest, every pair-record list stayed tiny).
+
+**Two attempts, two crashes, both the same overflow (`vphysics.dll+0xaaff0`):**
+1. Test 118, fast travel: all chunks removed at once, new ones built 12 ticks later where the old
+   meshes still lay (the "still in the engine" check compared chunk numbers, which mean other
+   places after a new origin). **Fixed:** the check compares boxes in Garry's Mod's world.
+2. Test 119, running for ~65 s (250 chunks built): the overflowing list was **chunk `27 -30 -1`,
+   the one the player was standing on** (running at 593). Its neighbour ahead, `27 -29 -1`, had
+   just been rebuilt (Skyrim's triangles changed): old mesh destroyed and entity removed; the
+   check said it left the engine after **1 tick** (test 117 measured 7 ticks every time, but kept
+   the entity); the new mesh came in the next tick; crash.
+
+**What is known:** every rebuild with the entity removed reported "gone" after 1 tick (5 of 5, tests
+118-119); one of them crashed. **Not known:** whether the old mesh really was gone. `gmsky.PhysAlive`
+judges by Valve's wrapper object, which removing the entity may free while the engine's own object
+lingers (a guess). Also not known why the neighbour's list, not the new mesh's, overflowed.
+
+**Options (my order):**
+1. **Measure the gap directly, plus a safe margin (recommended).** Never trust "gone" sooner than
+   16 ticks after a destroy (twice the 7 measured), and judge the engine's own object, not only the
+   wrapper: also check that no other object's list still holds a record with it (the player's and
+   the neighbours' lists, read as in tests 115-116). Log the neighbours' list sizes before every
+   build and the new chunk's partners after it, so a crash names the partner. Test: run far again.
+2. **Destroy the physics but keep the entity until the engine lets go** (test 117's exact path,
+   which measured 7 ticks reliably): `PhysicsDestroy` now, `Remove` only after the old mesh is gone.
+   One variable, cheap; doesn't explain the neighbour's list.
+3. **Freeze the new mesh sooner:** call `EnableMotion(false)` right after `PhysicsFromMesh`, before
+   `SetSolid` (differs from InfMap2's order), so a new mesh is never movable next to a dense
+   neighbour. Tests 14-15 found that moving setup calls only moved the crash, so not sure.
+4. **Ghidra:** read how `PhysicsDestroy` / entity removal delete the engine object (when the pair
+   records really go). Read-only; slower, but would replace guesses with facts.
+
+
+### Earlier: physics ground crashes Garry's Mod (2026-10-06, tests 101-114; cause found in tests 115-117, see idea 2 and 2d)
 
 **Goal:** Garry's Mod's physics props, ragdolls and grenades land on Skyrim's ground (today they
 fall ~16,300 units to gm_flatmap's floor: test 100). Plan: one collision system like InfMap2's:

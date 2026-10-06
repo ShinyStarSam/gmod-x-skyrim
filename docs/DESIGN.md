@@ -2369,6 +2369,74 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
   sides; "player standing on physics ground"; holds. *Test:* the test 23 walk (a building's walls,
   stairs, an arch, an interior through a load door, trees, fences, a fast physgun launch) in
   physics mode. *Pass:* no crash, feels the same as `shapes`, holds rare and short.
+- **S2 in detail (revised 2026-10-06 after tests 101-117; the user: "Go ahead and work on S2").**
+  What changed since the plan above: the crash's cause is known (test 116: a new mesh built while
+  the engine still held the old one in the same place; `PhysicsDestroy` and `Remove` always leave
+  the engine object for 7 more ticks, test 117), and the rule that avoids it works (test 117: 174
+  builds, no crash). So S2 is built around one rule: **a chunk is never built while an earlier
+  mesh of the same place is still in the engine** (after test 118: "the same place" = any old mesh
+  whose box in Garry's Mod's world overlaps the new chunk's; chunk numbers alone failed after a
+  fast travel, where they mean other places) (checked read-only through the engine's memory,
+  `gmsky.PhysAlive`; see "count the lists" above), and chunks never overlap each other (every
+  triangle cut exactly at the chunk's faces, as in S1c).
+  - **Chunks:** a fixed lattice of **2 x 2 x 2 Skyrim regions** (1,024 Skyrim units, ~544
+    Garry's Mod units per side; setting `gmsky_chunk_regions`, read when chunks are cleared).
+    New file `gmod/lua/gmsky/chunks.lua`, new entity `gmsky_chunk` (InfMap2's chunk recipe, as in
+    S1: `PhysicsFromMesh`, `SetSolid(SOLID_VPHYSICS)`, `MOVETYPE_NONE`, `EnableCustomCollisions`,
+    motion off, mass 50,000, constraint-static and no-self-collision flags, world-aligned,
+    static-prop flag, no shadow). It sits at the anchor, like `gmsky_field` today. The S1
+    experiment (`physground.lua`) stays as a diagnostic tool, but refuses to start in physics mode.
+  - **Which chunks:** the server looks at every chunk overlapping Skyrim's collection window
+    around the player (5 regions each way, 3 below, 2 above; `Collision.cpp`). A chunk is built
+    when **all** its regions have arrived (a partly-arrived chunk is at the window's edge, at
+    least ~4 regions from the player). A chunk with no triangles gets no entity (remembered as
+    empty). Nearest the player first, builds until 3 ms are spent each tick (at least one).
+  - **Rebuild only on real change:** Rust keeps a content fingerprint per region (a hash of its
+    triangles); `gmsky.ShapesChunkVersion(r0, r1)` -> arrived, total, the chunk's combined
+    fingerprint. A chunk is rebuilt only when that changes (Skyrim re-sends nearby regions every
+    second, mostly unchanged). Rebuild = remove the old entity, then build the new one once the
+    engine has let go of the old mesh (~7 ticks; logged). **The gap:** for those ~100 ms that
+    chunk has no physics; logged so we see how often it happens (props resting there are S3).
+  - **Removal:** a chunk is removed when it is more than one chunk outside the collection
+    window (its regions are evicted from the store soon after anyway).
+  - **Both sides:** the server's entities are networked (chunk number, size, fingerprint, box);
+    each side builds its own physics from the shared Rust store (one module per process) and
+    keeps its own list of meshes still in its engine. The client waits for the same rule.
+  - **Re-centre:** the anchor moves by at least 8,000 units, further than all chunks reach, so
+    moved chunks can't land on unmoved ones: every chunk entity **and** its physics object are
+    moved to the new anchor in the same tick (entity `SetPos`, physics `SetPos`; logged: the
+    largest difference between where a chunk's physics is and where it should be). The client
+    moves its physics objects when the entity's networked position changes.
+  - **New origin** (Skyrim loaded a save, fast travel): every chunk is removed; the player is held
+    at home as today until the chunks under it are built.
+  - **The switch:** `gmsky_ground physics`. In physics mode the trace field (`gmsky_field`) is
+    removed, so the player, bullets and props all use the chunks: one system. `shapes` (today's
+    default) stays for comparison until S5. Skyrim is asked for shapes in both modes.
+  - **Player hold:** today's "waiting for Skyrim's collision" hold now waits until every chunk
+    under the player's feet (its footprint, from 64 below its feet to 72 above) is built or known
+    empty. Released as today, with its speed given back.
+  - **Logs (once a second, both sides):** chunks built / empty / waiting for the engine /
+    waiting for regions; builds, rebuilds (with why), removals this second; slowest build ms;
+    triangles per chunk (largest); what the player stands on; holds. Every 5 s (server): the
+    biggest pair-record lists (`gmsky.PhysList`), so a list growing towards 65,532 is seen early.
+  - **Tests (`cargo test --release` for the fingerprint, then in game, `gmsky_ground physics`):**
+    (1) the test 23 walk: building walls, stairs, an arch, an interior through a load door,
+    trees, fences; alt-tab; run; jump; noclip and back. (2) spawn props on flat ground and on a
+    slope, drop a grenade. (3) walk 8,000+ units for a re-centre. *Pass:* no crash; walking feels
+    like `shapes`; holds rare and short; props rest on Skyrim's ground (`props:` lines: 0 `FELL
+    THROUGH` for props resting on built chunks; a prop that falls during a rebuild gap is S3).
+  - **Differs from InfMap2:** our chunks come from Skyrim's data, arrive late and change (hence
+    holds, fingerprints and rebuilds; InfMap2 builds once from a formula); our chunks are ~544
+    units, not 20,000; we move chunks on a re-centre instead of chunk numbers; we wait for the
+    engine to let go of an old mesh before building (InfMap2 never rebuilds a chunk in place);
+    InfMap2 removes chunks no entity is in, we remove by distance. No code copied (no licence).
+  - **Differs from SkyCraft:** SkyCraft adds Skyrim's triangles to Minecraft's own collision
+    query; Garry's Mod's physics has no such query, so we make physics objects. Its "freeze the
+    player until Skyrim's collision has arrived" is kept (the hold).
+  - **Not sure:** that moving a frozen physics mesh with `SetPos` takes effect at once on both
+    sides (logged); how often Skyrim's re-sent regions really change (logged); build time of the
+    densest chunks (cities); that freed memory can't still look alive to `gmsky.PhysAlive` (a
+    chunk waiting more than 1 s is logged with its unchanging list).
 - **S3. Props, ragdolls and grenades on it.** Mostly free once S2 works. Added: a prop moving into
   a chunk that isn't built yet is frozen for that moment and released with its speed (like the
   player's hold; InfMap2 doesn't need this because it makes its terrain itself, instantly; we
