@@ -168,6 +168,23 @@ pub unsafe extern "C" fn l_phys_address(l: *mut State) -> c_int {
     })
 }
 
+/// gmsky.PhysAlive("0x...") -> looks alive, live entries, slots of its list. For an object whose
+/// physics was destroyed: does the engine still hold it? "Looks alive" = function tables in
+/// vphysics.dll and the CPhysicsObject <-> IVP object pointers still agree. Freed memory that
+/// nothing reused yet can still look alive, so the Lua side also checks for reuse by a new object.
+pub unsafe extern "C" fn l_phys_alive(l: *mut State) -> c_int {
+    crate::guarded(l, |a, _| {
+        let text = lua::to_string(a, l, 1).unwrap_or_default();
+        let addr = usize::from_str_radix(text.trim_start_matches("0x"), 16).unwrap_or(0);
+        let alive = addr != 0 && vphysics().is_some_and(|vp| looks_alive(vp, addr));
+        let (live, slots) = if alive { header(addr).map(|h| (h.3, h.0)).unwrap_or((0, 0)) } else { (0, 0) };
+        (a.pushboolean)(l, alive as c_int);
+        (a.pushnumber)(l, live as f64);
+        (a.pushnumber)(l, slots as f64);
+        3
+    })
+}
+
 /// gmsky.PhysListPartners(physobj, others) -> table, or nil, why. For every live entry of the
 /// object's list: the object on the other side of the pair record, counted in t[i] when it is
 /// others[i]. Also: live (the +0x1c counter), slots, chained_live (slots minus the free chain:

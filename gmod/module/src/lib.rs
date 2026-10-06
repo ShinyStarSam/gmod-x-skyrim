@@ -184,7 +184,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 53] = [
+    let funcs: [(&str, lua::CFn); 54] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -238,6 +238,7 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("PhysList", physlist::l_phys_list),
         ("PhysListPartners", physlist::l_phys_list_partners),
         ("PhysAddress", physlist::l_phys_address),
+        ("PhysAlive", physlist::l_phys_alive),
     ];
     for (name, f) in funcs {
         (a.pushnumber)(l, side as f64); // upvalue 1 = side

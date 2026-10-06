@@ -2336,6 +2336,16 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
       them and reported with their own list size, and the player's and mesh's partners are
       logged before every step. At the crash instruction, register `rdi` is the overflowing
       object, so the dump names it.
+    - *After test 116 (user's choice, idea 2d (a)): never build over a mesh the engine still
+      holds.* Test 116: the overflowing list was the new mesh's; the old mesh, destroyed with
+      `PhysicsDestroy` just before, was still in the engine in the same place. Now, in `rebuild`
+      mode, each destroyed mesh's engine address is kept; right after `PhysicsDestroy` the log
+      says whether the engine still holds it; a new mesh is built only when every destroyed one
+      has gone (checked every tick, `gmsky.PhysAlive`; "gone" = no longer looks alive, or its
+      address now belongs to another physics object). Logged: how long each took to go (ms and
+      ticks), and every second while a build waits. The server starts no new mesh while one
+      waits. Both sides do this for their own copy. **Not sure** freed memory can't still "look
+      alive"; if a build waits for ever with an unchanging list, that is the likely reason.
     - **Differs from SkyCraft / InfMap2:** neither reads engine memory; this is a diagnostic only,
       removed or switched off once the cause is known.
 - **S1d (only if S1c's chunks work and the user wants them bigger): Skyrim collects further out.**

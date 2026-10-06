@@ -1,6 +1,9 @@
 # STATUS
 
-**2026-10-06, after in-game tests 101-111: BLOCKED on Garry's Mod's physics crash** (physics props on
+**2026-10-06, test 117: UNBLOCKED. The physics crash's cause is found and avoided:** a new mesh
+was built over the old one while the engine still held it (`PhysicsDestroy` always leaves the object
+for 7 more ticks). Waiting until it is gone: 174 builds, no crash. Next step: the user's choice.
+**Earlier: after in-game tests 101-111: BLOCKED on Garry's Mod's physics crash** (physics props on
 Skyrim's ground, plan `docs/DESIGN.md` "One collision system", step S1c). See "The current
 problem". **Ghidra (2026-10-06) found the cause:** a per-object list of collision pair records
 overflows at 65,533 entries, and gm_flatmap's world adds ~6 records per mesh triangle. Idea 2c
@@ -224,7 +227,7 @@ after a new mesh object is set up: the last log line was `SetSolid` (tests 109, 
    physics), and props should land on our meshes, not gm_flatmap's floor 16,300 units down. **Not
    sure** the engine honours it for the world object, or what props do if a mesh is missing (fall
    forever instead of stopping on the map's floor). Log: crash or not; props' fall.
-2d. **(New, after test 116; my recommendation) Never build over a mesh the engine still holds.**
+2d. **(After test 116; the user chose (a)) Never build over a mesh the engine still holds. WORKS (test 117: no crash in 174 builds; every destroyed mesh stayed in the engine exactly 7 more ticks).**
    Remember the old mesh's engine address; before building in the same place, check (read-only)
    whether that object still exists. If it does, wait (logged: how long until it goes) or move
    it out of the way first (e.g. `SetPos` far away / disable its collisions before destroying).

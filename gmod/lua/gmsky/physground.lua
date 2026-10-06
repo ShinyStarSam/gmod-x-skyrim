@@ -75,9 +75,11 @@ local function ClearOlder(self)
 		if other ~= self and IsValid(other) and other:GetMode() == REBUILD then
 			if other:GetBuild() > self:GetBuild() and other.gmskyBuilt then return nil end
 			if other:GetBuild() < self:GetBuild() and IsValid(other:GetPhysicsObject()) then
+				local addr = gmsky.PhysAddress and gmsky.PhysAddress(other:GetPhysicsObject())
 				other:PhysicsDestroy()
 				other:SetSolid(SOLID_NONE)
 				destroyed = destroyed + 1
+				if addr then G.Destroyed(string.format("mesh b%d", other:GetBuild()), addr, self) end
 			end
 		end
 	end
@@ -170,6 +172,28 @@ function ENT:BuildMesh()
 			return
 		end
 	end
+	-- Idea 2d (a), after test 116: never build over a mesh the engine still holds. Test 116's
+	-- crash: the old mesh, "destroyed" just above, was still in the engine in the same place, and
+	-- the new mesh's pair-record list overflowed against it. Wait (Think retries every tick) and
+	-- log how long it takes to go.
+	if self:GetMode() == REBUILD then
+		local waiting = G.StillInEngine()
+		if waiting then
+			local now = SysTime()
+			if not self.gmskyWaiting then
+				self.gmskyWaiting, self.gmskyWaitLog = now, now
+				gmsky.Log(string.format("physground: %s WAITS: still in the engine: %s; %s", name, waiting, PlayerLine(self, lo, hi)))
+			elseif now - self.gmskyWaitLog >= 1 then
+				self.gmskyWaitLog = now
+				gmsky.Log(string.format("physground: %s still waiting after %.1f s: %s; %s", name, now - self.gmskyWaiting, waiting, PlayerLine(self, lo, hi)))
+			end
+			return
+		end
+		if self.gmskyWaiting then
+			gmsky.Log(string.format("physground: %s waited %.0f ms; building now", name, (SysTime() - self.gmskyWaiting) * 1000))
+			self.gmskyWaiting = nil
+		end
+	end
 	local t0 = SysTime()
 	local verts, n, mlo, mhi, shape = Verts(self, lo, hi)
 	local s = G.side
@@ -260,8 +284,14 @@ function ENT:OnRemove()
 end
 
 function ENT:Think()
-	-- The client builds its copy as soon as the entity's data has arrived.
-	if CLIENT and not self.gmskyBuilt and self:GetMode() ~= 0 then self:BuildMesh() end
+	-- The client builds its copy as soon as the entity's data has arrived (or retries while it
+	-- waits for an old mesh to leave the engine).
+	if CLIENT and (not self.gmskyBuilt or self.gmskyWaiting) and self:GetMode() ~= 0 then self:BuildMesh() end
+	if SERVER and self.gmskyWaiting then
+		self:BuildMesh()
+		self:NextThink(CurTime())
+		return true
+	end
 end
 
 if CLIENT then
@@ -441,6 +471,42 @@ function G.Remember(name, phys)
 	G.addrs[addr] = name
 end
 
+-- Meshes whose physics we destroyed, until the engine lets go of them: address -> { name, t0, tick0 }.
+G.dead = G.dead or {}
+
+-- Called right after a mesh's PhysicsDestroy.
+function G.Destroyed(name, addr, by)
+	G.dead[addr] = { name = name, t0 = SysTime(), tick0 = engine.TickCount() }
+	local alive, live, slots = gmsky.PhysAlive(addr)
+	gmsky.Log(string.format("physground: %s (%s) destroyed by build %d: right after PhysicsDestroy the engine %s",
+		name, addr, by:GetBuild(), alive and string.format("STILL HOLDS it (its list %d/%d)", live, slots) or "no longer holds it"))
+end
+
+-- nil if every destroyed mesh has left the engine (each departure logged once), otherwise a line
+-- naming those still there. An object counts as gone when it no longer looks alive, or when its
+-- address now belongs to another physics object (freed and reused).
+function G.StillInEngine()
+	if not gmsky.PhysAlive or next(G.dead) == nil then return nil end
+	local owners = {}
+	for _, np in ipairs(G.AllPhys()) do
+		local a = gmsky.PhysAddress(np[2])
+		if a then owners[a] = np[1] end
+	end
+	local still = {}
+	for addr, d in pairs(G.dead) do
+		local alive, live, slots = gmsky.PhysAlive(addr)
+		local ms, ticks = (SysTime() - d.t0) * 1000, engine.TickCount() - d.tick0
+		if owners[addr] or not alive then
+			gmsky.Log(string.format("physground: %s (%s) gone from the engine %.0f ms, %d ticks after PhysicsDestroy (%s)", d.name, addr, ms, ticks,
+				owners[addr] and ("its memory now belongs to " .. owners[addr]) or "no longer looks alive"))
+			G.dead[addr] = nil
+		else
+			still[#still + 1] = string.format("%s (%s, its list %d/%d, destroyed %.0f ms / %d ticks ago)", d.name, addr, live, slots, ms, ticks)
+		end
+	end
+	return #still > 0 and table.concat(still, "; ") or nil
+end
+
 -- Partners of the player and of one mesh (small lists): for every setup step.
 function G.PartnersStep(what, mesh)
 	if not SERVER or not gmsky.PhysListPartners then return end
@@ -527,6 +593,8 @@ if SERVER then
 		local ply = player.GetAll()[1]
 		local ax, ay, az = gmsky.Anchor()
 		if not IsValid(ply) or not ax then return end
+		-- No new mesh while the current one waits for an old one to leave the engine (idea 2d).
+		if IsValid(G.current) and G.current.gmskyWaiting then return end
 		local p = ply:GetPos() - Vector(ax, ay, az)
 		local e = NewMesh(t, p - Vector(HALF_XY, HALF_XY, HALF_Z), p + Vector(HALF_XY, HALF_XY, HALF_Z))
 		-- The new one destroyed the previous one's physics before building (ClearOlder); the entity
