@@ -57,8 +57,8 @@ exception. See its own `LICENSE` and `docs/DESIGN.md` §14 question 4.
 
 ## Community Shaders (shader reconstructions)
 
-Gmod x Skyrim reads Skyrim's indoor (parabolic) shadow maps the way Skyrim's own shaders do, as
-reconstructed by Community Shaders. Thank you to its authors.
+Gmod x Skyrim reads Skyrim's indoor (parabolic) and sun shadow maps the way Skyrim's own shaders do,
+as reconstructed by Community Shaders. Thank you to its authors.
 
 - Source: https://github.com/doodlum/skyrim-community-shaders (read at commit `dd2677fc`),
   `package/Shaders/Utility.hlsl` (`RENDER_SHADOWMAP_PB` and `RENDER_SHADOWMASKDPB`)
@@ -66,8 +66,10 @@ reconstructed by Community Shaders. Thank you to its authors.
   that repository is under other terms; nothing else from it is used.
 - Adapted in this project: `skse/src/World.cpp`: `ParabolicLookup` / `ParaboloidLight` (the
   dual-paraboloid lookup: light-local position, hemisphere choice, uv, depth = length / radius, and
-  its soft 8-sample filter), `IndoorShadowVS` (drawing a dual-paraboloid map), and the 8 spiral
-  sample offsets from `package/Shaders/Common/Random.hlsli` (Jimenez's, as Community Shaders lists them).
+  its soft 8-sample filter), `IndoorShadowVS` (drawing a dual-paraboloid map), the 8 spiral
+  sample offsets from `package/Shaders/Common/Random.hlsli` (Jimenez's, as Community Shaders lists them),
+  and for the sun `SkyrimCascade` / `SkyrimSunShadow` / `SunShadow` (`SampleShadowPCF`, the same
+  filter on the sun's cascades, and the blend from cascade 0 to 1 in `RENDER_SHADOWMASK`).
 
 ```
 MIT License

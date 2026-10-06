@@ -11,6 +11,13 @@
 // spots the camera (and the sky) are also put at Garry's Mod's eye (feet + eye height: crouching
 // lowers it), Garry's Mod's view punch is added (pitch, yaw, roll), and Skyrim's FOV is set to
 // Garry's Mod's; Skyrim's own FOV comes back when we stop driving the camera.
+//
+// After test 97 (the physgun halo smaller than the prop): the two FOVs mean different things.
+// Garry's Mod's (Source's) is the width of a 4:3 view, widened for a wider screen: fov_desired 100
+// on 16:9 has a half-view tangent of 1.589 (about 115 degrees across, logged in tests 71-74).
+// Skyrim's worldFOV is the width of its actual screen: at 100 its frustum's right was 1.1918 =
+// tan(50 degrees) on 16:9. So the FOV is converted with Skyrim's screen shape. (SkyCraft's comment
+// says Skyrim's is a 4:3 width too; the frustum we logged says otherwise.)
 #include "Camera.h"
 
 #include "Input.h"
@@ -42,7 +49,7 @@ namespace gmsky::Camera
 		float g_eyeMin = 1e9f, g_eyeMax = -1e9f, g_punchMax = 0.0f;
 		// Skyrim's FOV, saved while Garry's Mod's is in use.
 		bool g_fovSaved = false;
-		float g_savedWorldFov = 0.0f, g_fovInUse = 0.0f;
+		float g_savedWorldFov = 0.0f, g_fovInUse = 0.0f, g_fovGmod = 0.0f, g_aspect = 0.0f;
 		std::string g_why = "not started";
 
 		RE::NiPoint3 Col(const RE::NiMatrix3& a_m, int a_c)
@@ -78,23 +85,52 @@ namespace gmsky::Camera
 				logger::info("CAMERA FOV back to Skyrim's own {:.1f}", g_savedWorldFov);
 			}
 			g_fovSaved = false;
-			g_fovInUse = 0.0f;
+			g_fovInUse = g_fovGmod = 0.0f;
 		}
 
-		// Both games' FOV is the horizontal field of view of a 4:3 view, so it is copied as is.
+		// Skyrim's screen shape (width / height) from its camera's frustum (right / top: both are
+		// tangents, so their ratio doesn't depend on the FOV); 0 if not known.
+		float ScreenAspect()
+		{
+			auto* cam = RE::Main::WorldRootCamera();
+			if (!cam) {
+				return 0.0f;
+			}
+			const auto& f = cam->GetRuntimeData2().viewFrustum;
+			return f.fTop > 1e-4f && f.fRight > 1e-4f ? f.fRight / f.fTop : 0.0f;
+		}
+
+		float FrustumRight()
+		{
+			auto* cam = RE::Main::WorldRootCamera();
+			return cam ? cam->GetRuntimeData2().viewFrustum.fRight : 0.0f;
+		}
+
+		// Garry's Mod's FOV (the width of a 4:3 view) -> Skyrim's (the width of its screen).
 		void ApplyFov(RE::PlayerCamera* a_camera, float a_fov)
 		{
 			if (a_fov < 10.0f || a_fov > 170.0f) {
 				return;
 			}
+			const float aspect = ScreenAspect();
+			if (aspect <= 0.0f) {
+				return;  // (the first frames, before Skyrim's camera exists: next frame)
+			}
+			const double half = std::tan(double(a_fov) * 0.5 * kPi / 180.0) * double(aspect) / (4.0 / 3.0);
+			const float skyrimFov = float(2.0 * std::atan(half) * 180.0 / kPi);
 			auto& data = a_camera->GetRuntimeData2();
 			if (!g_fovSaved) {
 				g_savedWorldFov = data.worldFOV;
 				g_fovSaved = true;
-				logger::info("CAMERA FOV: Skyrim's {:.1f} -> Garry's Mod's {:.1f}", g_savedWorldFov, a_fov);
 			}
-			data.worldFOV = a_fov;
-			g_fovInUse = a_fov;
+			if (a_fov != g_fovGmod || std::fabs(aspect - g_aspect) > 1e-3f) {
+				logger::info("CAMERA FOV: Garry's Mod's {:.1f} (4:3 width) on a {:.4f} screen -> Skyrim's {:.2f} (screen width; half-view tangent {:.4f}); Skyrim's own was {:.1f}",
+					a_fov, aspect, skyrimFov, half, g_savedWorldFov);
+				g_fovGmod = a_fov;
+				g_aspect = aspect;
+			}
+			data.worldFOV = skyrimFov;
+			g_fovInUse = skyrimFov;
 		}
 
 		// Whether we drive the camera now, and how. Sets g_why when not (and gives Skyrim its FOV
@@ -305,9 +341,11 @@ namespace gmsky::Camera
 			g_cameraCalls, g_turnedAfterCamera, g_turnedAfterPlayer, g_devCount ? g_devSum / g_devCount : 0.0f, g_devMax, learning,
 			g_why.empty() ? "" : " | not turning: " + g_why);
 		if (g_placed) {
-			logger::info("CAMERA eye (step 4): placed {} times; Garry's Mod eye height {:.1f}..{:.1f} -> camera {:.1f}..{:.1f} Skyrim units above the feet; moved Skyrim's own camera by {:.1f} avg {:.1f} max; view punch max {:.2f} deg; FOV {:.1f} (Skyrim's own {:.1f})",
+			logger::info("CAMERA eye (step 4): placed {} times; Garry's Mod eye height {:.1f}..{:.1f} -> camera {:.1f}..{:.1f} Skyrim units above the feet; moved Skyrim's own camera by {:.1f} avg {:.1f} max; view punch max {:.2f} deg; FOV {:.1f} (Skyrim's own {:.1f}); "
+				"Skyrim's frustum right {:.4f}, Garry's Mod's half-view tangent {:.4f} (equal = same view)",
 				g_placed, g_eyeMin, g_eyeMax, g_heightMin, g_heightMax, g_moveSum / g_placed, g_moveMax, g_punchMax, g_fovInUse,
-				g_fovSaved ? g_savedWorldFov : 0.0f);
+				g_fovSaved ? g_savedWorldFov : 0.0f, FrustumRight(),
+				g_fovGmod > 0.0f && g_aspect > 0.0f ? std::tan(double(g_fovGmod) * 0.5 * kPi / 180.0) * g_aspect / (4.0 / 3.0) : 0.0);
 		}
 		g_cameraCalls = g_turnedAfterCamera = g_turnedAfterPlayer = g_devCount = g_placed = 0;
 		g_devSum = g_devMax = g_moveSum = g_moveMax = g_punchMax = 0.0f;

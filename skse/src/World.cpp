@@ -118,7 +118,7 @@ cbuffer Frame : register(b0)
 	float4 shadowParams;                  // x: sun shadows on, y: normal offset (units), z: shadow map texel (uv), w: depth bias
 	float4 shadowExtra;                   // x: Skyrim's shadow mask usable, y: squared reach of our shadow map (units)
 	row_major float4x4 skyShadowProj[2];  // Skyrim's sun shadow cascades: camera-relative -> shadow map uv, depth
-	float4 skyShadowSplits;               // cascade 0 end, cascade 1 end (view depth), -, cascade count
+	float4 skyShadowSplits;               // cascade 0 end, cascade 1 end, cascade 1 start (view depth), cascade count
 	float4 skyShadowParams;               // slice of cascade 0, slice of cascade 1, texel size (uv), +1 standard depth / -1 reversed
 	float4 depthParams;                   // near, far, reversed
 	float4 screen;                        // 1 / width, 1 / height
@@ -128,7 +128,7 @@ cbuffer Frame : register(b0)
 	row_major float4x4 indoorProj[4];     // step I2: Skyrim's indoor shadow lights' transforms, camera-relative -> light-local
 	float4 indoorParams;                  // x: bias (units of the radius), y: slots in use, z, w: map width, height
 	float4 indoorOurs;                    // step I3: x: our objects' indoor maps on, y: their size, z: bias, w: normal offset (units)
-	float4 indoorSoft;                    // softer indoor shadow edges: x: sample radius (map uv), y: frame number (0-63)
+	float4 shadowSoft;                    // soft shadow edges (all shadows): x: sample radius (map uv), y: frame number (0-63)
 };
 cbuffer Object : register(b1)
 {
@@ -325,9 +325,28 @@ float3 Ambient(float3 n)
 	     + n2.z * (n.z >= 0 ? ambient[4].rgb : ambient[5].rgb);
 }
 
+// Soft shadow edges, Skyrim's way, for every shadow (Community Shaders' Utility.hlsl SampleShadowPCF
+// and SampleDualParaboloidShadowPCF, MIT): 8 filtered samples on a spiral (Jimenez's
+// SpiralSampleOffsets8, from Community Shaders' Random.hlsli), turned by a per-pixel angle that
+// changes every frame (interleaved gradient noise); Skyrim's TAA blends the frames into a smooth
+// edge. Indoors since test 96; the sun too since test 97 (it was 3 x 3 samples, hard on Skyrim's maps).
+static const float2 kSpiral8[8] = { float2(-0.7071, 0.7071), float2(0.0, -0.875), float2(0.5303, 0.5303), float2(-0.625, 0.0),
+	float2(0.3536, -0.3536), float2(0.0, 0.375), float2(-0.1768, -0.1768), float2(0.125, 0.0) };
+float InterleavedGradientNoise(float2 pix, float frame)
+{
+	pix += 5.588238 * frame;
+	return frac(52.9829189 * frac(dot(pix, float2(0.06711056, 0.00583715))));
+}
+float2x2 SoftRotation(float2 pix)
+{
+	float2 cs;
+	sincos(6.2831853 * InterleavedGradientNoise(pix, shadowSoft.y), cs.y, cs.x);
+	return float2x2(cs.x, cs.y, -cs.y, cs.x);
+}
+
 // How much sun reaches a camera-relative point past our objects: 1 lit, 0 shadowed (SkyCraft's
 // SunShadow). n pushes the lookup off the surface so faces don't shadow themselves.
-float SunShadow(float3 rel, float3 n)
+float SunShadow(float3 rel, float3 n, float2 pix)
 {
 	if (shadowParams.x < 0.5) {
 		return 1.0;
@@ -339,18 +358,42 @@ float SunShadow(float3 rel, float3 n)
 	}
 	float2 uv = float2(lp.x * 0.5 + 0.5, 0.5 - lp.y * 0.5);
 	float  ref = lp.z - shadowParams.w;
+	// The same softness in world units as on Skyrim's nearest cascade (its uv per unit is the length
+	// of its first row; ours is half of lightViewProj's), so both kinds of shadow look alike.
+	float  skyUvPerUnit = skyShadowSplits.w > 0.5 ? length(skyShadowProj[0][0].xyz) : 0.0;
+	float  radius = skyUvPerUnit > 0.0 ? shadowSoft.x / skyUvPerUnit * 0.5 * length(lightViewProj[0].xyz) : 2.0 * shadowParams.z;
+	float2x2 rot = SoftRotation(pix);
 	float  lit = 0.0;
-	[unroll] for (int y = -1; y <= 1; ++y) {
-		[unroll] for (int x = -1; x <= 1; ++x) {
-			lit += shadowMap.SampleCmpLevelZero(shadowSampler, uv + float2(x, y) * shadowParams.z, ref);
+	[unroll] for (int k = 0; k < 8; ++k) {
+		lit += shadowMap.SampleCmpLevelZero(shadowSampler, uv + mul(kSpiral8[k], rot) * radius, ref);
+	}
+	return lerp(1.0, lit / 8.0, saturate((1.0 - edge) * 8.0));  // fades out towards the map's edge
+}
+
+// One of Skyrim's sun cascades at camera-relative point p, filtered as above.
+float SkyrimCascade(uint cascade, float3 p, float2x2 rot)
+{
+	float4 ls = mul(skyShadowProj[cascade], float4(p, 1.0));
+	ls.xyz /= ls.w;
+	if (any(ls.xy <= 0.0) || any(ls.xy >= 1.0)) {
+		return 1.0;
+	}
+	float slice = cascade == 0 ? skyShadowParams.x : skyShadowParams.y;
+	float lit = 0.0;
+	[unroll] for (int k = 0; k < 8; ++k) {
+		float3 uv = float3(ls.xy + mul(kSpiral8[k], rot) * shadowSoft.x, slice);
+		if (skyShadowParams.w > 0.0) {
+			lit += skyrimShadowMaps.SampleCmpLevelZero(shadowSampler, uv, ls.z - 0.0005);  // standard depth (every test so far)
+		} else {
+			lit += ls.z + 0.0005 >= skyrimShadowMaps.SampleLevel(pointSampler, uv, 0) ? 1.0 : 0.0;
 		}
 	}
-	return lerp(1.0, lit / 9.0, saturate((1.0 - edge) * 8.0));  // fades out towards the map's edge
+	return lit / 8.0;
 }
 
 // How much sun reaches a camera-relative point past Skyrim's own geometry, from the shadow maps
 // Skyrim rendered for the sun this frame (SkyCraft's SkyrimSunShadow): 1 lit, 0 shadowed.
-float SkyrimSunShadow(float3 rel, float3 n, float viewZ)
+float SkyrimSunShadow(float3 rel, float3 n, float viewZ, float2 pix)
 {
 	if (skyShadowSplits.w < 0.5) {
 		return 1.0;
@@ -359,21 +402,16 @@ float SkyrimSunShadow(float3 rel, float3 n, float viewZ)
 	if (cascade >= (uint)skyShadowSplits.w || viewZ >= (cascade == 0 ? skyShadowSplits.x : skyShadowSplits.y)) {
 		return 1.0;  // beyond Skyrim's shadow range
 	}
-	float4 ls = mul(skyShadowProj[cascade], float4(rel + n * 6.0, 1.0));
-	ls.xyz /= ls.w;
-	if (any(ls.xy <= 0.0) || any(ls.xy >= 1.0)) {
-		return 1.0;
-	}
-	float slice = cascade == 0 ? skyShadowParams.x : skyShadowParams.y;
-	float lit = 0.0;
-	[unroll] for (int y = -1; y <= 1; ++y) {
-		[unroll] for (int x = -1; x <= 1; ++x) {
-			float d = skyrimShadowMaps.SampleLevel(pointSampler, float3(ls.xy + float2(x, y) * skyShadowParams.z, slice), 0);
-			lit += skyShadowParams.w > 0.0 ? (ls.z - 0.0005 <= d ? 1.0 : 0.0) : (ls.z + 0.0005 >= d ? 1.0 : 0.0);
-		}
+	float3 p = rel + n * 6.0;
+	float2x2 rot = SoftRotation(pix);
+	float lit = SkyrimCascade(cascade, p, rot);
+	// Skyrim's own blend (Community Shaders' Utility.hlsl): from cascade 0 to 1 between where cascade
+	// 1 starts and cascade 0 ends, so there is no visible line between them.
+	if (cascade == 0 && skyShadowSplits.w > 1.5 && viewZ > skyShadowSplits.z && skyShadowSplits.z < skyShadowSplits.x) {
+		lit = lerp(lit, SkyrimCascade(1, p, rot), smoothstep(0.0, 1.0, (viewZ - skyShadowSplits.z) / (skyShadowSplits.x - skyShadowSplits.z)));
 	}
 	float end = skyShadowSplits.w > 1.5 ? skyShadowSplits.y : skyShadowSplits.x;
-	return lerp(lit / 9.0, 1.0, saturate((viewZ - end * 0.85) / (end * 0.15)));  // fade out at the far end
+	return lerp(lit, 1.0, saturate((viewZ - end * 0.85) / (end * 0.15)));  // fade out at the far end
 }
 
 
@@ -382,17 +420,7 @@ float SkyrimSunShadow(float3 rel, float3 n, float viewZ)
 // map: Skyrim's lookup as Community Shaders reconstructs it (Utility.hlsl, RENDER_SHADOWMASKDPB, MIT;
 // checked against Skyrim's own shadow mask in test 93: 99.86%), 3 x 3 texels kept inside the half.
 // Used on Skyrim's copied maps (I2) and on our objects' own maps, drawn the same way (I3).
-// Softer edges, Skyrim's way (Community Shaders' Utility.hlsl SampleDualParaboloidShadowPCF, MIT):
-// 8 filtered samples on a spiral (Jimenez's SpiralSampleOffsets8, from Community Shaders'
-// Random.hlsli), turned by a per-pixel angle that changes every frame (interleaved gradient noise);
-// Skyrim's TAA blends the frames into a smooth edge.
-static const float2 kSpiral8[8] = { float2(-0.7071, 0.7071), float2(0.0, -0.875), float2(0.5303, 0.5303), float2(-0.625, 0.0),
-	float2(0.3536, -0.3536), float2(0.0, 0.375), float2(-0.1768, -0.1768), float2(0.125, 0.0) };
-float InterleavedGradientNoise(float2 pix, float frame)
-{
-	pix += 5.588238 * frame;
-	return frac(52.9829189 * frac(dot(pix, float2(0.06711056, 0.00583715))));
-}
+// Softer edges, Skyrim's way (SoftRotation and kSpiral8 above).
 float ParaboloidLight(Texture2DArray<float> maps, float2 size, float bias, float3 rel, uint slot, float invRadius, float2 pix)
 {
 	float3 p = mul(float4(rel, 1.0), indoorProj[slot]).xyz;
@@ -401,14 +429,12 @@ float ParaboloidLight(Texture2DArray<float> maps, float2 size, float bias, float
 	float2 uv = dir.xy / dir.z * 0.5 + 0.5;
 	uv.y = lower ? 1.0 - 0.5 * uv.y : 0.5 * uv.y;
 	float  cmp = saturate(length(p) * invRadius) - bias;
-	float2 cs;
-	sincos(6.2831853 * InterleavedGradientNoise(pix, indoorSoft.y), cs.y, cs.x);
-	float2x2 rot = float2x2(cs.x, cs.y, -cs.y, cs.x);
+	float2x2 rot = SoftRotation(pix);
 	float  edge = 0.5 / size.y;  // keep every sample inside its own half
 	float  ylo = lower ? 0.5 + edge : edge, yhi = lower ? 1.0 - edge : 0.5 - edge;
 	float  vis = 0.0;
 	[unroll] for (int k = 0; k < 8; ++k) {
-		float2 o = mul(kSpiral8[k], rot) * indoorSoft.x;
+		float2 o = mul(kSpiral8[k], rot) * shadowSoft.x;
 		o.y *= 0.5;  // a half is half as tall as it is wide: the same angle either way
 		vis += maps.SampleCmpLevelZero(shadowSampler, float3(uv.x + o.x, clamp(uv.y + o.y, ylo, yhi), slot), cmp);
 	}
@@ -500,7 +526,7 @@ PSOut ModelPS(ModelOut i)
 	}
 	float3 c;
 	float3 L = sunDir.xyz;
-	float  sunVisible = shadowParams.x > 0.5 ? SunShadow(i.rel, geo) * SkyrimSunShadow(i.rel, geo, i.viewZ) : 1.0;
+	float  sunVisible = shadowParams.x > 0.5 ? SunShadow(i.rel, geo, i.pos.xy) * SkyrimSunShadow(i.rel, geo, i.viewZ, i.pos.xy) : 1.0;
 	{
 		float3 lit = Ambient(n) + sunColor.rgb * (saturate(dot(n, L)) * sunVisible);
 		float3 spec = 0;
@@ -561,8 +587,8 @@ PSOut ModelPS(ModelOut i)
 			// reaches it, blue = in our objects' shadow; yellow = sun shadows off here. Indoors (step I2):
 			// red = Skyrim's indoor shadow lights blocked, green = they reach it, by their share of light;
 			// blue added = our objects block them (step I3).
-			float sky = SkyrimSunShadow(i.rel, geo, i.viewZ);
-			float ours = SunShadow(i.rel, geo);
+			float sky = SkyrimSunShadow(i.rel, geo, i.viewZ, i.pos.xy);
+			float ours = SunShadow(i.rel, geo, i.pos.xy);
 			float inside = indoorAll > 1e-4 ? indoorLit / indoorAll : -1.0;
 			float insideOurs = indoorAll > 1e-4 ? indoorOursLit / indoorAll : 1.0;
 			c = shadowParams.x > 0.5 ? float3(1.0 - sky, sky, 1.0 - ours) * 0.5 : inside >= 0.0 ? float3(1.0 - inside, inside, 1.0 - insideOurs) * 0.5 : float3(0.5, 0.5, 0.0);
@@ -606,7 +632,7 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
 	float3 rel = h.xyz / h.w;
 	float3 n = normalize(cross(ddy(rel), ddx(rel)));
 	n = dot(n, rel) > 0 ? -n : n;
-	float shadow = dot(rel, rel) > shadowExtra.y ? 1.0 : SunShadow(rel, n);
+	float shadow = dot(rel, rel) > shadowExtra.y ? 1.0 : SunShadow(rel, n, pos.xy);
 	float3 lumW = float3(0.2125, 0.7154, 0.0721);
 	float  ambL = dot(Ambient(n), lumW);
 	// Step I3: our objects' shadows from Skyrim's indoor shadow lights. The light Skyrim lit this pixel
@@ -664,7 +690,7 @@ float4 ShadowProbePS(float4 pos : SV_Position) : SV_Target
 	uint   cascade = viewZ < skyShadowSplits.x ? 0 : 1;
 	bool   inRange = skyShadowSplits.w > 0.5 && cascade < (uint)skyShadowSplits.w && viewZ < (cascade == 0 ? skyShadowSplits.x : skyShadowSplits.y);
 	if ((px & 1) == 0) {
-		return float4(SkyrimSunShadow(rel, n, viewZ), SunShadow(rel, n), inRange ? (float)cascade : -1.0, viewZ);
+		return float4(SkyrimSunShadow(rel, n, viewZ, pos.xy), SunShadow(rel, n, pos.xy), inRange ? (float)cascade : -1.0, viewZ);
 	}
 	float4 ls = mul(skyShadowProj[cascade], float4(rel + n * 6.0, 1.0));
 	ls.xyz /= ls.w;
@@ -758,7 +784,7 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 			float indoorProj[4][4][4];  // step I2
 			float indoorParams[4];
 			float indoorOurs[4];  // step I3
-			float indoorSoft[4];
+			float shadowSoft[4];
 		};
 		static_assert(sizeof(FrameConstants) % 16 == 0);
 
@@ -832,6 +858,7 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 		{
 			float m[4][4];
 			float split;
+			float start;  // where Skyrim starts using this cascade (it blends over from the one before)
 			uint32_t slice;
 		};
 		CascadeSnapshot g_cascades[2]{};
@@ -881,7 +908,7 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 		constexpr float kOurIndoorBias = 0.003f, kOurIndoorOffset = 3.0f;
 		// Softer indoor edges: the spiral's radius in map uv (same angle on Skyrim's 4096 maps and our
 		// 1024 ones; ~7 units of penumbra at 300 units from the light). Chosen by eye, not Skyrim's own number.
-		constexpr float kIndoorSoftUv = 0.006f;
+		constexpr float kShadowSoftUv = 0.006f;
 		uint32_t g_frameNumber = 0;
 		ID3D11Texture2D* g_ourIndoorTex = nullptr;
 		ID3D11DepthStencilView* g_ourIndoorDsv[kIndoorSlots]{};
@@ -1821,6 +1848,7 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 				}
 				std::memcpy(g_cascades[k].m, &descs[k].lightTransform.m, sizeof(g_cascades[k].m));
 				g_cascades[k].split = k < 3 ? dsl.endSplitDistances[k] : 0.0f;
+				g_cascades[k].start = k < 3 ? dsl.startSplitDistances[k] : 0.0f;
 				g_cascades[k].slice = slice;
 			}
 			g_cascadeCount = count;
@@ -1859,14 +1887,15 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 					if (!logged) {
 						logged = true;
 						const float u = a_fc.skyShadowProj[0][0][3], v = a_fc.skyShadowProj[0][1][3], z = a_fc.skyShadowProj[0][2][3], w = a_fc.skyShadowProj[0][3][3];
-						logger::info("shadows: Skyrim's sun: {} cascades, slices {} {}, maps {}x{} format {}, splits {:.0f} {:.0f}; matrix {}, depth {}; camera at uv ({:.3f}, {:.3f}) depth {:.4f} w {:.3f}",
+						logger::info("shadows: Skyrim's sun: {} cascades, slices {} {}, maps {}x{} format {}, splits {:.0f} {:.0f} (cascade 1 starts at {:.0f}; soft radius {:.4f} uv); matrix {}, depth {}; camera at uv ({:.3f}, {:.3f}) depth {:.4f} w {:.3f}",
 							g_cascadeCount, g_cascades[0].slice, g_cascadeCount > 1 ? g_cascades[1].slice : 0, td.Width, td.Height, static_cast<int>(td.Format),
-							g_cascades[0].split, g_cascades[1].split, rowVector ? "row-vector" : "column-vector", standard ? "standard" : "reversed", u / w, v / w, z / w, w);
+							g_cascades[0].split, g_cascades[1].split, g_cascades[1].start, kShadowSoftUv, rowVector ? "row-vector" : "column-vector", standard ? "standard" : "reversed", u / w, v / w, z / w, w);
 					}
 				}
 			}
 			a_fc.skyShadowSplits[0] = g_cascades[0].split;
 			a_fc.skyShadowSplits[1] = g_cascadeCount > 1 ? g_cascades[1].split : g_cascades[0].split;
+			a_fc.skyShadowSplits[2] = g_cascadeCount > 1 ? g_cascades[1].start : g_cascades[0].split;
 			a_fc.skyShadowSplits[3] = float(g_cascadeCount);
 			Set4(a_fc.skyShadowParams, 0.0f, g_cascadeCount > 1 ? 1.0f : 0.0f, 1.0f / float(std::max<UINT>(td.Width, 1)), standard ? 1.0f : -1.0f);
 			return g_sunShadowCopySrv;
@@ -3149,7 +3178,7 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 			// Step I3: our objects cast indoor shadows when one of our lights has a copied Skyrim map.
 			in.indoor = g_ourIndoorSrv && canUnproject && std::ranges::any_of(fc.lightColor, [](const float(&a_c)[4]) { return a_c[3] > 0.5f; });
 			Set4(fc.indoorOurs, in.indoor ? 1.0f : 0.0f, float(kOurIndoorSize), kOurIndoorBias, kOurIndoorOffset);
-			Set4(fc.indoorSoft, kIndoorSoftUv, float(g_frameNumber++ % 64), 0.0f, 0.0f);
+			Set4(fc.shadowSoft, kShadowSoftUv, float(g_frameNumber++ % 64), 0.0f, 0.0f);
 			if (in.shadows) {
 				SetSunShadowMatrix(fc, cam);
 				in.skyrimShadows = SetSkyrimShadows(fc, cam);

@@ -1964,6 +1964,13 @@ they hide what's behind them.
   - *Polish list (user, 2026-10-05):* phong values; physgun drag lag; Skyrim's directional ambient
     is a 3x4 matrix in its shader (`mul(DirectionalAmbient, float4(n, 1))`), we use the weather's
     six colours (SkyCraft's way); Source's `$halflambert`; Source `$envmap` reflections on metal.
+    *Added 2026-10-06 (test 98):* outdoor sun shadows too soft and faint next to Skyrim's own (the
+    user: indoor ones are "way better"). Checked: the comparison isn't reversed (lit = compared depth
+    at or before the stored one, as before the change). Likely cause: the softness is one uv radius
+    (`kShadowSoftUv` 0.006) for all maps; on the sun's 4,096-texel cascades that is about 25 texels,
+    which covers far more ground than on the indoor maps, so dark edges are smeared into grey. To
+    try: a separate, smaller sun radius (Skyrim's own `ShadowSampleParam.z`, read from its shader
+    constants, would be best); log the cascade's width in units to set it in world units.
 - **Test 86 results and step N1: NPC shadows (2026-10-05).** Brightness fix: right (user:
   "Perfect"). New report: NPCs "don't seem to be affected by shadows", "pop out a ton and look very
   flat"; lights do reach them. NPCs and props go through the same shader and the same shadow
@@ -2109,7 +2116,25 @@ they hide what's behind them.
     model, with the view model stamped solid.
   - Test: hands, weapon and HUD look as before (with HOLOHUD's blurred plates); props, NPCs and
     effects look as before; Garry's Mod's log has no "live overlay world" line; Skyrim's log no
-    "world layer drawn" line.
+    "world layer drawn" line. **Done (test 97).**
+- **After test 97 (the user's two notes).**
+  - *FOV fix (the physgun halo smaller than the prop).* Garry's Mod's FOV is the width of a 4:3
+    view, widened for a wider screen; Skyrim's `worldFOV` is the width of its actual screen (its
+    frustum at 100 on 16:9 was tan 50 degrees; Garry's Mod's view at 100 is tan 57.8). Copying the
+    number made Skyrim's view narrower: Skyrim's props came out bigger than Garry's Mod's halo,
+    hands and anything else in its picture. `Camera.cpp` now converts with Skyrim's screen shape,
+    and logs both half-view tangents every second (equal = same view). Differs from SkyCraft,
+    whose comment says Skyrim's FOV is a 4:3 width too; the frustum we logged says otherwise.
+  - *Outdoor shadows like indoor ones.* The sun used 3 x 3 samples (hard yes / no on Skyrim's
+    cascades, so stair-stepped edges). Now the same filter as indoors and as Skyrim's own
+    (Community Shaders' `SampleShadowPCF`): 8 rotated spiral samples on Skyrim's cascades and on
+    our sun map (same softness in world units as Skyrim's nearest cascade), and Skyrim's blend from
+    cascade 0 to cascade 1 where they overlap (`startSplitDistances`), so no line between them.
+  - *Proposed, waiting for the user: G9, the hands, weapon and HUD drawn in Skyrim too.* See the
+    hand-over of 2026-10-06: the view model could be drawn like the props (it is a model); Lua's
+    2D HUD drawing (HOLOHUD, Sandbox's HUD, menus) has no geometry to send and would stay a picture
+    or need a collector for Lua's 2D drawing calls. Not started; first see whether the FOV fix
+    already makes the two match.
 
 **Not sure (checked by logs, not guessed):** whether `util.GetModelMeshes` gives normals and the
 model's real skin materials for every model (the wiki lists a `skin` argument); whether

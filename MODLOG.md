@@ -1526,3 +1526,24 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 **Result (logs):** hands / HUD picture 60 a second, 0 errors; Garry's Mod wiped every frame at the view model, view model and hands stamped solid; physgun halos drawn with the overlay's alpha kept (up to 682 per 5 s); no world-layer lines.
 **User's notes:** (1) outdoor shadows look worse than indoor ones now: use the same system if possible; (2) the physgun halo looks smaller than the object. Found for (2): the two games' fields of view differ. Garry's Mod's 100 is a 4:3 view widened for 16:9 (half-view tangent 1.589, about 115 degrees across); Skyrim was given 100 and draws 100 degrees across its actual 16:9 screen (frustum 1.1918, logged in tests 71-74). Skyrim draws the props narrower-angled, i.e. bigger, than Garry's Mod's picture with the halo, hands and HUD.
 **Next:** commit G8; fix the FOV conversion.
+## 2026-10-06 FOV fix: Skyrim's view as wide as Garry's Mod's (built, not tested in game)
+
+**Committed before this:** `d67bbd1` (G8, test 97), user: "Commit changes, it works fine".
+**Why:** test 97, the physgun halo looked smaller than the prop. Garry's Mod's FOV 100 is the width of a 4:3 view, widened for 16:9 (half-view tangent 1.589, about 115 degrees across); Skyrim was given 100 and its `worldFOV` is the width of its actual screen (frustum right 1.1918 = tan 50 degrees, logged in tests 71-74). Skyrim drew everything narrower-angled (bigger) than Garry's Mod's picture with the halo, hands and HUD.
+**Changed:** `skse/src/Camera.cpp`: `ApplyFov` converts: Skyrim's half-view tangent = tan(Garry's Mod's FOV / 2) x (screen width / height) / (4 / 3), the screen shape from Skyrim's own frustum (right / top). Logged when it changes ("CAMERA FOV: Garry's Mod's 100.0 (4:3 width) on a 1.7778 screen -> Skyrim's 115.6..."), and every second Skyrim's frustum right next to Garry's Mod's tangent (equal = the same view).
+**Differs from SkyCraft:** SkyCraft's comment says Skyrim's FOV is a 4:3 width; our logged frustum says it is the screen's width.
+**Expected:** Skyrim's world looks wider (as Garry's Mod's own window did); props, NPCs and the halo line up with the hands' picture.
+**Tested how:** plugin built, no warnings, copied into Skyrim. **Not tested in game.**
+## 2026-10-06 Outdoor shadows filtered like indoor ones (built, not tested in game)
+
+**Why:** test 97, the user: outdoor shadows look worse than interior ones now, use the same system. The sun used 3 x 3 samples: hard yes / no on Skyrim's cascades (stair-stepped edges), 3 x 3 filtered on our sun map (blocky).
+**Changed:** `skse/src/World.cpp` shader: the indoor filter (8 filtered samples on a rotated spiral, angle per pixel and frame, smoothed by Skyrim's TAA) moved in front of the sun code and used there too, as Skyrim does (Community Shaders' `SampleShadowPCF`, MIT): `SkyrimCascade` / `SkyrimSunShadow` on Skyrim's cascades (radius 0.006 uv, the indoor constant, renamed `kShadowSoftUv`; a comparison sample instead of point samples), `SunShadow` on our map (the same radius in world units as Skyrim's nearest cascade). New: Skyrim's blend from cascade 0 to 1 between cascade 1's start (`startSplitDistances`, captured now) and cascade 0's end, so no line between them. Frame constant `indoorSoft` renamed `shadowSoft`, `skyShadowSplits.z` = cascade 1's start. The once-only "shadows: Skyrim's sun" log line adds cascade 1's start and the radius. THIRD-PARTY-NOTICES updated.
+**Tested how:** plugin built, no warnings, copied into Skyrim; all 13 shader entry points compile offline (one old warning about `pow` in the colour code, not new). **Not tested in game.**
+**Not sure:** whether the same radius in uv looks right on cascade 1 (it covers far more ground, so its edges get softer with distance; Skyrim does the same); Skyrim's own radius (`ShadowSampleParam`) still isn't known.
+**Next:** in-game test 98 (both changes).
+## 2026-10-06 In-game test 98 (logs `build/logs-ingame-test-98/`): FOV fix works; outdoor shadows parked as polish
+
+**Tested how:** user with the physgun outdoors and indoors. User: "physgun works flawless"; "outdoor shadows feel too soft and faint compared to shadows casted by Skyrim itself ... Shadows indoors are way better. Let's add that to the polish section and move on".
+**Result (logs):** "CAMERA FOV: Garry's Mod's 100.0 (4:3 width) on a 1.7778 screen -> Skyrim's 115.63"; every second Skyrim's frustum right 1.5890 = Garry's Mod's half-view tangent 1.5890 (335 of 335 lines): the two views are the same. Sun: 2 cascades, splits 1134 / 10100, cascade 1 from 934, radius 0.0060 uv.
+**Outdoor shadows:** comparison checked, not reversed. Likely too wide a radius for the sun's cascades (one uv radius shared with the indoor maps). Kept as is for now; added to the polish list in DESIGN.md with what to try.
+**Next:** the user's choice (G7 effects, props falling through the ground, polish, or G9 hands / HUD in Skyrim).
