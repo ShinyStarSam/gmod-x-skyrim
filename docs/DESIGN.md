@@ -2276,6 +2276,15 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
   - *Then (the user's order, after test 109): B, number or shape?* `rebuild grid`: test 108 under
     the player, but a neat flat grid with as many triangles as the chunk that crashed (~7,400).
     Crashes = the number matters (smaller meshes); survives = Skyrim's shapes matter (clean them).
+  - *Then (after Ghidra, user's choice): our mesh and the world never collide.* Ghidra showed
+    the crash is a per-object list of "pair records" (65,533 at most), and gm_flatmap's world
+    (6 giant pieces) adds ~6 records per mesh triangle. The engine asks the game's collision
+    filter before making them, so every test mesh answers `ShouldCollide` with **false** for
+    (mesh, world), on both sides. The mesh never moves, so it never needs to touch the world.
+    For the answer to count when the records are made, the mesh's custom collision check is
+    switched on **before** `PhysicsFromMesh` (until now it came last, after `SetSolid`). Logged:
+    how often the hook was asked about (mesh, world), per mesh and per setup call. Not sure
+    Garry's Mod asks the hook about the world at all; the counts will show it.
 - **S1d (only if S1c's chunks work and the user wants them bigger): Skyrim collects further out.**
   `kRadius` 5 → e.g. 12 regions, and the store keeps regions longer (`EVICT_REGIONS`, `kForget`),
   so a chunk can be one Skyrim cell (8 regions, 4,096 Skyrim units ≈ 2,176 Garry's Mod units) or

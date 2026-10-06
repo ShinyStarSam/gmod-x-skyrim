@@ -186,17 +186,32 @@ after a new mesh object is set up: the last log line was `SetSolid` (tests 109, 
   was full in each test.
 
 **Ideas not tried yet (my order; one variable each):**
-1. **Tell the engine our mesh and the world never collide.** The mesh already has
-   `SetCustomCollisionCheck(true)`; a `ShouldCollide` hook returning false for (mesh, world) should
-   stop the ~6 x T world records from being made at all, since the engine asks first (seen in the
-   code). Costs nothing in play: the mesh never moves, so it never needs the world. Test: test 111's
-   setup (`rebuild grid`) plus the chunk tests. **Not sure** Garry's Mod asks the hook for world pairs:
-   the hook would log how often it is asked about the world, so we'd know.
+1. ~~**Tell the engine our mesh and the world never collide.**~~ **Tried in test 112: same crash.**
+   A `ShouldCollide` hook answering false for (mesh, world), with the mesh's custom collision check
+   switched on before `PhysicsFromMesh`. Over 7 builds of test 111's grid (7,442 triangles), the hook
+   was asked about (mesh, world) **0 times**, on both sides. Build 7 (the first with the player
+   moving, speed 62) crashed at `SetMass(50000)`, with the same dump signature. So Garry's Mod does
+   **not** ask the Lua hook about world pairs: the engine's filter decides them before Lua is asked
+   (not seen in the code yet; that's an assumption from the count). Another way to say "never with the world"
+   would be needed (see 2b).
 2. **Count the lists directly.** Our Rust module reads (never writes) the list sizes of the mesh, the
    world and the player's physics object through the offsets Ghidra showed, and logs them before and
    after every setup call. Tells exactly which list fills and from what, including the unexplained
    ~20,000-45,000. More work, and depends on Garry's Mod's internal layout (not sure of the first
    step: from a Lua physics object to the engine's object).
+2b. ~~**Read how `server.dll`'s collision filter decides world pairs.**~~ **Done (Ghidra) + test 113.**
+   `server.dll+0x3b9f80` (Source's `CCollisionEvent::ShouldCollide`) would reach the Lua hook for
+   (mesh, world) with the values logged in test 113, but the hook is asked about the mesh and the
+   **player** only, never the world (175 builds). So `vphysics.dll` decides the world pair without
+   asking the game (a bypass on two engine bits, or "no game data"; not known which). A Lua "no" or
+   `constraint.NoCollide` can't reach it. Test 113's grid crashed on build 2, standing still.
+2c. **Turn off the world's physics collisions** (my next pick, one line of Lua):
+   `game.GetWorld():GetPhysicsObject():EnableCollisions(false)` while the experiment runs. This works
+   on the engine object itself, not through the game's filter, so the world shouldn't make pair records with
+   anything. Costs nothing in our design: the player, bullets and our ground use traces (not
+   physics), and props should land on our meshes, not gm_flatmap's floor 16,300 units down. **Not
+   sure** the engine honours it for the world object, or what props do if a mesh is missing (fall
+   forever instead of stopping on the map's floor). Log: crash or not; props' fall.
 3. **Build only far from the player.** The opposite of 110's start-up problem: build a chunk only when
    the player's body is at least ~1,000 units from it (needs Skyrim to collect further out, S1d), and
    log the real distance. Test 16 is the only pattern that never crashed.

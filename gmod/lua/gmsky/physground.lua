@@ -19,6 +19,7 @@
 -- Every mesh uses InfMap2's chunk setup (https://codeberg.org/googer/infmap2,
 -- lua/entities/inf_chunk.lua and lua/infmap2/ish/physics.lua). InfMap2 has no licence file: its
 -- setup is described in DESIGN.md and written here from that description; no code is copied.
+-- Every test mesh and the map's world never collide (the ShouldCollide hook below; after Ghidra).
 -- The client builds its copy too, from the same store (one module per process). A log line goes
 -- out before every setup call (lines are flushed one by one), so a crash names the call.
 
@@ -194,10 +195,16 @@ function ENT:BuildMesh()
 		name, n, #verts, hi.x - lo.x, hi.y - lo.y, hi.z - lo.z, mhi.x - mlo.x, mhi.y - mlo.y, mhi.z - mlo.z, gap, shape,
 		(SysTime() - t0) * 1000, s.builds, s.tris, destroyed, MeshesWithPhysics(), PlayerLine(self, lo, hi)))
 	local function Step(what, fn)
-		gmsky.Log(string.format("physground: %s step: %s", name, what))
+		gmsky.Log(string.format("physground: %s step: %s (ShouldCollide asked about this mesh with: %s; mesh: %s)",
+			name, what, G.AskedLine(self), G.CollisionFacts(self)))
 		return fn()
 	end
+	gmsky.Log(string.format("physground: %s world: %s", name, G.CollisionFacts(game.GetWorld())))
 	t0 = SysTime()
+	-- The custom collision check goes on first, before the physics object exists, so the
+	-- ShouldCollide hook's "never with the world" counts when the engine makes its pair records
+	-- (PhysicsFromMesh, SetSolid). Nothing to re-check yet, so no CollisionRulesChanged.
+	Step("SetCustomCollisionCheck(true), before the physics object", function() self:SetCustomCollisionCheck(true) end)
 	-- InfMap2's chunk setup, in its order.
 	Step("PhysicsDestroy", function() self:PhysicsDestroy() end)
 	self.gmskyOk = Step("PhysicsFromMesh", function() return self:PhysicsFromMesh(verts) end)
@@ -215,18 +222,18 @@ function ENT:BuildMesh()
 	Step("AddSolidFlags(FSOLID_FORCE_WORLD_ALIGNED)", function() self:AddSolidFlags(FSOLID_FORCE_WORLD_ALIGNED) end)
 	Step("AddFlags(FL_STATICPROP)", function() self:AddFlags(FL_STATICPROP) end)
 	Step("AddEFlags(EFL_KEEP_ON_RECREATE_ENTITIES)", function() self:AddEFlags(EFL_KEEP_ON_RECREATE_ENTITIES) end)
-	Step("SetCustomCollisionCheck(true)", function() self:SetCustomCollisionCheck(true) end)
 	local ms = (SysTime() - t0) * 1000
 	s.worst = math.max(s.worst, ms)
 	phys = self:GetPhysicsObject()
-	gmsky.Log(string.format("physground: built %s in %.2f ms: %d triangles; meshes with physics on this side %d; PhysicsFromMesh=%s physics object=%s solid=%d solid flags=%d%s",
-		name, ms, n, MeshesWithPhysics(), tostring(self.gmskyOk), tostring(IsValid(phys)), self:GetSolid(), self:GetSolidFlags(),
+	gmsky.Log(string.format("physground: built %s in %.2f ms: %d triangles; ShouldCollide asked about this mesh with: %s (the world answered no); mesh: %s; meshes with physics on this side %d; PhysicsFromMesh=%s physics object=%s solid=%d solid flags=%d%s",
+		name, ms, n, G.AskedLine(self), G.CollisionFacts(self), MeshesWithPhysics(), tostring(self.gmskyOk), tostring(IsValid(phys)), self:GetSolid(), self:GetSolidFlags(),
 		IsValid(phys) and string.format(" mass %.0f, constraint-static flag %s, no-self-collisions flag %s, moving %s", phys:GetMass(),
 			tostring(phys:HasGameFlag(FVPHYSICS_CONSTRAINT_STATIC)), tostring(phys:HasGameFlag(FVPHYSICS_NO_SELF_COLLISIONS)),
 			tostring(phys:IsMotionEnabled())) or ""))
 end
 
 function ENT:Initialize()
+	self.gmskyMesh = true -- the ShouldCollide hook below: never collides with the world
 	if SERVER then self:BuildMesh() end
 end
 
@@ -246,11 +253,61 @@ hook.Add("PhysgunPickup", "gmsky_physground_nograb", function(_, ent)
 end)
 
 -- InfMap2 also turns on custom collision checks for every entity in its world and answers
--- ShouldCollide (all of ours are in one "chunk", so it never says no). Counted, to see it runs.
-G.shouldCollide = 0
-hook.Add("ShouldCollide", "gmsky_physground_count", function()
+-- ShouldCollide. Ours says no to one pair only: a test mesh and the map's world. Ghidra: the
+-- engine makes ~6 pair records per mesh triangle with gm_flatmap's world (6 giant pieces), and
+-- a 65,533-entry list of them overflowed in every crash; it asks this filter first. The mesh
+-- never moves, so it never needs the world. Always the same answer for the same pair, as the
+-- hook requires.
+G.shouldCollide, G.worldAsked = 0, 0
+hook.Add("ShouldCollide", "gmsky_physground_noworld", function(a, b)
 	G.shouldCollide = G.shouldCollide + 1
+	-- Every partner a test mesh is asked about, by class (test 112: never the world; is the mesh
+	-- asked about anything?).
+	for _, pair in ipairs({ { a, b }, { b, a } }) do
+		local m, other = pair[1], pair[2]
+		if m.gmskyMesh then
+			local k = other:IsWorld() and "the world" or other:GetClass()
+			m.gmskyAsked = m.gmskyAsked or {}
+			m.gmskyAsked[k] = (m.gmskyAsked[k] or 0) + 1
+		end
+	end
+	local mesh = (a.gmskyMesh and b:IsWorld() and a) or (b.gmskyMesh and a:IsWorld() and b) or nil
+	if mesh then
+		G.worldAsked = G.worldAsked + 1
+		mesh.gmskyWorldAsked = (mesh.gmskyWorldAsked or 0) + 1
+		return false
+	end
 end)
+
+-- What server.dll's collision decision (Ghidra: +0x3b9f80, Source's CCollisionEvent::ShouldCollide)
+-- checks before it asks the Lua hook, for one entity: move type (7 = pusher), solid type
+-- (0 = none), solid flags, collision group, and its physics object's game flags, whether it
+-- can move and its contents.
+local FLAGS = { "FVPHYSICS_CONSTRAINT_STATIC", "FVPHYSICS_NO_SELF_COLLISIONS", "FVPHYSICS_PLAYER_HELD",
+	"FVPHYSICS_MULTIOBJECT_ENTITY", "FVPHYSICS_HEAVY_OBJECT", "FVPHYSICS_PENETRATING", "FVPHYSICS_NO_PLAYER_PICKUP",
+	"FVPHYSICS_WAS_THROWN", "FVPHYSICS_DMG_DISSOLVE", "FVPHYSICS_NO_IMPACT_DMG", "FVPHYSICS_NO_NPC_IMPACT_DMG" }
+function G.CollisionFacts(ent)
+	if not IsValid(ent) and not (ent and ent.IsWorld and ent:IsWorld()) then return "not valid" end
+	local s = string.format("move type %d, solid %d, solid flags 0x%x, collision group %d", ent:GetMoveType(), ent:GetSolid(),
+		ent:GetSolidFlags(), ent:GetCollisionGroup())
+	local phys = ent:GetPhysicsObject()
+	if not IsValid(phys) then return s .. ", no physics object" end
+	local on = {}
+	for _, name in ipairs(FLAGS) do
+		if _G[name] and phys:HasGameFlag(_G[name]) then on[#on + 1] = name:sub(12) end
+	end
+	return s .. string.format(", physics: game flags [%s], moveable %s, motion %s, contents 0x%x", table.concat(on, " "),
+		tostring(phys:IsMoveable()), tostring(phys:IsMotionEnabled()), phys:GetContents())
+end
+
+-- Partners the hook was asked about for this mesh so far, e.g. "player 12, the world 0".
+local function AskedLine(ent)
+	local parts = {}
+	for k, n in pairs(ent.gmskyAsked or {}) do parts[#parts + 1] = string.format("%s %d", k, n) end
+	table.sort(parts)
+	return #parts > 0 and table.concat(parts, ", ") or "nothing"
+end
+G.AskedLine = AskedLine
 
 -- ---- the experiment (server) -----------------------------------------------------------------
 
@@ -419,11 +476,11 @@ if SERVER then
 			chunks = string.format("; chunks alive (triangles) %d [%s], removed %d, waiting [%s]", #alive, table.concat(alive, ", "),
 				t.removed, #waiting > 0 and table.concat(waiting, "; ") or "-")
 		end
-		gmsky.Log(string.format("physground: %s %s running %.0f s: %d builds (server side %d, %d triangles in all, slowest setup %.2f ms); ShouldCollide asked %d times; player's ground in the last 5 s (ticks): %s%s",
-			MODES[t.mode], SOURCES[t.source], CurTime() - t.started, t.serial, s.builds, s.tris, s.worst, G.shouldCollide,
+		gmsky.Log(string.format("physground: %s %s running %.0f s: %d builds (server side %d, %d triangles in all, slowest setup %.2f ms); ShouldCollide asked %d times (%d of them a test mesh and the world: answered no); player's ground in the last 5 s (ticks): %s%s",
+			MODES[t.mode], SOURCES[t.source], CurTime() - t.started, t.serial, s.builds, s.tris, s.worst, G.shouldCollide, G.worldAsked,
 			#parts > 0 and table.concat(parts, ", ") or "-", chunks))
 		t.ground = {}
-		G.shouldCollide = 0
+		G.shouldCollide, G.worldAsked = 0, 0
 	end)
 
 	concommand.Add("gmsky_test_physground", function(_, _, args)
