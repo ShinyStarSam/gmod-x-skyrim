@@ -27,6 +27,8 @@ gmsky.Include("props")
 gmsky.Include("chunks")
 -- Step S1 (one collision system): physics ground experiment (gmsky_test_physground).
 gmsky.Include("physground")
+-- Step S2h: stairs, SkyCraft's stepping rule on top of Source's movement (both sides: prediction).
+gmsky.Include("stairs")
 
 local frames = 0
 hook.Add("Think", "gmsky_count_frames", function()

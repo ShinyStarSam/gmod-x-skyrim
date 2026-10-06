@@ -620,7 +620,7 @@ fn main() {
             // parts here: x -8..8), is shoved out along -x at 4 / 0.08 = 50 units/s; clear of it, nothing.
             let r = lua.run(ls, "local ax, ay, az = gmsky.Anchor() \
                 local function run(x) local v = Vector(0, 0, 0) local mv = { GetOrigin = function() return Vector(ax + x, ay, az) end, \
-                    GetVelocity = function() return v end, SetVelocity = function(_, nv) v = nv end, SetOrigin = function() end } \
+                    GetVelocity = function() return v end, SetVelocity = function(_, nv) v = nv end, SetOrigin = function() end, \n                    GetForwardSpeed = function() return 0 end, GetSideSpeed = function() return 0 end } \
                     hook.Run('SetupMove', HARNESS_PLY, mv) return v end \
                 local held = gmsky.terrain.holding gmsky.terrain.holding = nil                 local a, b = run(-20), run(-30) gmsky.terrain.holding = held \
                 return string.format('%.1f %.1f %.1f', a.x, a.y, b.x)");

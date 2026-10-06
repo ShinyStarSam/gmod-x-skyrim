@@ -2548,6 +2548,37 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
   (wider than Skyrim's capsule) overlaps the ground; inside a physics mesh it can't move. Every tick
   (physics mode, server): if the box starts inside a chunk, lift it to the lowest free spot up to 72
   units above and drop it onto what is below. Logged per lift.
+- **S2h. Stairs: SkyCraft's stepping rule on top of Source's movement (approved and built
+  2026-10-06, `gmod/lua/gmsky/stairs.lua`; not tested in game).** Test 125: Skyrim's invisible stair ramps exist for only a few stairs (34 ramp
+  bodies in a session), so they can't fix most stairs. On stairs the player's box rests on the
+  step edges, the surface under it is the slanted riser (normal z 0.2-0.4, under Source's 0.7 for
+  "ground"), so Source says "in the air", and Source steps up only from the ground: stuck.
+  **SkyCraft** (`TriCollider.java`) replaces Minecraft's collision: ground is judged under a small
+  round footprint, steep surfaces below step height don't block a grounded player, and in the air
+  a walkable surface up to 0.3 blocks above the feet still catches you. **Proposal:** keep Source's
+  movement (speed, friction, jumping, air control stay Garry's Mod's) and add, in a shared `Move`
+  step (server and client run the same code, so prediction agrees; both sides have the same chunks):
+  (1) **ground under a small footprint**: if Source says "in the air" but straight-down traces at
+  the centre and 4 points within 8 units of it find a walkable surface (normal z >= 0.7) within 2
+  units, the player counts as on the ground; (2) **step-up when blocked**: if the move was cut short
+  and the player is on the ground by (1) or was within the last 0.1 s, do Source's own StepMove
+  (up 18, the rest of the move forward, down) and keep it if it lands on walkable ground under the
+  small footprint. Logged: every assisted step and every footprint-ground decision (counts per
+  second; the stuck detector stays). A setting to switch it off for comparison. **Differs from
+  SkyCraft:** SkyCraft owns all of the player's collision; here Source still does, and only these
+  two rules are added. **Differs from Source:** Source's own ground test uses the whole box.
+  *As built:* both rules act only on Skyrim's ground (`gmsky_chunk`), in Source's `FinishMove`
+  (after its own move). Rule (1) works by setting the ground entity: Source keeps the last tick's
+  ground into the next move (`sv_optimizedmovement`), so its next move is a ground move (friction,
+  jumping, its own step-up). **Not sure** Garry's Mod keeps it: counted as "ground kept into the
+  next tick k of n" in the status line. Neither rule runs while jumping (going up faster than 140
+  units/s, or going up with Jump held): a slanted riser pushes an "in the air" player up a little,
+  so "going up" alone is not a jump. Setting: `gmsky_stairs 0/1`.
+  *After test 126* (rule 1 worked, rule 2 never stepped: the 32-unit box lands propped on the
+  next step's slanted edge, its flat top more than 2 units under the centre): both rules also
+  count "propped on step edges" as standing: the box rests on Skyrim's ground and walkable Skyrim
+  ground is within the step height under the small footprint. **Differs from SkyCraft:** its body
+  may overlap steps below step height; our box can't, so it stands on the edges instead.
 - **S3. Props, ragdolls and grenades on it.** Mostly free once S2 works. Added: a prop moving into
   a chunk that isn't built yet is frozen for that moment and released with its speed (like the
   player's hold; InfMap2 doesn't need this because it makes its terrain itself, instantly; we
