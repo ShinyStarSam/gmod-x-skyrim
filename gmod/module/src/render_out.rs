@@ -14,6 +14,9 @@ pub const MAX_TEXTURE: u32 = 1024;
 pub const VERTEX_NUMBERS: usize = 16;
 /// Numbers per part: first corner, corner count, texture id, GMSKY_RND_MAT_* flags, alpha reference.
 pub const PART_NUMBERS: usize = 5;
+/// Numbers before each object's matrices in RenderFrame's flat table: model id, colour, bone
+/// count, entity number, GMSKY_RND_OBJ_* flags.
+pub const OBJECT_NUMBERS: usize = 5;
 
 pub type M34 = [[f32; 4]; 3];
 
@@ -162,10 +165,11 @@ impl RenderOut {
         Ok(line)
     }
 
-    /// One Garry's Mod frame: per object, model id, colour (RGBA8 number), bone count, then 12
-    /// numbers per bone (`GetBoneMatrix`, world). Each becomes bone x poseToBone, relative to the
-    /// anchor. Returns the objects sent.
-    pub fn frame(&mut self, frame: u64, flat: &[f64], epoch: u32, anchor: [f64; 3]) -> u32 {
+    /// One Garry's Mod frame: per object, model id, colour (RGBA8 number), bone count, entity
+    /// number, GMSKY_RND_OBJ_* flags, then 12 numbers per bone (`GetBoneMatrix`, world). Each
+    /// becomes bone x poseToBone, relative to the anchor. `view`: Garry's Mod's camera for this
+    /// frame (eye in world units, pitch / yaw / roll). Returns the objects sent.
+    pub fn frame(&mut self, frame: u64, flat: &[f64], epoch: u32, anchor: [f64; 3], view: Option<([f64; 3], [f64; 3])>) -> u32 {
         self.service();
         if epoch == 0 {
             self.counts.frames_no_epoch += 1;
@@ -174,9 +178,10 @@ impl RenderOut {
         let mut objects = Vec::new();
         let mut matrices: Vec<Matrix> = Vec::new();
         let mut at = 0;
-        while at + 3 <= flat.len() {
+        while at + OBJECT_NUMBERS <= flat.len() {
             let (model, color, bones) = (flat[at] as u32, flat[at + 1] as u32, flat[at + 2] as usize);
-            at += 3;
+            let (entity, flags) = (flat[at + 3] as u32, flat[at + 4] as u32);
+            at += OBJECT_NUMBERS;
             if at + bones * 12 > flat.len() {
                 break;
             }
@@ -199,9 +204,15 @@ impl RenderOut {
                 }
                 matrices.push(Matrix { m: compose(&w, bind) });
             }
-            objects.push(Object { model_id: model, first_matrix: first, matrix_count: bones as u32, color, flags: 0, reserved: 0 });
+            objects.push(Object { model_id: model, first_matrix: first, matrix_count: bones as u32, color, flags, entity });
         }
-        let msg = encode_frame(&Frame { frame, qpc: now_qpc(), origin_epoch: epoch, ..Default::default() }, &objects, &matrices);
+        let mut header = Frame { frame, qpc: now_qpc(), origin_epoch: epoch, ..Default::default() };
+        if let Some((eye, angles)) = view {
+            header.flags |= FRAME_VIEW;
+            header.view_eye = [(eye[0] - anchor[0]) as f32, (eye[1] - anchor[1]) as f32, (eye[2] - anchor[2]) as f32];
+            header.view_angles = [angles[0] as f32, angles[1] as f32, angles[2] as f32];
+        }
+        let msg = encode_frame(&header, &objects, &matrices);
         if self.writer.map.write(MSG_FRAME, &msg) {
             self.counts.frames += 1;
             self.counts.objects += objects.len() as u64;
@@ -287,12 +298,13 @@ mod tests {
         assert!(out.add_model(9, 1, &verts, &[0.0, 3.0, 5.0, 0.0, 0.0], &identity_with([-1.0, 0.0, 0.0])).is_ok());
         assert!(out.add_model(10, 1, &verts[..16], &[], &identity_with([0.0; 3])).is_err(), "not whole triangles");
         // The bone at (101, 2, 3) in the world, the anchor at (100, 0, 0): (1, 2, 3) - 1 in x.
-        let mut flat = vec![9.0, 4294967295.0, 1.0];
+        let mut flat = vec![9.0, 4294967295.0, 1.0, 17.0, OBJ_HELD as f64];
         flat.extend(identity_with([101.0, 2.0, 3.0]));
-        flat.extend_from_slice(&[42.0, 0.0, 1.0]); // unknown model
+        flat.extend_from_slice(&[42.0, 0.0, 1.0, 18.0, 0.0]); // unknown model
         flat.extend(identity_with([0.0; 3]));
-        assert_eq!(out.frame(1, &flat, 3, [100.0, 0.0, 0.0]), 1);
-        assert_eq!(out.frame(2, &flat, 0, [0.0; 3]), 0, "no epoch, no frame");
+        let view = Some(([110.0, 5.0, 64.0], [10.0, 90.0, 0.0]));
+        assert_eq!(out.frame(1, &flat, 3, [100.0, 0.0, 0.0], view), 1);
+        assert_eq!(out.frame(2, &flat, 0, [0.0; 3], view), 0, "no epoch, no frame");
 
         let reader = RenderMapping::open_named(&name).unwrap();
         let mut kinds = vec![];
@@ -300,7 +312,8 @@ mod tests {
             kinds.push(kind);
             if kind == MSG_FRAME {
                 let (f, o, m) = decode_frame(p).unwrap();
-                assert_eq!((f.origin_epoch, o.len(), o[0].model_id, o[0].color), (3, 1, 9, 0xFFFF_FFFF));
+                assert_eq!((f.origin_epoch, o.len(), o[0].model_id, o[0].color, o[0].entity, o[0].flags), (3, 1, 9, 0xFFFF_FFFF, 17, OBJ_HELD));
+                assert_eq!((f.flags, f.view_eye, f.view_angles), (FRAME_VIEW, [10.0, 5.0, 64.0], [10.0, 90.0, 0.0]), "view relative to the anchor");
                 assert_eq!([m[0].m[0][3], m[0].m[1][3], m[0].m[2][3]], [0.0, 2.0, 3.0]);
             }
             if kind == MSG_TEXTURE {
@@ -311,7 +324,7 @@ mod tests {
         assert_eq!(kinds, vec![MSG_RESET, MSG_TEXTURE, MSG_MODEL, MSG_FRAME]);
 
         reader.attach_reader();
-        out.frame(3, &flat, 3, [100.0, 0.0, 0.0]);
+        out.frame(3, &flat, 3, [100.0, 0.0, 0.0], None);
         let mut again = vec![];
         reader.read(u64::MAX, |kind, _| again.push(kind)).unwrap();
         assert_eq!(again, vec![MSG_RESET, MSG_TEXTURE, MSG_MODEL, MSG_FRAME]);

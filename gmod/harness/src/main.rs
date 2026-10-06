@@ -1236,16 +1236,19 @@ fn main() {
                     return {{ GetClass = function() return class end, GetModel = function() return model end, GetSkin = function() return 0 end,
                         IsDormant = function() return false end, GetNoDraw = function() return extra == "nodraw" end, IsWeapon = function() return class == "weapon_mine" end,
                         GetOwner = function() return class == "weapon_mine" and HARNESS_PLY or nil end, GetColor = function() return {{ r = 255, g = 255, b = 255, a = 255 }} end,
-                        GetPos = function() return at end, SetupBones = function() end,
+                        GetPos = function() return at end, SetupBones = function() end, EntIndex = function() return 42 end,
+                        GetNW2Bool = function(_, k) return k == "gmsky_held" and extra == "held" end,
                         GetBoneMatrix = function(_, b) return b == 0 and M({{ at.x, at.y, at.z }}) or nil end,
                         GetWorldTransformMatrix = function() return M({{ at.x, at.y, at.z }}) end }}
                 end
                 local near = Vector({bx}, {by}, {bz})
+                local realView = render.GetViewSetup
+                render.GetViewSetup = function() return {{ origin = Vector({bx} - 5, {by}, {bz}), angles = {{ p = 5, y = 90, r = 0 }} }} end
                 local realEye = HARNESS_PLY.EyePos
                 HARNESS_PLY.EyePos = function() return near end
                 getmetatable(near).DistToSqr = function(a, b) local d = a - b return d.x * d.x + d.y * d.y + d.z * d.z end
                 ents.GetAll = function() return {{
-                    Ent("prop_physics", "models/harness/box.mdl", near),
+                    Ent("prop_physics", "models/harness/box.mdl", near, "held"),
                     Ent("gmsky_actor", "models/harness/box.mdl", near),
                     Ent("viewmodel", "models/harness/box.mdl", near),
                     Ent("weapon_mine", "models/harness/box.mdl", near),
@@ -1262,10 +1265,11 @@ fn main() {
                 local line = gmsky.render.Status()
                 HARNESS_CVARS.gmsky_render = "0"
                 HARNESS_PLY.EyePos = realEye
+                render.GetViewSetup = realView
                 return HARNESS_MESHES_ASKED .. " " .. HARNESS_READ_PATH .. " | " .. line
             "#);
             let r = lua.run(lc, &setup);
-            let ok = matches!(&r, Ok(Some(s)) if s.starts_with("1 GAME | render: on; 2 frames, 1.0 objects a frame, 0 skipped") && s.contains("models 1 ok, 0 can't be drawn") && s.contains("textures 1 (1 new, 0 failed)"));
+            let ok = matches!(&r, Ok(Some(s)) if s.starts_with("1 GAME | render: on; 2 frames, 1.0 objects a frame, 1.0 held (gmsky_render_held 1), 0 skipped") && s.contains("models 1 ok, 0 can't be drawn") && s.contains("textures 1 (1 new, 0 failed)"));
             check(ok, &format!("render.lua: one prop wanted, its model read once, its texture from GAME: {r:?}"));
             let mut kinds = Vec::new();
             let mut frames = Vec::new();
@@ -1292,10 +1296,15 @@ fn main() {
                   &format!("render.lua: RESET first, one FRAME per Garry's Mod frame (also on a 2D-sky map; not for the 3D sky, depth or a repeat): {kinds:?}"));
             check(texture_ok, "render.lua: the VTF reaches Skyrim as a 4x4 RGBA8 texture (BGRA swapped)");
             check(model_ok, "render.lua: the model reaches Skyrim (1 triangle, alpha-tested part on texture 1, corner on bone 0)");
-            let first = frames.first().map(|(f, o, m)| (f.frame, f.origin_epoch, o.len(), o.first().map(|o| (o.model_id, o.color)), m.first().map(|m| [m.m[0][3], m.m[1][3], m.m[2][3]])));
+            let first = frames.first().map(|(f, o, m)| (f.frame, f.origin_epoch, o.len(), o.first().map(|o| (o.model_id, o.color, o.entity, o.flags)), m.first().map(|m| [m.m[0][3], m.m[1][3], m.m[2][3]])));
             // Bone at anchor + (10, 20, 30), poseToBone moves by -1 in x: (9, 20, 30) from the anchor.
-            check(first == Some((100, 1, 1, Some((1, 0xFFFF_FFFF)), Some([9.0, 20.0, 30.0]))),
-                  &format!("render.lua: the frame has the prop at bone x poseToBone minus the anchor, origin epoch 1: {first:?}"));
+            check(first == Some((100, 1, 1, Some((1, 0xFFFF_FFFF, 42, OBJ_HELD)), Some([9.0, 20.0, 30.0]))),
+                  &format!("render.lua: the frame has the held prop (entity 42) at bone x poseToBone minus the anchor, origin epoch 1: {first:?}"));
+            let view = frames.first().map(|(f, _, _)| (f.flags, f.view_eye, f.view_angles));
+            check(view == Some((FRAME_VIEW, [5.0, 20.0, 30.0], [5.0, 90.0, 0.0])), &format!("render.lua: the frame carries Garry's Mod's view, relative to the anchor: {view:?}"));
+            // The server marks what the physgun picks up, and unmarks it on drop.
+            let r = lua.run(ls, "local e = {} function e:SetNW2Bool(k, v) self[k] = v end                 hook.Run('OnPhysgunPickup', HARNESS_PLY, e) local a = e.gmsky_held hook.Run('PhysgunDrop', HARNESS_PLY, e)                 hook.Run('GravGunOnPickedUp', HARNESS_PLY, e) local b = e.gmsky_held hook.Run('GravGunOnDropped', HARNESS_PLY, e)                 return tostring(a) .. ' ' .. tostring(b) .. ' ' .. tostring(e.gmsky_held)");
+            check(r == Ok(Some("true true false".into())), &format!("render.lua (server): physgun / gravity gun pick-up marks held, drop unmarks: {r:?}"));
         }
 
         // 8c. Collision field (re-plan step A): swept box against triangles.

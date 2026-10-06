@@ -126,7 +126,7 @@ fn main() {
         let at = [150.0, 0.0, 40.0];
         let m0 = matrix(yaw, 0.0, at);
         let m1 = matrix(yaw, bend, at);
-        let objects = [Object { model_id: 1, first_matrix: 0, matrix_count: 2, color: 0xFFFF_FFFF, flags: 0, reserved: 0 }];
+        let objects = [Object { model_id: 1, first_matrix: 0, matrix_count: 2, color: 0xFFFF_FFFF, flags: 0, entity: 1 }];
         let msg = encode_frame(&Frame { frame, qpc: now_qpc(), origin_epoch: epoch, ..Default::default() }, &objects, &[m0, m1]);
         if !need_assets && w.map.write(MSG_FRAME, &msg) { sent_frames += 1 } else { dropped_frames += 1 }
         if now_ms() - last_print >= 1000 {

@@ -13,13 +13,36 @@
 --
 -- Console (client): gmsky_render 0/1 (on by default).
 -- Log (every 5 s): logs/gmod_client.log, lines starting "render:" and "render out:".
+--
+-- Step G6 (after tests 79-80, a held prop trailed the view): what the player holds with the physgun,
+-- the gravity gun or +use is marked by the server (NW2 bool "gmsky_held"), sent with a HELD flag, and
+-- each frame carries the view Garry's Mod drew it with; Skyrim then keeps a held object where it was
+-- in front of Garry's Mod's camera, in front of its own camera of this frame (as SkyCraft keeps the
+-- player's body on the feet its camera follows). gmsky_render_held 0 (client) sends no flag.
 
 local gmsky = gmsky
+
+if SERVER then
+	-- Pick-ups and drops: physgun, gravity gun, +use.
+	local function Held(ent, on)
+		if IsValid(ent) then ent:SetNW2Bool("gmsky_held", on) end
+	end
+	hook.Add("OnPhysgunPickup", "gmsky_render_held", function(ply, ent) Held(ent, true) end)
+	hook.Add("PhysgunDrop", "gmsky_render_held", function(ply, ent) Held(ent, false) end)
+	hook.Add("GravGunOnPickedUp", "gmsky_render_held", function(ply, ent) Held(ent, true) end)
+	hook.Add("GravGunOnDropped", "gmsky_render_held", function(ply, ent) Held(ent, false) end)
+	hook.Add("OnPlayerPhysicsPickup", "gmsky_render_held", function(ply, ent) Held(ent, true) end)
+	hook.Add("OnPlayerPhysicsDrop", "gmsky_render_held", function(ply, ent) Held(ent, false) end)
+	gmsky.Log("render.lua loaded (server: held objects marked)")
+	return
+end
 local R = gmsky.render or {}
 gmsky.render = R
 
 R.cvar = R.cvar or CreateConVar("gmsky_render", "1", 0,
 	"1 = send Garry's Mod's objects to Skyrim, which draws them in its own world (geometry route)")
+R.held = R.held or CreateConVar("gmsky_render_held", "1", 0,
+	"1 = Skyrim keeps what you hold (physgun, gravity gun, +use) in front of its own camera (step G6)")
 R.RANGE = 8000             -- Garry's Mod units from the eye
 R.NEW_MODELS_PER_FRAME = 1  -- reading a model costs a few ms
 
@@ -31,7 +54,7 @@ R.nextTexture = R.nextTexture or 1
 R.stats = R.stats or {}
 
 local function ResetStats()
-	R.stats = { frames = 0, objects = 0, skipped = 0, failed = 0, newModels = 0, modelMs = 0,
+	R.stats = { frames = 0, objects = 0, held = 0, skipped = 0, failed = 0, newModels = 0, modelMs = 0,
 		modelMsMax = 0, frameMs = 0, frameMsMax = 0, newTextures = 0, textureFails = 0 }
 end
 if not R.stats.frames then ResetStats() end
@@ -171,6 +194,22 @@ local function Prepare(key, model, skin)
 	return entry
 end
 
+-- A number for each entity, stable while it exists: its entity index, or one of our own for
+-- client-side entities (index -1, such as ragdolls of dead NPCs).
+R.ownNumbers = R.ownNumbers or setmetatable({}, { __mode = "k" })
+R.nextOwn = R.nextOwn or 1000000
+function R.EntityNumber(e)
+	local i = e:EntIndex()
+	if i and i > 0 then return i end
+	local own = R.ownNumbers[e]
+	if not own then
+		own = R.nextOwn
+		R.nextOwn = own + 1
+		R.ownNumbers[e] = own
+	end
+	return own
+end
+
 local SKIP_CLASS = { viewmodel = true, gmod_hands = true, predicted_viewmodel = true, worldspawn = true }
 
 -- Should this entity be drawn in Skyrim?
@@ -196,6 +235,8 @@ function R.Frame()
 	if not IsValid(me) then return end
 	local eye = me:EyePos()
 	local flat, n, objects, budget = {}, 0, 0, R.NEW_MODELS_PER_FRAME
+	local heldOn = R.held:GetBool()
+	local s = R.stats
 	for _, e in ipairs(ents.GetAll()) do
 		if R.Wanted(e, me, eye) then
 			local model, skin = e:GetModel(), e:GetSkin() or 0
@@ -208,8 +249,11 @@ function R.Frame()
 			if entry and not entry.failed then
 				e:SetupBones()
 				local c = e:GetColor()
+				local held = heldOn and e:GetNW2Bool("gmsky_held", false)
 				flat[n + 1], flat[n + 2], flat[n + 3] = entry.id, c.r + c.g * 256 + c.b * 65536 + c.a * 16777216, entry.bones
-				n = n + 3
+				flat[n + 4], flat[n + 5] = R.EntityNumber(e), held and 1 or 0
+				n = n + 5
+				if held then s.held = s.held + 1 end
 				for b = 0, entry.bones - 1 do
 					local m = e:GetBoneMatrix(b) or e:GetWorldTransformMatrix()
 					flat[n + 1], flat[n + 2], flat[n + 3], flat[n + 4],
@@ -223,9 +267,14 @@ function R.Frame()
 			end
 		end
 	end
-	gmsky.RenderFrame(fn, flat)
+	-- The camera Garry's Mod draws this frame with (for held objects, step G6).
+	local v = render.GetViewSetup and render.GetViewSetup()
+	if v and v.origin and v.angles then
+		gmsky.RenderFrame(fn, flat, v.origin.x, v.origin.y, v.origin.z, v.angles.p, v.angles.y, v.angles.r)
+	else
+		gmsky.RenderFrame(fn, flat)
+	end
 	local ms = (SysTime() - t0) * 1000
-	local s = R.stats
 	s.frames, s.objects = s.frames + 1, s.objects + objects
 	s.frameMs, s.frameMsMax = s.frameMs + ms, math.max(s.frameMsMax, ms)
 end
@@ -249,9 +298,10 @@ function R.Status()
 	end
 	local textures = 0
 	for _, id in pairs(R.textures) do if id > 0 then textures = textures + 1 end end
-	local line = string.format("render: %s; %d frames, %.1f objects a frame, %d skipped (model not ready / can't be drawn); "
+	local line = string.format("render: %s; %d frames, %.1f objects a frame, %.1f held (gmsky_render_held %s), %d skipped (model not ready / can't be drawn); "
 		.. "models %d ok, %d can't be drawn (%d new, %.1f ms avg, %.1f max); textures %d (%d new, %d failed); Lua %.2f ms a frame avg, %.2f max",
-		R.cvar:GetBool() and "on" or "off (gmsky_render 0)", s.frames, s.frames > 0 and s.objects / s.frames or 0, s.skipped,
+		R.cvar:GetBool() and "on" or "off (gmsky_render 0)", s.frames, s.frames > 0 and s.objects / s.frames or 0,
+		s.frames > 0 and s.held / s.frames or 0, R.held:GetString(), s.skipped,
 		known, failed, s.newModels, s.newModels > 0 and s.modelMs / s.newModels or 0, s.modelMsMax, textures, s.newTextures, s.textureFails,
 		s.frames > 0 and s.frameMs / s.frames or 0, s.frameMsMax)
 	ResetStats()

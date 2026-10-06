@@ -505,7 +505,7 @@ typedef struct GmskyOverlaySlotHdr {  // written by Garry's Mod into its own slo
 // (tail = head) and adds 1 to reader_epoch; Garry's Mod then sends RESET and everything again.
 #define GMSKY_RND_SHM_NAME L"Local\\GmodSkyrim_render_v1"
 #define GMSKY_RND_MAGIC 0x444E524Du  // "MRND"
-#define GMSKY_RND_VERSION 1u
+#define GMSKY_RND_VERSION 2u  // 2: the frame carries Garry's Mod's view; objects their entity and flags (G5a + G6)
 #define GMSKY_RND_RING_BYTES (64u << 20)
 #define GMSKY_RND_HEAD_OFF 0x1000u
 #define GMSKY_RND_TAIL_OFF 0x1040u
@@ -531,6 +531,11 @@ typedef struct GmskyOverlaySlotHdr {  // written by Garry's Mod into its own slo
 #define GMSKY_RND_MAT_ALPHATEST 0x4u
 #define GMSKY_RND_MAT_SELFILLUM 0x8u
 #define GMSKY_RND_MAT_NOCULL 0x10u
+
+// GmskyRndFrame.flags
+#define GMSKY_RND_FRAME_VIEW 0x1u  // view_eye / view_angles are valid
+// GmskyRndObject.flags
+#define GMSKY_RND_OBJ_HELD 0x1u    // held by the player (physgun, gravity gun, +use): placed relative to the camera
 
 #define GMSKY_RND_FORGET_MODEL 1u
 #define GMSKY_RND_FORGET_TEXTURE 2u
@@ -596,7 +601,9 @@ typedef struct GmskyRndFrame {
     uint32_t origin_epoch;     // the anchor the matrices are relative to (GmskyPlayerState.origin_epoch)
     uint32_t object_count;
     uint32_t matrix_count;
-    uint32_t flags;            // reserved, 0
+    uint32_t flags;            // GMSKY_RND_FRAME_*
+    float view_eye[3];         // Garry's Mod's camera for this frame, relative to the anchor (Garry's Mod units)
+    float view_angles[3];      // its pitch, yaw, roll (degrees, Source's angles)
 } GmskyRndFrame;
 
 typedef struct GmskyRndObject {
@@ -604,8 +611,8 @@ typedef struct GmskyRndObject {
     uint32_t first_matrix;
     uint32_t matrix_count;     // = the model's bone_count
     uint32_t color;            // RGBA8 tint (ent:GetColor()), R in the low byte
-    uint32_t flags;            // reserved, 0
-    uint32_t reserved;
+    uint32_t flags;            // GMSKY_RND_OBJ_*
+    uint32_t entity;           // Garry's Mod's entity number (stable while it exists; for motion vectors)
 } GmskyRndObject;
 
 // Rows of [rotation | translation]: a model-space point -> Garry's Mod units relative to the anchor.
@@ -716,7 +723,8 @@ GMSKY_ASSERT(sizeof(GmskyRndPart) == 24);
 GMSKY_ASSERT(sizeof(GmskyRndVertex) == 40);
 GMSKY_ASSERT(offsetof(GmskyRndVertex, bones) == 32);
 GMSKY_ASSERT(sizeof(GmskyRndForget) == 8);
-GMSKY_ASSERT(sizeof(GmskyRndFrame) == 32);
+GMSKY_ASSERT(sizeof(GmskyRndFrame) == 56);
+GMSKY_ASSERT(offsetof(GmskyRndFrame, view_eye) == 32);
 GMSKY_ASSERT(offsetof(GmskyRndFrame, origin_epoch) == 16);
 GMSKY_ASSERT(sizeof(GmskyRndObject) == 24);
 GMSKY_ASSERT(sizeof(GmskyRndMatrix) == 48);

@@ -1410,17 +1410,26 @@ unsafe extern "C" fn l_render_model(l: *mut State) -> c_int {
     })
 }
 
-/// gmsky.RenderFrame(frame_number, flat) -> objects sent: per object model id, colour, bone
-/// count, 12 numbers per bone (world). Uses the anchor and origin epoch this module holds.
+/// gmsky.RenderFrame(frame_number, flat [, eye_x, eye_y, eye_z, pitch, yaw, roll]) -> objects
+/// sent: per object model id, colour, bone count, entity, flags, 12 numbers per bone (world); the
+/// optional view is Garry's Mod's camera for this frame. Uses the anchor and origin epoch this
+/// module holds.
 unsafe extern "C" fn l_render_frame(l: *mut State) -> c_int {
     guarded(l, |a, side| {
+        const LUA_TNUMBER: c_int = 3;
         let frame = (a.tonumber)(l, 1) as u64;
         let flat = lua::to_numbers(a, l, 2).unwrap_or_default();
+        let view = if (3..=8).all(|i| (a.type_)(l, i) == LUA_TNUMBER) {
+            let n = |i: c_int| (a.tonumber)(l, i);
+            Some(([n(3), n(4), n(5)], [n(6), n(7), n(8)]))
+        } else {
+            None
+        };
         let (epoch, anchor) = {
             let link = LINK.lock().unwrap_or_else(|e| e.into_inner());
             (link.epoch, link.anchor)
         };
-        let n = with_render_out(side, |o| o.frame(frame, &flat, epoch, anchor)).unwrap_or(0);
+        let n = with_render_out(side, |o| o.frame(frame, &flat, epoch, anchor, view)).unwrap_or(0);
         (a.pushnumber)(l, n as f64);
         1
     })

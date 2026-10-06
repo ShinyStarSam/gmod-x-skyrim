@@ -4,17 +4,25 @@
 // REL::ID(107142) before patching). There Skyrim's 3D scene is complete and its post-processing
 // (tone mapping, bloom, TAA) hasn't run, so what we draw into its HDR scene target with its main
 // depth buffer bound is depth-tested against Skyrim's world, writes Skyrim's depth, and goes
-// through Skyrim's post-processing like its own objects. Motion vectors are written too, so
-// Skyrim's TAA doesn't smear it. Camera: Skyrim's own world -> clip matrix of this frame, re-based
-// on the camera position (SkyCraft's RenderPasses); every graphics setting is saved and put back
-// (SkyCraft's StateBackup).
+// through Skyrim's post-processing like its own objects. Motion vectors and normals are written
+// too, so Skyrim's TAA and ambient occlusion treat our surfaces like its own. Camera: Skyrim's own
+// world -> clip matrix of this frame, re-based on the camera position (SkyCraft's RenderPasses);
+// every graphics setting is saved and put back (SkyCraft's StateBackup).
 //
 // G1: a fixed test cube (kTestCube; off since G3a). G3a: the models, textures and newest frame
 // from the render block (Render.cpp) are uploaded and drawn. Each model is bent on the graphics
 // card by its object's bone matrices (up to 4 bones per corner; what Source itself does) and
 // placed at origin - camera + position / scale (§5; the subtraction in double precision here).
-// Fixed light for now (Skyrim's light is G5). Differs from SkyCraft: SkyCraft receives posed
-// triangles every frame; we receive each model once and its bone matrices every frame.
+// Differs from SkyCraft: SkyCraft receives posed triangles every frame; we receive each model once
+// and its bone matrices every frame.
+//
+// G5a: Skyrim's light (SkyCraft's GatherLighting / Lighting, HDR path): its directional light,
+// directional ambient, the 16 point lights nearest to reaching the camera, and fog. See-through
+// and glowing parts ($translucent / $additive) in a second, blended pass without depth writes.
+// Shadows are G5b. G6: an object the player holds is kept where it was in front of Garry's Mod's
+// camera, in front of Skyrim's camera of this frame (SkyCraft's rule for the player's body, sent
+// relative to the feet the camera follows); every object's motion vectors use its own matrices of
+// the frame before, so TAA sees objects move.
 #include "World.h"
 
 #include "Draw.h"
@@ -36,6 +44,8 @@ namespace gmsky::World
 		constexpr float kCubeSize = 70.0f;      // Skyrim units (SkyCraft: 70 per block)
 		constexpr float kCubeDistance = 300.0f;  // in front of the camera, level
 		constexpr float kCubeDrop = 60.0f;       // centre this far below the camera
+		constexpr int kMaxLights = 16;           // SkyCraft's number
+		constexpr float kPi = 3.14159265f;
 
 		template <class T>
 		void Release(T*& a_ptr)
@@ -60,33 +70,57 @@ namespace gmsky::World
 		}
 
 		constexpr char kShader[] = R"(
+#define MAX_LIGHTS 16
 cbuffer Frame : register(b0)
 {
 	row_major float4x4 viewProj;      // camera-relative Skyrim units -> clip (this frame)
 	row_major float4x4 prevViewProj;  // last frame's camera, re-based on this frame's (motion vectors)
 	float4 offset;                    // the test cube's centre, camera-relative
-	float4 lightDir;                  // towards the light (Skyrim axes)
+	float4 lightDir;                  // the test cube's fixed light
+	float4 sunDir;                    // towards the sun, moon or interior light (Skyrim axes)
+	float4 sunColor;                  // rgb; w: point light count
+	float4 ambient[6];                // Skyrim's directional ambient: faces looking +X, -X, +Y, -Y, +Z, -Z
+	float4 fogRange;                  // 1/(far-near), near/(far-near), power, max amount
+	float4 fogNear;                   // rgb; w: fog on
+	float4 fogFar;                    // rgb
+	float4 camRight;                  // camera axes (Skyrim world), for Skyrim's view-space normals
+	float4 camUp;
+	float4 camForward;
+	float4 lightPos[MAX_LIGHTS];      // camera-relative; w: 1 / radius
+	float4 lightColor[MAX_LIGHTS];
 };
 cbuffer Object : register(b1)
 {
 	float4 objOffset;  // xyz: the anchor (Skyrim's origin) relative to the camera, Skyrim units; w: Skyrim units per Garry's Mod unit
-	uint4  objInfo;    // x: the object's first matrix in boneRows (x 3 rows); y: GMSKY_RND_MAT_* of this part
+	uint4  objInfo;    // x: the object's first matrix in boneRows (x 3 rows); y: GMSKY_RND_MAT_* of this part; z: held
 	float4 objColor;   // the object's tint
 	float4 objAlpha;   // x: alpha reference (alpha-tested parts)
+	float4 held[3];    // held objects: camera-relative position then -> now (rows of [rotation | translation])
 };
-StructuredBuffer<float4> boneRows : register(t0);  // every matrix of the frame, 3 rows each
+StructuredBuffer<float4> boneRows : register(t0);      // every matrix of the frame, 3 rows each
 Texture2D albedo : register(t1);
+StructuredBuffer<float4> prevBoneRows : register(t2);  // the same objects' matrices on the frame before
 SamplerState albedoSampler : register(s0);
 
 struct PSOut
 {
 	float4 color : SV_Target0;
 	float4 motion : SV_Target1;  // Skyrim's motion vectors (for its TAA), when bound
+	float4 normal : SV_Target2;  // Skyrim's normals + TAA / reflection masks, when bound
 };
 
 float2 Motion(float4 cur, float4 prev)
 {
 	return float2(-0.5, 0.5) * (cur.xy / cur.w - prev.xy / prev.w);  // Skyrim's convention: previous uv - current uv
+}
+
+// Skyrim's normal buffer encoding (view space: x right, y up, z forward): nothing special for
+// TAA, no screen-space reflections (SkyCraft's EncodeSkyrimNormal).
+float4 EncodeSkyrimNormal(float3 n)
+{
+	float3 v = float3(dot(n, camRight.xyz), dot(n, camUp.xyz), dot(n, camForward.xyz));
+	float  f = max(0.001, sqrt(8.0 - 8.0 * v.z));
+	return float4(v.xy / f + 0.5, 0.0, 0.0);
 }
 
 // ---- G1's cube ----
@@ -120,6 +154,7 @@ PSOut CubePS(CubeOut i)
 	po.motion = float4(Motion(i.curClip, i.prevClip), 0.0, 1.0);
 	float lit = 0.35 + 0.65 * saturate(dot(normalize(i.normal), lightDir.xyz));
 	po.color = float4(lit.xxx, 1.0);
+	po.normal = EncodeSkyrimNormal(normalize(i.normal));
 	return po;
 }
 
@@ -139,11 +174,17 @@ struct ModelOut
 	float2 uv : TEXCOORD0;
 	float4 curClip : TEXCOORD1;
 	float4 prevClip : TEXCOORD2;
+	float3 rel : TEXCOORD3;  // camera-relative Skyrim position
 };
+
+float3 Held(float3 p)
+{
+	return float3(dot(held[0], float4(p, 1.0)), dot(held[1], float4(p, 1.0)), dot(held[2], float4(p, 1.0)));
+}
 
 ModelOut ModelVS(ModelIn i)
 {
-	float3 p = 0, n = 0;
+	float3 p = 0, q = 0, n = 0;
 	float4 hp = float4(i.pos, 1.0);
 	[unroll] for (int k = 0; k < 4; ++k) {
 		float w = i.weights[k];
@@ -152,29 +193,78 @@ ModelOut ModelVS(ModelIn i)
 			float4 r0 = boneRows[b], r1 = boneRows[b + 1], r2 = boneRows[b + 2];
 			p += w * float3(dot(r0, hp), dot(r1, hp), dot(r2, hp));
 			n += w * float3(dot(r0.xyz, i.normal), dot(r1.xyz, i.normal), dot(r2.xyz, i.normal));
+			float4 s0 = prevBoneRows[b], s1 = prevBoneRows[b + 1], s2 = prevBoneRows[b + 2];
+			q += w * float3(dot(s0, hp), dot(s1, hp), dot(s2, hp));
 		}
 	}
 	ModelOut o;
 	float3   rel = objOffset.xyz + p * objOffset.w;  // Garry's Mod and Skyrim share their axes (Z up)
+	float3   prevRel = objOffset.xyz + q * objOffset.w;
+	if (objInfo.z != 0) {
+		// Held: the same place in front of Skyrim's camera as it had in front of Garry's Mod's.
+		rel = Held(rel);
+		n = float3(dot(held[0].xyz, n), dot(held[1].xyz, n), dot(held[2].xyz, n));
+	}
 	o.pos = mul(viewProj, float4(rel, 1.0));
 	o.normal = n;
 	o.uv = i.uv;
+	o.rel = rel;
 	o.curClip = o.pos;
-	o.prevClip = mul(prevViewProj, float4(rel, 1.0));  // the object's own motion isn't in it yet
+	o.prevClip = objInfo.z != 0 ? o.pos : mul(prevViewProj, float4(prevRel, 1.0));  // held: no motion on screen
 	return o;
 }
 
-PSOut ModelPS(ModelOut i)
+// Ambient from Skyrim's six directional colours, as its own lighting shader applies them.
+float3 Ambient(float3 n)
+{
+	float3 n2 = n * n;
+	return n2.x * (n.x >= 0 ? ambient[0].rgb : ambient[1].rgb)
+	     + n2.y * (n.y >= 0 ? ambient[2].rgb : ambient[3].rgb)
+	     + n2.z * (n.z >= 0 ? ambient[4].rgb : ambient[5].rgb);
+}
+
+// Skyrim's light on a Garry's Mod surface (SkyCraft's Lighting, HDR path, without Minecraft's
+// sky and block light).
+float3 Lighting(float3 rel, float3 n)
+{
+	float3 lit = Ambient(n) + sunColor.rgb * saturate(dot(n, sunDir.xyz));
+	uint count = (uint)sunColor.w;
+	for (uint k = 0; k < count; ++k) {
+		float3 d = lightPos[k].xyz - rel;
+		float  f = saturate(length(d) * lightPos[k].w);
+		lit += lightColor[k].rgb * ((1.0 - f * f) * saturate(dot(n, normalize(d))));
+	}
+	return max(lit, 0.0);
+}
+
+PSOut ModelPS(ModelOut i, bool front : SV_IsFrontFace)
 {
 	PSOut  po;
-	float4 c = albedo.Sample(albedoSampler, i.uv) * objColor;
-	if (objInfo.y & 0x4u) {  // GMSKY_RND_MAT_ALPHATEST
-		clip(c.a - objAlpha.x);
+	float4 t = albedo.Sample(albedoSampler, i.uv) * objColor;
+	uint   flags = objInfo.y;
+	if (flags & 0x4u) {  // GMSKY_RND_MAT_ALPHATEST
+		clip(t.a - objAlpha.x);
 	}
 	float3 n = normalize(i.normal);
-	float  lit = 0.35 + 0.65 * saturate(dot(n, lightDir.xyz));
-	po.color = float4(c.rgb * lit, 1.0);
+	float3 viewerN = dot(n, i.rel) > 0 ? -n : n;  // a face seen from behind (no culling yet) is lit from our side
+	float3 c;
+	if (flags & 0x8u) {  // self-illuminated
+		c = t.rgb;
+	} else {
+		c = t.rgb * Lighting(i.rel, viewerN);
+	}
+	if (fogNear.w > 0.5) {
+		float f = min(pow(saturate(length(i.rel) * fogRange.x - fogRange.y), fogRange.z), fogRange.w);
+		c = (flags & 0x2u) ? c * (1.0 - f) : lerp(c, lerp(fogNear.rgb, fogFar.rgb, f), f);  // additive light fades out in fog
+	}
+	float a = (flags & 0x1u) ? t.a : 1.0;  // GMSKY_RND_MAT_TRANSLUCENT: blended by its alpha
+	if (flags & 0x2u) {  // GMSKY_RND_MAT_ADDITIVE: added light
+		c *= t.a;
+		a = 1.0;
+	}
+	po.color = float4(c, a);
 	po.motion = float4(Motion(i.curClip, i.prevClip), 0.0, 1.0);
+	po.normal = EncodeSkyrimNormal(viewerN);
 	return po;
 }
 )";
@@ -185,6 +275,17 @@ PSOut ModelPS(ModelOut i)
 			float prevViewProj[4][4];
 			float offset[4];
 			float lightDir[4];
+			float sunDir[4];
+			float sunColor[4];
+			float ambient[6][4];
+			float fogRange[4];
+			float fogNear[4];
+			float fogFar[4];
+			float camRight[4];
+			float camUp[4];
+			float camForward[4];
+			float lightPos[kMaxLights][4];
+			float lightColor[kMaxLights][4];
 		};
 		static_assert(sizeof(FrameConstants) % 16 == 0);
 
@@ -194,8 +295,9 @@ PSOut ModelPS(ModelOut i)
 			uint32_t info[4];
 			float color[4];
 			float alpha[4];
+			float held[3][4];
 		};
-		static_assert(sizeof(ObjectConstants) == 64);
+		static_assert(sizeof(ObjectConstants) == 112);
 
 		struct CubeVertex
 		{
@@ -216,13 +318,22 @@ PSOut ModelPS(ModelOut i)
 		ID3D11RasterizerState* g_raster = nullptr;
 		ID3D11DepthStencilState* g_depthWrite = nullptr;     // standard Z (0 near, 1 far)
 		ID3D11DepthStencilState* g_depthWriteRev = nullptr;  // reversed Z
+		ID3D11DepthStencilState* g_depthRead = nullptr;      // see-through parts: tested, not written
+		ID3D11DepthStencilState* g_depthReadRev = nullptr;
 		ID3D11BlendState* g_solidBlend = nullptr;
+		ID3D11BlendState* g_alphaBlend = nullptr;  // $translucent
+		ID3D11BlendState* g_addBlend = nullptr;    // $additive
 		ID3D11SamplerState* g_sampler = nullptr;
 		ID3D11Texture2D* g_whiteTex = nullptr;
 		ID3D11ShaderResourceView* g_whiteSrv = nullptr;
-		ID3D11Buffer* g_boneBuf = nullptr;  // the newest frame's matrices (rows as float4)
-		ID3D11ShaderResourceView* g_boneSrv = nullptr;
-		UINT g_boneCapacity = 0;  // float4 rows
+		// The newest frame's matrices and the same objects' matrices on the frame before (rows as float4).
+		struct RowBuffer
+		{
+			ID3D11Buffer* buf = nullptr;
+			ID3D11ShaderResourceView* srv = nullptr;
+			UINT capacity = 0;
+		};
+		RowBuffer g_bones, g_prevBones;
 		bool g_initFailed = false;
 		bool g_hooked = false;
 		bool g_targetsChecked = false, g_targetsOk = false;
@@ -252,6 +363,8 @@ PSOut ModelPS(ModelOut i)
 		};
 		std::unordered_map<uint32_t, GpuModel> g_gpuModels;
 		std::unordered_map<uint32_t, GpuTexture> g_gpuTextures;
+		// Each entity's matrices as drawn on the last Skyrim frame (motion vectors).
+		std::unordered_map<uint32_t, std::vector<GmskyRndMatrix>> g_lastMatrices;
 
 		// Counters since the last LogSecond (render thread writes, game thread reads).
 		std::atomic<uint32_t> g_calls{ 0 }, g_drawn{ 0 }, g_skipMenu{ 0 }, g_skipNoCamera{ 0 }, g_skipTargets{ 0 }, g_skipInit{ 0 };
@@ -269,7 +382,7 @@ PSOut ModelPS(ModelOut i)
 			const char* depthFrom = "";
 			// G3a
 			uint64_t objectsDrawn = 0, skippedEpoch = 0, skippedNoOrigin = 0, skippedUnknown = 0, skippedBones = 0;
-			uint64_t triangles = 0, drawCalls = 0, framesDrawn = 0;
+			uint64_t triangles = 0, drawCalls = 0, blendedCalls = 0, framesDrawn = 0;
 			uint64_t modelUploads = 0, textureUploads = 0, uploadFailures = 0;
 			double uploadMsMax = 0;
 			size_t gpuModels = 0, gpuTextures = 0;
@@ -279,6 +392,11 @@ PSOut ModelPS(ModelOut i)
 			double first[3]{};  // the first object's first matrix's translation, in Skyrim's world
 			bool firstOnScreen = false;
 			float firstX = 0, firstY = 0, firstDistance = 0;
+			// G6: held objects
+			uint64_t heldDrawn = 0, heldNoView = 0, heldFrames = 0;
+			double heldDegSum = 0, heldDegMax = 0, heldUnitsSum = 0, heldUnitsMax = 0, heldAgeSum = 0;
+			// G5a
+			uint32_t pointLights = 0;
 		};
 		std::mutex g_seenLock;
 		Seen g_seen;
@@ -374,7 +492,7 @@ PSOut ModelPS(ModelOut i)
 
 			D3D11_RASTERIZER_DESC rd{};
 			rd.FillMode = D3D11_FILL_SOLID;
-			rd.CullMode = D3D11_CULL_NONE;  // winding not checked yet (G5)
+			rd.CullMode = D3D11_CULL_NONE;  // Source's face winding not checked yet; back faces are lit from our side
 			rd.DepthClipEnable = TRUE;
 			a_device->CreateRasterizerState(&rd, &g_raster);
 
@@ -383,10 +501,14 @@ PSOut ModelPS(ModelOut i)
 			dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
 			dd.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
 			a_device->CreateDepthStencilState(&dd, &g_depthWrite);
+			dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+			a_device->CreateDepthStencilState(&dd, &g_depthRead);
 			dd.DepthFunc = D3D11_COMPARISON_GREATER_EQUAL;
+			a_device->CreateDepthStencilState(&dd, &g_depthReadRev);
+			dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
 			a_device->CreateDepthStencilState(&dd, &g_depthWriteRev);
 
-			// Colour RGB (Skyrim's alpha left alone), every channel of the motion vectors.
+			// Solid: colour RGB (Skyrim's alpha left alone), every channel of the motion vectors / normals.
 			D3D11_BLEND_DESC sb{};
 			sb.IndependentBlendEnable = TRUE;
 			sb.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
@@ -394,6 +516,20 @@ PSOut ModelPS(ModelOut i)
 				sb.RenderTarget[k].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
 			}
 			a_device->CreateBlendState(&sb, &g_solidBlend);
+			// See-through: over what's there by alpha; additive: added (both on the colour only).
+			D3D11_BLEND_DESC ab{};
+			ab.RenderTarget[0].BlendEnable = TRUE;
+			ab.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+			ab.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+			ab.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+			ab.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+			ab.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+			ab.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+			ab.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
+			a_device->CreateBlendState(&ab, &g_alphaBlend);
+			ab.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+			ab.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+			a_device->CreateBlendState(&ab, &g_addBlend);
 
 			D3D11_SAMPLER_DESC smp{};
 			smp.Filter = D3D11_FILTER_ANISOTROPIC;
@@ -418,7 +554,7 @@ PSOut ModelPS(ModelOut i)
 			}
 
 			const bool ok = g_cubeVs && g_cubePs && g_cubeLayout && g_modelVs && g_modelPs && g_modelLayout && g_frameCb && g_objectCb && g_cubeVb && g_raster &&
-			                g_depthWrite && g_depthWriteRev && g_solidBlend && g_sampler && g_whiteSrv;
+			                g_depthWrite && g_depthWriteRev && g_depthRead && g_depthReadRev && g_solidBlend && g_alphaBlend && g_addBlend && g_sampler && g_whiteSrv;
 			if (!ok) {
 				logger::error("in-frame drawing: failed to create its graphics objects");
 				g_initFailed = true;
@@ -426,7 +562,7 @@ PSOut ModelPS(ModelOut i)
 			}
 			g_device = a_device;
 			g_device->AddRef();
-			logger::info("in-frame drawing: ready (test cube {}, model drawing on)", kTestCube ? "on" : "off");
+			logger::info("in-frame drawing: ready (test cube {}, model drawing on, Skyrim's light, held objects follow the camera)", kTestCube ? "on" : "off");
 			return true;
 		}
 
@@ -539,12 +675,16 @@ PSOut ModelPS(ModelOut i)
 				return g_targetsOk;
 			}
 			g_targetsChecked = true;
-			D3D11_TEXTURE2D_DESC sd{}, dd{}, md{};
+			D3D11_TEXTURE2D_DESC sd{}, dd{}, md{}, nd{};
 			a_sceneTex->GetDesc(&sd);
 			a_depthTex->GetDesc(&dd);
 			const auto& motion = a_rd.renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
 			if (motion.texture) {
 				reinterpret_cast<ID3D11Texture2D*>(motion.texture)->GetDesc(&md);
+			}
+			const auto& normals = a_rd.renderTargets[RE::RENDER_TARGETS::kNORMAL_TAAMASK_SSRMASK];
+			if (normals.texture) {
+				reinterpret_cast<ID3D11Texture2D*>(normals.texture)->GetDesc(&nd);
 			}
 			ID3D11RenderTargetView* bound[6]{};
 			ID3D11DepthStencilView* boundDsv = nullptr;
@@ -564,10 +704,179 @@ PSOut ModelPS(ModelOut i)
 			const bool hdr = sd.Format == DXGI_FORMAT_R16G16B16A16_FLOAT || sd.Format == DXGI_FORMAT_R11G11B10_FLOAT || sd.Format == DXGI_FORMAT_R32G32B32A32_FLOAT;
 			const bool sizes = sd.Width == dd.Width && sd.Height == dd.Height && sd.SampleDesc.Count == 1 && dd.SampleDesc.Count == 1;
 			g_targetsOk = hdr && sizes;
-			logger::info("in-frame drawing: scene {}x{} format {} ({}), depth {}x{} format {}, motion vectors {}x{} format {}; bound here: targets [ {}] depth {}; {}",
-				sd.Width, sd.Height, int(sd.Format), hdr ? "HDR" : "not HDR", dd.Width, dd.Height, int(dd.Format), md.Width, md.Height, int(md.Format), slots,
-				boundDsv ? "yes" : "none", g_targetsOk ? "drawing here" : "UNEXPECTED, nothing drawn");
+			logger::info("in-frame drawing: scene {}x{} format {} ({}), depth {}x{} format {}, motion vectors {}x{} format {}, normals {}x{} format {}; bound here: targets [ {}] depth {}; {}",
+				sd.Width, sd.Height, int(sd.Format), hdr ? "HDR" : "not HDR", dd.Width, dd.Height, int(dd.Format), md.Width, md.Height, int(md.Format), nd.Width, nd.Height,
+				int(nd.Format), slots, boundDsv ? "yes" : "none", g_targetsOk ? "drawing here" : "UNEXPECTED, nothing drawn");
 			return g_targetsOk;
+		}
+
+		// ---- G5a: Skyrim's light (SkyCraft's GatherLighting, MIT) ----
+
+		void Set4(float a_out[4], float a_x, float a_y, float a_z, float a_w)
+		{
+			a_out[0] = a_x, a_out[1] = a_y, a_out[2] = a_z, a_out[3] = a_w;
+		}
+
+		void SetColor(float a_out[4], const RE::Color& a_c, float a_w = 0.0f)
+		{
+			Set4(a_out, a_c.red / 255.0f, a_c.green / 255.0f, a_c.blue / 255.0f, a_w);
+		}
+
+		// An interior cell's lighting values, from its lighting template where the cell inherits them.
+		template <class F>
+		void InteriorValue(RE::TESObjectCELL* a_cell, RE::INTERIOR_DATA::Inherit a_flag, F a_get)
+		{
+			auto* own = a_cell->GetLighting();
+			auto* tmpl = a_cell->GetRuntimeData().lightingTemplate;
+			const bool inherit = tmpl && own->lightingTemplateInheritanceFlags.any(a_flag);
+			a_get(inherit ? tmpl->data : *own, inherit ? tmpl : nullptr);
+		}
+
+		// The sun, moon or interior directional light, the directional ambient, the nearest point
+		// lights (torches, fires, spells) and fog, as Skyrim lights its own geometry.
+		void GatherLighting(FrameConstants& a_fc, const RE::NiPoint3& a_cam, Seen& a_seen)
+		{
+			// Fallbacks, should any of Skyrim's lighting be missing: plain daylight.
+			Set4(a_fc.sunDir, 0.3f, -0.4f, 0.87f, 0.0f);
+			Set4(a_fc.sunColor, 0.9f, 0.85f, 0.75f, 0.0f);
+			for (auto& a : a_fc.ambient) {
+				Set4(a, 0.45f, 0.47f, 0.5f, 0.0f);
+			}
+			Set4(a_fc.fogNear, 0, 0, 0, 0);
+
+			auto* player = RE::PlayerCharacter::GetSingleton();
+			auto* cell = player ? player->GetParentCell() : nullptr;
+			const bool interior = cell && cell->IsInteriorCell() && cell->GetLighting();
+			auto* sky = RE::Sky::GetSingleton();
+			auto* ssn = RE::BSShaderManager::State::GetSingleton().shadowSceneNode[0];
+
+			RE::NiDirectionalLight* dirLight = nullptr;
+			if (ssn) {
+				auto* bsSun = ssn->GetRuntimeData().sunLight;
+				if (bsSun && bsSun->light) {
+					dirLight = netimmerse_cast<RE::NiDirectionalLight*>(bsSun->light.get());
+				}
+			}
+			float sunFade = 1.0f;
+			if (dirLight) {
+				const auto dir = dirLight->GetWorldDirection();
+				const float len = dir.Length();
+				if (len > 1e-4f) {
+					Set4(a_fc.sunDir, -dir.x / len, -dir.y / len, -dir.z / len, 0.0f);
+				}
+				const auto& ld = dirLight->GetLightRuntimeData();
+				sunFade = ld.fade > 0.0f && ld.fade < 16.0f ? ld.fade : 1.0f;
+				Set4(a_fc.sunColor, ld.diffuse.red * sunFade, ld.diffuse.green * sunFade, ld.diffuse.blue * sunFade, 0.0f);
+			}
+
+			// Directional ambient ("DALC"): six colours named by the way the light travels, so a
+			// face looking along +Z (up) takes the Z- colour, the sky's light coming down (SkyCraft,
+			// checked in its game).
+			using Inherit = RE::INTERIOR_DATA::Inherit;
+			if (interior) {
+				InteriorValue(cell, Inherit::kAmbientColor, [&](const RE::INTERIOR_DATA& a_d, RE::BGSLightingTemplate* a_t) {
+					const auto& dal = a_t ? a_t->directionalAmbientLightingColors.directional : a_d.directionalAmbientLightingColors.directional;
+					SetColor(a_fc.ambient[0], dal.x.min);
+					SetColor(a_fc.ambient[1], dal.x.max);
+					SetColor(a_fc.ambient[2], dal.y.min);
+					SetColor(a_fc.ambient[3], dal.y.max);
+					SetColor(a_fc.ambient[4], dal.z.min);
+					SetColor(a_fc.ambient[5], dal.z.max);
+				});
+			} else if (sky) {
+				for (int axis = 0; axis < 3; ++axis) {
+					const auto& plus = sky->directionalAmbientColors[axis][0];
+					const auto& minus = sky->directionalAmbientColors[axis][1];
+					Set4(a_fc.ambient[axis * 2], minus.red, minus.green, minus.blue, 0.0f);  // faces looking +axis
+					Set4(a_fc.ambient[axis * 2 + 1], plus.red, plus.green, plus.blue, 0.0f);
+				}
+			}
+
+			// Fog, as Skyrim fades its own geometry with distance.
+			float fogNearD = 0, fogFarD = 0, fogPower = 1, fogMax = 0;
+			if (interior) {
+				InteriorValue(cell, Inherit::kFogNear, [&](const RE::INTERIOR_DATA& a_d, auto*) { fogNearD = a_d.fogNear; });
+				InteriorValue(cell, Inherit::kFogFar, [&](const RE::INTERIOR_DATA& a_d, auto*) { fogFarD = a_d.fogFar; });
+				InteriorValue(cell, Inherit::kFogPower, [&](const RE::INTERIOR_DATA& a_d, auto*) { fogPower = a_d.fogPower; });
+				InteriorValue(cell, Inherit::kFogMax, [&](const RE::INTERIOR_DATA& a_d, auto*) { fogMax = a_d.fogClamp; });
+				InteriorValue(cell, Inherit::kFogColor, [&](const RE::INTERIOR_DATA& a_d, auto*) {
+					SetColor(a_fc.fogNear, a_d.fogColorNear);
+					SetColor(a_fc.fogFar, a_d.fogColorFar);
+				});
+			} else if (sky) {
+				fogNearD = sky->fogNear, fogFarD = sky->fogFar, fogPower = sky->fogPower, fogMax = sky->fogClamp;
+				const auto& n = sky->skyColor[RE::TESWeather::ColorTypes::kFogNear];
+				const auto& f = sky->skyColor[RE::TESWeather::ColorTypes::kFogFar];
+				Set4(a_fc.fogNear, n.red, n.green, n.blue, 0.0f);
+				Set4(a_fc.fogFar, f.red, f.green, f.blue, 0.0f);
+			}
+			if (fogFarD > fogNearD + 1.0f && fogMax > 0.0f) {
+				Set4(a_fc.fogRange, 1.0f / (fogFarD - fogNearD), fogNearD / (fogFarD - fogNearD), fogPower > 0.0f ? fogPower : 1.0f, std::min(fogMax, 1.0f));
+				a_fc.fogNear[3] = 1.0f;
+			}
+
+			// The point lights nearest to reaching the camera.
+			struct Candidate
+			{
+				float reach;
+				RE::NiPoint3 pos;
+				float radius;
+				RE::NiColor color;
+			};
+			static std::vector<Candidate> candidates;
+			candidates.clear();
+			auto consider = [&](RE::BSLight* a_light) {
+				if (!a_light || !a_light->pointLight || !a_light->light) {
+					return;
+				}
+				auto* light = a_light->light.get();
+				const auto& ld = light->GetLightRuntimeData();
+				const float radius = ld.radius.x;
+				if (!(radius > 1.0f) || light->GetFlags().any(RE::NiAVObject::Flag::kHidden)) {
+					return;
+				}
+				const float dimmer = std::clamp(a_light->lodDimmer, 0.0f, 1.0f) * ld.fade;
+				const auto pos = light->world.translate;
+				const float reach = pos.GetDistance(a_cam) - radius;
+				if (reach > 6000.0f || std::fabs(dimmer) < 1e-3f) {
+					return;
+				}
+				candidates.push_back({ reach, pos, radius, { ld.diffuse.red * dimmer, ld.diffuse.green * dimmer, ld.diffuse.blue * dimmer } });
+			};
+			if (ssn) {
+				auto& rd = ssn->GetRuntimeData();
+				for (auto& light : rd.activeLights) {
+					consider(light.get());
+				}
+				for (auto& light : rd.activeShadowLights) {
+					consider(light.get());
+				}
+			}
+			std::ranges::sort(candidates, {}, &Candidate::reach);
+			const auto count = std::min<std::size_t>(candidates.size(), kMaxLights);
+			for (std::size_t k = 0; k < count; ++k) {
+				const auto& c = candidates[k];
+				Set4(a_fc.lightPos[k], c.pos.x - a_cam.x, c.pos.y - a_cam.y, c.pos.z - a_cam.z, 1.0f / c.radius);
+				Set4(a_fc.lightColor[k], c.color.red, c.color.green, c.color.blue, 0.0f);
+			}
+			a_fc.sunColor[3] = float(count);
+			a_seen.pointLights = uint32_t(count);
+
+			// What Skyrim gave us, now and then, for tuning.
+			static RE::TESObjectCELL* loggedCell = nullptr;
+			static int64_t lastLog = 0;
+			const auto now = Qpc();
+			if (cell != loggedCell || QpcMs(now - lastLog) > 30000.0) {
+				loggedCell = cell;
+				lastLog = now;
+				const float* up = a_fc.ambient[4];
+				const float* down = a_fc.ambient[5];
+				const float* east = a_fc.ambient[0];
+				logger::info("lighting ({}{}): sun dir ({:.2f} {:.2f} {:.2f}) colour ({:.2f} {:.2f} {:.2f}) fade {:.2f}; ambient up ({:.2f} {:.2f} {:.2f}) down ({:.2f} {:.2f} {:.2f}) east ({:.2f} {:.2f} {:.2f}); {} point lights; fog {} ({:.0f}-{:.0f}, power {:.2f}, max {:.2f})",
+					interior ? "interior" : "exterior", dirLight ? "" : ", no directional light", a_fc.sunDir[0], a_fc.sunDir[1], a_fc.sunDir[2], a_fc.sunColor[0],
+					a_fc.sunColor[1], a_fc.sunColor[2], sunFade, up[0], up[1], up[2], down[0], down[1], down[2], east[0], east[1], east[2], count,
+					a_fc.fogNear[3] > 0.5f ? "on" : "off", fogNearD, fogFarD, fogPower, fogMax);
+			}
 		}
 
 		// ---- G3a: Garry's Mod's models and textures onto the graphics card ----
@@ -591,7 +900,6 @@ PSOut ModelPS(ModelOut i)
 			bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
 			bd.ByteWidth = UINT(a_src.vertices.size() * sizeof(GmskyRndVertex));
 			D3D11_SUBRESOURCE_DATA vi{ a_src.vertices.data(), 0, 0 };
-			bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
 			if (a_src.vertices.empty() || a_src.indices.empty() || FAILED(g_device->CreateBuffer(&bd, &vi, &a_out.vb))) {
 				return false;
 			}
@@ -708,14 +1016,14 @@ PSOut ModelPS(ModelOut i)
 			a_seen.gpuTextures = g_gpuTextures.size();
 		}
 
-		// The newest frame's matrices into the buffer the vertex shader reads.
-		bool UploadBones(ID3D11DeviceContext* a_context, const Render::Frame& a_frame)
+		// Matrices into a buffer the vertex shader reads (3 rows of float4 each).
+		bool UploadRows(ID3D11DeviceContext* a_context, RowBuffer& a_b, const std::vector<GmskyRndMatrix>& a_m)
 		{
-			const UINT rows = UINT(a_frame.matrices.size() * 3);
-			if (rows > g_boneCapacity) {
-				Release(g_boneSrv);
-				Release(g_boneBuf);
-				g_boneCapacity = 0;
+			const UINT rows = UINT(a_m.size() * 3);
+			if (rows > a_b.capacity || !a_b.buf) {
+				Release(a_b.srv);
+				Release(a_b.buf);
+				a_b.capacity = 0;
 				const UINT cap = std::max<UINT>(rows * 2, 3 * 1024);
 				D3D11_BUFFER_DESC bd{};
 				bd.ByteWidth = cap * 16;
@@ -724,26 +1032,79 @@ PSOut ModelPS(ModelOut i)
 				bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 				bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
 				bd.StructureByteStride = 16;
-				if (FAILED(g_device->CreateBuffer(&bd, nullptr, &g_boneBuf)) || FAILED(g_device->CreateShaderResourceView(g_boneBuf, nullptr, &g_boneSrv))) {
-					Release(g_boneBuf);
+				if (FAILED(g_device->CreateBuffer(&bd, nullptr, &a_b.buf)) || FAILED(g_device->CreateShaderResourceView(a_b.buf, nullptr, &a_b.srv))) {
+					Release(a_b.buf);
 					return false;
 				}
-				g_boneCapacity = cap;
+				a_b.capacity = cap;
 			}
 			D3D11_MAPPED_SUBRESOURCE mapped{};
-			if (FAILED(a_context->Map(g_boneBuf, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+			if (FAILED(a_context->Map(a_b.buf, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
 				return false;
 			}
-			std::memcpy(mapped.pData, a_frame.matrices.data(), a_frame.matrices.size() * sizeof(GmskyRndMatrix));
-			a_context->Unmap(g_boneBuf, 0);
+			std::memcpy(mapped.pData, a_m.data(), a_m.size() * sizeof(GmskyRndMatrix));
+			a_context->Unmap(a_b.buf, 0);
 			return true;
 		}
 
-		void DrawModels(ID3D11DeviceContext* a_context, const RE::NiPoint3& a_cam, const FrameConstants& a_fc, Seen& a_seen)
+		// Source's AngleVectors: forward, right, up of a view at pitch / yaw / roll (degrees).
+		void SourceAxes(const float a_angles[3], double a_f[3], double a_r[3], double a_u[3])
+		{
+			const double p = a_angles[0] * kPi / 180.0, y = a_angles[1] * kPi / 180.0, r = a_angles[2] * kPi / 180.0;
+			const double sp = std::sin(p), cp = std::cos(p), sy = std::sin(y), cy = std::cos(y), sr = std::sin(r), cr = std::cos(r);
+			a_f[0] = cp * cy, a_f[1] = cp * sy, a_f[2] = -sp;
+			a_r[0] = -sr * sp * cy + cr * sy, a_r[1] = -sr * sp * sy - cr * cy, a_r[2] = -sr * cp;
+			a_u[0] = cr * sp * cy + sr * sy, a_u[1] = cr * sp * sy - sr * cy, a_u[2] = cr * cp;
+		}
+
+		// G6: the correction for held objects, camera-relative position then -> now: M x (p - e),
+		// with M = R_skyrim_now x R_gmod_then^T and e = Garry's Mod's eye relative to Skyrim's camera.
+		// Garry's Mod and Skyrim share their axes, so Source's view axes are Skyrim world vectors.
+		bool HeldCorrection(const GmskyRndFrame& a_f, const GmskyOrigin& a_origin, const RE::NiPoint3& a_cam, const RE::NiMatrix3& a_rot, float a_out[3][4],
+			double& a_deg, double& a_units)
+		{
+			if (!(a_f.flags & GMSKY_RND_FRAME_VIEW)) {
+				return false;
+			}
+			double gf[3], gr[3], gu[3];
+			SourceAxes(a_f.view_angles, gf, gr, gu);
+			// Skyrim's camera: columns forward, up, right (SkyCraft's RenderPasses).
+			const double sf[3] = { a_rot.entry[0][0], a_rot.entry[1][0], a_rot.entry[2][0] };
+			const double su[3] = { a_rot.entry[0][1], a_rot.entry[1][1], a_rot.entry[2][1] };
+			const double sr[3] = { a_rot.entry[0][2], a_rot.entry[1][2], a_rot.entry[2][2] };
+			double m[3][3];
+			for (int i = 0; i < 3; ++i) {
+				for (int j = 0; j < 3; ++j) {
+					m[i][j] = sf[i] * gf[j] + su[i] * gu[j] + sr[i] * gr[j];
+				}
+			}
+			double e[3];
+			for (int i = 0; i < 3; ++i) {
+				e[i] = a_origin.skyrim_origin[i] + double(a_f.view_eye[i]) / kGmodPerSkyrim - double(i == 0 ? a_cam.x : i == 1 ? a_cam.y : a_cam.z);
+			}
+			for (int i = 0; i < 3; ++i) {
+				for (int j = 0; j < 3; ++j) {
+					a_out[i][j] = float(m[i][j]);
+				}
+				a_out[i][3] = float(-(m[i][0] * e[0] + m[i][1] * e[1] + m[i][2] * e[2]));
+			}
+			// The largest angle between matching axes (forward, up, right): small while turning, ~180 if
+			// an axis convention were mirrored (Skyrim's camera columns are SkyCraft's reading).
+			auto angle = [](const double* a, const double* b) {
+				return std::acos(std::clamp(a[0] * b[0] + a[1] * b[1] + a[2] * b[2], -1.0, 1.0)) * 180.0 / kPi;
+			};
+			a_deg = std::max({ angle(sf, gf), angle(su, gu), angle(sr, gr) });
+			a_units = std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+			return true;
+		}
+
+		void DrawModels(ID3D11DeviceContext* a_context, const RE::NiPoint3& a_cam, const RE::NiMatrix3& a_rot, const FrameConstants& a_fc, bool a_reversed,
+			ID3D11RenderTargetView* const* a_solidTargets, UINT a_solidCount, ID3D11DepthStencilView* a_dsv, Seen& a_seen)
 		{
 			const auto& frame = Render::NewestFrame();
 			a_seen.gmodFrame = frame.valid ? frame.header.frame : 0;
 			if (!frame.valid || frame.objects.empty()) {
+				g_lastMatrices.clear();
 				return;
 			}
 			GmskyOrigin origin{};
@@ -755,11 +1116,29 @@ PSOut ModelPS(ModelOut i)
 			a_seen.originEpoch = origin.epoch;
 			if (frame.header.origin_epoch != origin.epoch) {
 				a_seen.skippedEpoch += frame.objects.size();
+				g_lastMatrices.clear();
 				return;
 			}
-			if (!UploadBones(a_context, frame)) {
+			// Motion vectors: each object's matrices as drawn on the last Skyrim frame (its own if new).
+			static std::vector<GmskyRndMatrix> prev;
+			prev = frame.matrices;
+			for (const auto& o : frame.objects) {
+				const auto it = g_lastMatrices.find(o.entity);
+				if (it != g_lastMatrices.end() && it->second.size() == o.matrix_count) {
+					std::copy(it->second.begin(), it->second.end(), prev.begin() + o.first_matrix);
+				}
+			}
+			if (!UploadRows(a_context, g_bones, frame.matrices) || !UploadRows(a_context, g_prevBones, prev)) {
 				return;
 			}
+			g_lastMatrices.clear();
+			for (const auto& o : frame.objects) {
+				g_lastMatrices[o.entity].assign(frame.matrices.begin() + o.first_matrix, frame.matrices.begin() + o.first_matrix + o.matrix_count);
+			}
+
+			float held[3][4]{};
+			double heldDeg = 0, heldUnits = 0;
+			const bool canHold = HeldCorrection(frame.header, origin, a_cam, a_rot, held, heldDeg, heldUnits);
 			// The anchor (= Skyrim's origin) relative to the camera, in double precision.
 			const float offset[3] = { float(origin.skyrim_origin[0] - double(a_cam.x)), float(origin.skyrim_origin[1] - double(a_cam.y)),
 				float(origin.skyrim_origin[2] - double(a_cam.z)) };
@@ -770,63 +1149,105 @@ PSOut ModelPS(ModelOut i)
 			ID3D11Buffer* cbs[2] = { g_frameCb, g_objectCb };
 			a_context->VSSetConstantBuffers(0, 2, cbs);
 			a_context->PSSetConstantBuffers(0, 2, cbs);
-			a_context->VSSetShaderResources(0, 1, &g_boneSrv);
+			ID3D11ShaderResourceView* vsSrvs[3] = { g_bones.srv, nullptr, g_prevBones.srv };
+			a_context->VSSetShaderResources(0, 3, vsSrvs);
 			a_context->PSSetSamplers(0, 1, &g_sampler);
-			bool counted = false;
-			for (const auto& o : frame.objects) {
-				const auto it = g_gpuModels.find(o.model_id);
-				if (it == g_gpuModels.end() || !it->second.vb) {
-					++a_seen.skippedUnknown;
-					continue;
+
+			bool counted = false, heldCounted = false;
+			// Pass 0: solid and alpha-tested parts (depth written, motion vectors and normals).
+			// Pass 1: see-through ($translucent, blended) and glowing ($additive, added) parts on top,
+			// depth tested but not written (SkyCraft's blended pass).
+			for (int pass = 0; pass < 2; ++pass) {
+				if (pass == 0) {
+					a_context->OMSetRenderTargets(a_solidCount, a_solidTargets, a_dsv);
 				}
-				const auto& m = it->second;
-				if (o.matrix_count != m.bones) {
-					++a_seen.skippedBones;
-					continue;
-				}
-				const UINT stride = sizeof(GmskyRndVertex), zero = 0;
-				a_context->IASetVertexBuffers(0, 1, &m.vb, &stride, &zero);
-				a_context->IASetIndexBuffer(m.ib, DXGI_FORMAT_R32_UINT, 0);
-				for (const auto& part : m.parts) {
-					ObjectConstants oc{};
-					oc.offset[0] = offset[0], oc.offset[1] = offset[1], oc.offset[2] = offset[2], oc.offset[3] = perGmod;
-					oc.info[0] = o.first_matrix;
-					oc.info[1] = part.flags;
-					for (int c = 0; c < 4; ++c) {
-						oc.color[c] = float((o.color >> (8 * c)) & 0xFF) / 255.0f;
-					}
-					oc.alpha[0] = part.alpha_ref;
-					D3D11_MAPPED_SUBRESOURCE mapped{};
-					if (FAILED(a_context->Map(g_objectCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+				for (const auto& o : frame.objects) {
+					const auto it = g_gpuModels.find(o.model_id);
+					if (it == g_gpuModels.end() || !it->second.vb) {
+						a_seen.skippedUnknown += pass == 0 ? 1 : 0;
 						continue;
 					}
-					std::memcpy(mapped.pData, &oc, sizeof(oc));
-					a_context->Unmap(g_objectCb, 0);
-					const auto tex = g_gpuTextures.find(part.texture_id);
-					ID3D11ShaderResourceView* srv = tex != g_gpuTextures.end() && tex->second.srv ? tex->second.srv : g_whiteSrv;
-					a_context->PSSetShaderResources(1, 1, &srv);
-					a_context->DrawIndexed(part.index_count, part.first_index, 0);
-					++a_seen.drawCalls;
-					a_seen.triangles += part.index_count / 3;
-				}
-				++a_seen.objectsDrawn;
-				if (!counted) {
-					// Where the first object is in Skyrim's world and on screen (for the log).
-					counted = true;
-					const auto& mt = frame.matrices[o.first_matrix].m;
-					const double world[3] = { origin.skyrim_origin[0] + mt[0][3] / kGmodPerSkyrim, origin.skyrim_origin[1] + mt[1][3] / kGmodPerSkyrim,
-						origin.skyrim_origin[2] + mt[2][3] / kGmodPerSkyrim };
-					const double rel[3] = { world[0] - a_cam.x, world[1] - a_cam.y, world[2] - a_cam.z };
-					float clip[4];
-					for (int r = 0; r < 4; ++r) {
-						clip[r] = float(a_fc.viewProj[r][0] * rel[0] + a_fc.viewProj[r][1] * rel[1] + a_fc.viewProj[r][2] * rel[2] + a_fc.viewProj[r][3]);
+					const auto& m = it->second;
+					if (o.matrix_count != m.bones) {
+						a_seen.skippedBones += pass == 0 ? 1 : 0;
+						continue;
 					}
-					a_seen.firstValid = true;
-					std::copy(std::begin(world), std::end(world), a_seen.first);
-					a_seen.firstDistance = float(std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]));
-					a_seen.firstOnScreen = clip[3] > 1e-3f && std::fabs(clip[0] / clip[3]) <= 1.0f && std::fabs(clip[1] / clip[3]) <= 1.0f;
-					a_seen.firstX = clip[3] > 1e-3f ? (clip[0] / clip[3] + 1) * 0.5f : -1.0f;
-					a_seen.firstY = clip[3] > 1e-3f ? (1 - clip[1] / clip[3]) * 0.5f : -1.0f;
+					const bool isHeld = (o.flags & GMSKY_RND_OBJ_HELD) && canHold;
+					if (pass == 0 && (o.flags & GMSKY_RND_OBJ_HELD)) {
+						++(canHold ? a_seen.heldDrawn : a_seen.heldNoView);
+						if (canHold && !heldCounted) {
+							heldCounted = true;
+							++a_seen.heldFrames;
+							a_seen.heldDegSum += heldDeg;
+							a_seen.heldDegMax = std::max(a_seen.heldDegMax, heldDeg);
+							a_seen.heldUnitsSum += heldUnits;
+							a_seen.heldUnitsMax = std::max(a_seen.heldUnitsMax, heldUnits);
+							LARGE_INTEGER q{};
+							QueryPerformanceCounter(&q);
+							a_seen.heldAgeSum += QpcMs(q.QuadPart - frame.header.qpc);
+						}
+					}
+					const UINT stride = sizeof(GmskyRndVertex), zero = 0;
+					a_context->IASetVertexBuffers(0, 1, &m.vb, &stride, &zero);
+					a_context->IASetIndexBuffer(m.ib, DXGI_FORMAT_R32_UINT, 0);
+					for (const auto& part : m.parts) {
+						const bool blended = (part.flags & (GMSKY_RND_MAT_TRANSLUCENT | GMSKY_RND_MAT_ADDITIVE)) != 0;
+						if (blended != (pass == 1)) {
+							continue;
+						}
+						ObjectConstants oc{};
+						oc.offset[0] = offset[0], oc.offset[1] = offset[1], oc.offset[2] = offset[2], oc.offset[3] = perGmod;
+						oc.info[0] = o.first_matrix;
+						oc.info[1] = part.flags;
+						oc.info[2] = isHeld ? 1u : 0u;
+						for (int c = 0; c < 4; ++c) {
+							oc.color[c] = float((o.color >> (8 * c)) & 0xFF) / 255.0f;
+						}
+						oc.alpha[0] = part.alpha_ref;
+						std::memcpy(oc.held, held, sizeof(held));
+						D3D11_MAPPED_SUBRESOURCE mapped{};
+						if (FAILED(a_context->Map(g_objectCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+							continue;
+						}
+						std::memcpy(mapped.pData, &oc, sizeof(oc));
+						a_context->Unmap(g_objectCb, 0);
+						const auto tex = g_gpuTextures.find(part.texture_id);
+						ID3D11ShaderResourceView* srv = tex != g_gpuTextures.end() && tex->second.srv ? tex->second.srv : g_whiteSrv;
+						a_context->PSSetShaderResources(1, 1, &srv);
+						if (pass == 1) {
+							a_context->OMSetBlendState((part.flags & GMSKY_RND_MAT_ADDITIVE) ? g_addBlend : g_alphaBlend, nullptr, 0xFFFFFFFF);
+							++a_seen.blendedCalls;
+						}
+						a_context->DrawIndexed(part.index_count, part.first_index, 0);
+						++a_seen.drawCalls;
+						a_seen.triangles += part.index_count / 3;
+					}
+					if (pass == 0) {
+						++a_seen.objectsDrawn;
+					}
+					if (pass == 0 && !counted) {
+						// Where the first object is in Skyrim's world and on screen (for the log).
+						counted = true;
+						const auto& mt = frame.matrices[o.first_matrix].m;
+						const double world[3] = { origin.skyrim_origin[0] + mt[0][3] / kGmodPerSkyrim, origin.skyrim_origin[1] + mt[1][3] / kGmodPerSkyrim,
+							origin.skyrim_origin[2] + mt[2][3] / kGmodPerSkyrim };
+						const double rel[3] = { world[0] - a_cam.x, world[1] - a_cam.y, world[2] - a_cam.z };
+						float clip[4];
+						for (int r = 0; r < 4; ++r) {
+							clip[r] = float(a_fc.viewProj[r][0] * rel[0] + a_fc.viewProj[r][1] * rel[1] + a_fc.viewProj[r][2] * rel[2] + a_fc.viewProj[r][3]);
+						}
+						a_seen.firstValid = true;
+						std::copy(std::begin(world), std::end(world), a_seen.first);
+						a_seen.firstDistance = float(std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]));
+						a_seen.firstOnScreen = clip[3] > 1e-3f && std::fabs(clip[0] / clip[3]) <= 1.0f && std::fabs(clip[1] / clip[3]) <= 1.0f;
+						a_seen.firstX = clip[3] > 1e-3f ? (clip[0] / clip[3] + 1) * 0.5f : -1.0f;
+						a_seen.firstY = clip[3] > 1e-3f ? (1 - clip[1] / clip[3]) * 0.5f : -1.0f;
+					}
+				}
+				if (pass == 0) {
+					// See-through parts: the colour only, depth tested but not written.
+					a_context->OMSetRenderTargets(1, a_solidTargets, a_dsv);
+					a_context->OMSetDepthStencilState(a_reversed ? g_depthReadRev : g_depthRead, 0);
 				}
 			}
 			++a_seen.framesDrawn;
@@ -865,6 +1286,7 @@ PSOut ModelPS(ModelOut i)
 			}
 			const auto& scene = rd.renderTargets[RE::RENDER_TARGETS::kMAIN];
 			const auto& motion = rd.renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
+			const auto& normals = rd.renderTargets[RE::RENDER_TARGETS::kNORMAL_TAAMASK_SSRMASK];
 			const auto& depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 			auto* sceneTex = reinterpret_cast<ID3D11Texture2D*>(scene.texture);
 			auto* depthTex = reinterpret_cast<ID3D11Texture2D*>(depth.texture);
@@ -897,7 +1319,8 @@ PSOut ModelPS(ModelOut i)
 			// Camera: Skyrim's own world -> clip matrix, re-based on the camera position so the GPU
 			// only sees small camera-relative coordinates (SkyCraft's RenderPasses).
 			const auto& w2c = camera->GetRuntimeData().worldToCam;
-			FrameConstants fc{};
+			static FrameConstants fc;
+			fc = FrameConstants{};
 			for (int r = 0; r < 4; ++r) {
 				for (int c = 0; c < 3; ++c) {
 					fc.viewProj[r][c] = w2c[r][c];
@@ -915,8 +1338,11 @@ PSOut ModelPS(ModelOut i)
 			g_havePrevW2C = true;
 			const double rel[3] = { g_cube[0] - cam.x, g_cube[1] - cam.y, g_cube[2] - cam.z };
 			fc.offset[0] = float(rel[0]), fc.offset[1] = float(rel[1]), fc.offset[2] = float(rel[2]);
-			const float l[3] = { 0.4f, 0.3f, 0.866f };  // a fixed high light, from the south-east
+			const float l[3] = { 0.4f, 0.3f, 0.866f };  // the test cube's fixed light, from the south-east
 			fc.lightDir[0] = l[0], fc.lightDir[1] = l[1], fc.lightDir[2] = l[2];
+			Set4(fc.camForward, R.entry[0][0], R.entry[1][0], R.entry[2][0], 0.0f);
+			Set4(fc.camUp, R.entry[0][1], R.entry[1][1], R.entry[2][1], 0.0f);
+			Set4(fc.camRight, R.entry[0][2], R.entry[1][2], R.entry[2][2], 0.0f);
 
 			// Depth convention: the finished-frame probe's (it measures Skyrim's buffer itself), else
 			// the matrix's (near maps above far = reversed).
@@ -963,6 +1389,7 @@ PSOut ModelPS(ModelOut i)
 			}
 			seen.reversed = reversed;
 			seen.depthFrom = probeKnown ? "probe" : "matrix";
+			GatherLighting(fc, cam, seen);
 			if constexpr (kTestCube) {
 				float clip[4];
 				for (int r = 0; r < 4; ++r) {
@@ -988,14 +1415,17 @@ PSOut ModelPS(ModelOut i)
 			D3D11_TEXTURE2D_DESC sd{};
 			sceneTex->GetDesc(&sd);
 			D3D11_VIEWPORT vp{ 0, 0, float(sd.Width), float(sd.Height), 0, 1 };
-			// Unbind the shader resources first: Skyrim may still have its depth bound for reading.
+			// Unbind the shader resources first: Skyrim may still have its depth or normals bound for reading.
 			ID3D11ShaderResourceView* none[StateBackup::kSlots]{};
 			context->VSSetShaderResources(0, StateBackup::kSlots, none);
 			context->PSSetShaderResources(0, StateBackup::kSlots, none);
 			context->CSSetShaderResources(0, StateBackup::kSlots, none);
+			// Solid surfaces also write Skyrim's motion vectors and normals (SkyCraft's targets).
 			auto* motionRtv = motion.RTV && motion.texture ? reinterpret_cast<ID3D11RenderTargetView*>(motion.RTV) : nullptr;
-			ID3D11RenderTargetView* targets[2] = { rtv, motionRtv };
-			context->OMSetRenderTargets(motionRtv ? 2 : 1, targets, dsv);
+			auto* normalsRtv = normals.RTV && normals.texture ? reinterpret_cast<ID3D11RenderTargetView*>(normals.RTV) : nullptr;
+			ID3D11RenderTargetView* targets[3] = { rtv, motionRtv, normalsRtv };
+			const UINT targetCount = normalsRtv && motionRtv ? 3 : motionRtv ? 2 : 1;
+			context->OMSetRenderTargets(targetCount, targets, dsv);
 			context->RSSetViewports(1, &vp);
 			context->RSSetState(g_raster);
 			context->OMSetBlendState(g_solidBlend, nullptr, 0xFFFFFFFF);
@@ -1011,7 +1441,7 @@ PSOut ModelPS(ModelOut i)
 				context->PSSetConstantBuffers(0, 1, &g_frameCb);
 				context->Draw(36, 0);
 			}
-			DrawModels(context, cam, fc, seen);
+			DrawModels(context, cam, R, fc, reversed, targets, targetCount, dsv, seen);
 			backup.Restore(context);
 
 			{
@@ -1078,9 +1508,11 @@ PSOut ModelPS(ModelOut i)
 			seen = g_seen;
 			// Per-second counts start again; what is held / last seen stays.
 			g_seen.objectsDrawn = g_seen.skippedEpoch = g_seen.skippedNoOrigin = g_seen.skippedUnknown = g_seen.skippedBones = 0;
-			g_seen.triangles = g_seen.drawCalls = g_seen.framesDrawn = 0;
+			g_seen.triangles = g_seen.drawCalls = g_seen.blendedCalls = g_seen.framesDrawn = 0;
 			g_seen.modelUploads = g_seen.textureUploads = g_seen.uploadFailures = 0;
 			g_seen.uploadMsMax = 0;
+			g_seen.heldDrawn = g_seen.heldNoView = g_seen.heldFrames = 0;
+			g_seen.heldDegSum = g_seen.heldDegMax = g_seen.heldUnitsSum = g_seen.heldUnitsMax = g_seen.heldAgeSum = 0;
 		}
 		std::string cube;
 		if (seen.cubeValid) {
@@ -1097,10 +1529,16 @@ PSOut ModelPS(ModelOut i)
 		logger::info("in-frame drawing: {} calls, {} drawn, skipped: {} menu, {} no camera/player, {} targets, {} init; {:.3f} ms avg, {:.3f} max (CPU); depth {} ({}){}",
 			calls, drawn, menu, noCam, targets, init, drawn ? QpcMs(ticks) / drawn : 0.0, QpcMs(maxTicks), seen.reversed ? "reversed" : "standard", seen.depthFrom, cube);
 		if (seen.gpuModels || seen.gmodFrame || seen.uploadFailures) {
-			logger::info("in-frame drawing: Garry's Mod objects: {} frames drawn, {} objects ({} triangles, {} draw calls); skipped: {} epoch (frame {} vs origin {}), {} no origin, {} unknown model, {} bone count; "
+			logger::info("in-frame drawing: Garry's Mod objects: {} frames drawn, {} objects ({} triangles, {} draw calls, {} blended); {} point lights; skipped: {} epoch (frame {} vs origin {}), {} no origin, {} unknown model, {} bone count; "
 						 "on the card: {} models, {} textures; uploads {} models, {} textures, {} failed, max {:.2f} ms; Garry's Mod frame {}{}",
-				seen.framesDrawn, objectsDrawn, seen.triangles, seen.drawCalls, seen.skippedEpoch, seen.frameEpoch, seen.originEpoch, seen.skippedNoOrigin, seen.skippedUnknown,
-				seen.skippedBones, seen.gpuModels, seen.gpuTextures, seen.modelUploads, seen.textureUploads, seen.uploadFailures, seen.uploadMsMax, seen.gmodFrame, first);
+				seen.framesDrawn, objectsDrawn, seen.triangles, seen.drawCalls, seen.blendedCalls, seen.pointLights, seen.skippedEpoch, seen.frameEpoch, seen.originEpoch,
+				seen.skippedNoOrigin, seen.skippedUnknown, seen.skippedBones, seen.gpuModels, seen.gpuTextures, seen.modelUploads, seen.textureUploads, seen.uploadFailures,
+				seen.uploadMsMax, seen.gmodFrame, first);
+		}
+		if (seen.heldDrawn || seen.heldNoView) {
+			const double n = double(std::max<uint64_t>(seen.heldFrames, 1));
+			logger::info("in-frame drawing: held objects: {} drawn following Skyrim's camera ({} frames), {} without Garry's Mod's view; Garry's Mod's view of their frame vs Skyrim's camera (largest axis angle): {:.2f} deg avg, {:.2f} max, {:.1f} units avg, {:.1f} max; frame {:.1f} ms old avg",
+				seen.heldDrawn, seen.heldFrames, seen.heldNoView, seen.heldDegSum / n, seen.heldDegMax, seen.heldUnitsSum / n, seen.heldUnitsMax, seen.heldAgeSum / n);
 		}
 	}
 }

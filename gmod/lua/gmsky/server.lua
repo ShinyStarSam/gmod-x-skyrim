@@ -25,6 +25,8 @@ gmsky.Include("hurt")
 gmsky.Include("respawn")
 -- Phase 4 step 4b: swimming in Skyrim's water (both sides).
 gmsky.Include("water")
+-- Geometry route step G6: marks what the player holds, so Skyrim places it relative to its camera.
+gmsky.Include("render")
 if GetPlayer() and T then T.home = T.MeasureRoom(GetPlayer():GetPos() + Vector(0, 0, 40)) end
 local anchored = 0 -- the origin epoch Garry's Mod is anchored to
 local inputOn = false -- input comes from Skyrim's window right now

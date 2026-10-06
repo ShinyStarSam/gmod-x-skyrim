@@ -1828,6 +1828,51 @@ they hide what's behind them.
   player, `McState` tick stamps). Known risk, said now: **a prop held by the physgun** follows
   Garry's Mod's view, which reaches Skyrim 10-20 ms after Skyrim's mouse look, so it may wobble
   against the screen while turning. Measured here; fixed only if the numbers show it.
+- **G5a + G6 bundled (user's choice, 2026-10-05, after tests 79-80: "models are dark, just a bit,
+  and there is some slight desync when dragging them around with the physgun").**
+  - *G5a, Skyrim's light* (SkyCraft's `GatherLighting` and its shader's `Lighting`, MIT): every
+    frame Skyrim's directional light (sun / moon outside, the cell's light inside: direction, colour
+    x fade), its directional ambient (the weather's six colours outside, the cell's or its lighting
+    template's inside), the 8 point lights nearest to reaching the camera (torches, fires, spells:
+    position, radius, colour x dimmer x fade) and fog (near, far, power, clamp, near / far colours).
+    Lit = ambient by the normal + sun x max(0, n . sun) + each point light x (1 - (d / radius)^2) x
+    max(0, n . l); fog mixed in by distance as Skyrim's shaders do. Drawn into the HDR scene, so no
+    exposure curve and no grading (SkyCraft's HDR path: Skyrim's tone mapping does that). Skyrim's
+    normals target is written too (SkyCraft's `EncodeSkyrimNormal`), so its ambient occlusion sees
+    our surfaces. Parts with `$translucent` / `$additive` go into a second pass after the solid ones
+    (blended, depth test without depth write), as SkyCraft's blended pass. Logged every 30 s and on
+    a cell change: sun direction / colour, ambient up / down, point lights used, fog.
+    **Differs from SkyCraft:** no Minecraft sky / block light in the vertices (Source models have
+    none); shadows are not in G5a.
+  - *G5b, shadows (next step, not in this bundle)*: Skyrim's sun shadows on our objects and our
+    objects' shadows on Skyrim (SkyCraft's `CaptureSunShadows` / `SkyrimSunShadow` / its shadow map
+    and multiply pass).
+  - *G6, held objects* (the risk named in G6 above). Why they lag: Skyrim's camera is Garry's Mod's
+    newest view plus the mouse movement Garry's Mod hasn't applied yet (`Puppet::ViewNow`), but a
+    held prop's place comes from Garry's Mod's frame, drawn with Garry's Mod's older view and 12-26
+    ms old on arrival (tests 76-77). So while you turn, the prop trails. The fix is SkyCraft's rule
+    for the player's own body (`RenAvatar` is sent relative to the feet Skyrim's camera follows, so
+    it "can't drift from the camera"): a held object is placed relative to the camera, not the world.
+    - Garry's Mod (server, `render.lua`): physgun, gravity gun and +use pickups / drops set
+      `ent:SetNW2Bool("gmsky_held", ...)` (`OnPhysgunPickup` / `PhysgunDrop`,
+      `GravGunOnPickedUp` / `GravGunOnDropped`, `OnPlayerPhysicsPickup` / `OnPlayerPhysicsDrop`).
+    - Each FRAME carries the view Garry's Mod drew it with (`render.GetViewSetup()`: eye relative to
+      the anchor, pitch / yaw / roll); objects carry their entity number and a HELD flag.
+      Render block **version 2** (frame header 32 -> 56 bytes; `Object.reserved` becomes `entity`).
+    - Skyrim: for a held object, `p_now = R_skyrim_now x R_gmod_then^T x (p - eye_then)`, i.e. the
+      same place in front of Skyrim's camera of this frame as it had in front of Garry's Mod's camera.
+      Other objects stay world-fixed.
+    - Motion vectors for moving objects: Skyrim keeps each entity's matrices from the frame before,
+      so its TAA sees the object's own motion (not only the camera's), which otherwise smears moving
+      objects. Held objects: no screen motion.
+    - `gmsky_render_held 0` (Garry's Mod client) sends no HELD flag, to compare. Logs once a second
+      (Skyrim): held objects, how far Garry's Mod's view of their frame was from Skyrim's camera
+      (degrees, units) and the frame's age.
+    - **Differs from SkyCraft:** SkyCraft does this for the player's body only; we do it for any
+      object the player holds.
+    - *Result (test 81):* built and active, but Garry's Mod's view and Skyrim's camera differed by
+      only 0.01 degrees on average, so it changes little; the visible drag lag is probably Garry's
+      Mod's own physgun physics. **Parked as later polish (user, 2026-10-05).**
 - **G7. Effects (later, needs its own plan and your choice).** Options: (a) for effects drawn from
   Lua (`render.DrawBeam`, `DrawSprite`, `DrawQuadEasy`), a collector like SkyCraft's that wraps
   those calls; (b) for engine effects, send events (explosion at X, tracer from A to B) and draw

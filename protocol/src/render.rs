@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::*};
 
 pub const SHM_NAME: &str = r"Local\GmodSkyrim_render_v1";
 pub const MAGIC: u32 = 0x444E_524D; // "MRND"
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2; // 2: the frame carries Garry's Mod's view; objects their entity and flags (G5a + G6)
 pub const RING_BYTES: usize = 64 << 20;
 pub const HEAD_OFF: usize = 0x1000;
 pub const TAIL_OFF: usize = 0x1040;
@@ -36,6 +36,9 @@ pub const MAT_ADDITIVE: u32 = 0x2;
 pub const MAT_ALPHATEST: u32 = 0x4;
 pub const MAT_SELFILLUM: u32 = 0x8;
 pub const MAT_NOCULL: u32 = 0x10;
+
+pub const FRAME_VIEW: u32 = 0x1;
+pub const OBJ_HELD: u32 = 0x1;
 
 pub const FORGET_MODEL: u32 = 1;
 pub const FORGET_TEXTURE: u32 = 2;
@@ -121,6 +124,9 @@ pub struct Frame {
     pub object_count: u32,
     pub matrix_count: u32,
     pub flags: u32,
+    /// Garry's Mod's camera for this frame, relative to the anchor; pitch, yaw, roll in degrees.
+    pub view_eye: [f32; 3],
+    pub view_angles: [f32; 3],
 }
 
 #[repr(C)]
@@ -131,7 +137,8 @@ pub struct Object {
     pub matrix_count: u32,
     pub color: u32,
     pub flags: u32,
-    pub reserved: u32,
+    /// Garry's Mod's entity number (for motion vectors).
+    pub entity: u32,
 }
 
 /// Rows of [rotation | translation]: a model-space point -> Garry's Mod units relative to the anchor.
@@ -153,7 +160,8 @@ const _: () = {
     assert!(size_of::<Vertex>() == 40);
     assert!(offset_of!(Vertex, bones) == 32);
     assert!(size_of::<Forget>() == 8);
-    assert!(size_of::<Frame>() == 32);
+    assert!(size_of::<Frame>() == 56);
+    assert!(offset_of!(Frame, view_eye) == 32);
     assert!(offset_of!(Frame, origin_epoch) == 16);
     assert!(size_of::<Object>() == 24);
     assert!(size_of::<Matrix>() == 48);
@@ -501,7 +509,7 @@ mod tests {
         assert_eq!(texture_bytes(5, 5, TEX_BC3), Some(4 * 16));
         assert_eq!(texture_bytes(5, 5, TEX_RGBA8), Some(100));
 
-        let objects = [Object { model_id: 5, first_matrix: 0, matrix_count: 2, color: 0xFF00FF80, flags: 0, reserved: 0 }];
+        let objects = [Object { model_id: 5, first_matrix: 0, matrix_count: 2, color: 0xFF00FF80, flags: 0, entity: 0 }];
         let mut mat = Matrix::default();
         mat.m[0][3] = 12.5;
         let f = Frame { frame: 99, qpc: -4, origin_epoch: 3, ..Default::default() };
