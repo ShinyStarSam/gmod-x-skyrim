@@ -5,12 +5,14 @@
 -- one `gmsky_chunk` entity per block of gmsky_chunk_regions^3 Skyrim regions on a fixed lattice,
 -- every triangle cut exactly at the chunk's faces so chunks never overlap. The player, bullets and
 -- props all collide with them (one system; the trace field is off in this mode, terrain.lua).
--- InfMap2's chunk recipe (https://codeberg.org/googer/infmap2, lua/entities/inf_chunk.lua; no
--- licence file, so the recipe is written from DESIGN.md's description, no code copied).
+-- Based on InfMap2's chunk recipe (https://codeberg.org/googer/infmap2, lua/entities/inf_chunk.lua;
+-- no licence file, so written from DESIGN.md's description, no code copied), in a different order.
 --
 -- The rule from tests 101-117: a chunk is never built while an earlier mesh of the same chunk is
--- still in the physics engine. PhysicsDestroy / Remove leave the engine object for ~7 more ticks
--- (test 117), and a new mesh built over it overflowed vphysics.dll's pair-record list (test 116).
+-- still in the physics engine. A destroyed mesh stays until the next physics step on the server
+-- (Ghidra, 2026-10-06), and a new mesh built over it overflowed vphysics.dll's pair-record list
+-- (test 116). S2b (test 119): the "static" flag is added right after PhysicsFromMesh, so a new
+-- mesh never makes pair records with its neighbours while it is still movable.
 -- The module checks the engine's memory, read only (gmsky.PhysAddress / gmsky.PhysAlive).
 --
 -- The server decides which chunks exist (all of Skyrim's collection window around the player,
@@ -106,6 +108,65 @@ function C.StillInEngine(key, lo, hi)
 	return #still > 0 and table.concat(still, "; ") or nil
 end
 
+-- S2b's switch (shared: the client builds its own chunks in the same order).
+C.flagFirst = C.flagFirst or CreateConVar("gmsky_chunks_flagfirst", "1", FCVAR_REPLICATED,
+	"1 = chunks get FVPHYSICS_CONSTRAINT_STATIC right after PhysicsFromMesh (S2b); 0 = last, the order of tests 118-119")
+
+-- Server, after every setup call of a chunk build: the new mesh's pair records with other chunks
+-- (and the player), its list, and the largest list among the chunks touching it. `nextStep` names
+-- the call that comes next, so the last line before a crash names the call it crashed in. Returns
+-- the milliseconds it took (left out of the build time).
+function C.StepLog(ent, after, flagFirst, nextStep)
+	if not SERVER or not gmsky.PhysListPartners then return 0 end
+	local t0 = SysTime()
+	local phys = ent:GetPhysicsObject()
+	if not IsValid(phys) then
+		gmsky.Log(string.format("chunks: %s after %s: no physics object; next: %s", ent:ChunkName(), after, nextStep))
+		return (SysTime() - t0) * 1000
+	end
+	local wlo, whi = ent:GetPos() + ent:GetBoxLo(), ent:GetPos() + ent:GetBoxHi()
+	local pad = Vector(1, 1, 1)
+	local names, physs, touching = {}, {}, {}
+	for _, e in ipairs(ents.FindByClass("gmsky_chunk")) do
+		local p = e ~= ent and e:GetPhysicsObject()
+		if p and IsValid(p) then
+			physs[#physs + 1], names[#names + 1] = p, e:ChunkName()
+			-- Touching = boxes meet at a face, edge or corner.
+			if Overlap(wlo - pad, whi + pad, e:GetPos() + e:GetBoxLo(), e:GetPos() + e:GetBoxHi()) then touching[#touching + 1] = #physs end
+		end
+	end
+	local ply = player.GetAll()[1]
+	local plyIdx
+	if IsValid(ply) and IsValid(ply:GetPhysicsObject()) then
+		physs[#physs + 1], names[#names + 1] = ply:GetPhysicsObject(), "player"
+		plyIdx = #physs
+	end
+	local t, why = gmsky.PhysListPartners(phys, physs)
+	local line
+	if not t then
+		line = "its list unreadable (" .. tostring(why) .. ")"
+	else
+		local withChunks, most, mostName = 0, 0, "-"
+		for i = 1, #physs do
+			local r = t[i] or 0
+			if i ~= plyIdx then
+				withChunks = withChunks + r
+				if r > most then most, mostName = r, names[i] end
+			end
+		end
+		local big, bigName = -1, "-"
+		for _, i in ipairs(touching) do
+			local live = gmsky.PhysList(physs[i])
+			if live and live > big then big, bigName = live, names[i] end
+		end
+		C.stats.worstChunkRecords = math.max(C.stats.worstChunkRecords or 0, withChunks)
+		line = string.format("records with other chunks %d (most: %s %d), with the player %d, with other objects %d; its list %d/%d; largest list of the %d touching chunks: %s %d",
+			withChunks, mostName, most, plyIdx and t[plyIdx] or 0, t.unlisted, t.live, t.slots, #touching, bigName, math.max(big, 0))
+	end
+	gmsky.Log(string.format("chunks: %s after %s (flag %s): %s; next: %s", ent:ChunkName(), after, flagFirst and "first" or "last", line, nextStep))
+	return (SysTime() - t0) * 1000
+end
+
 -- ---- the chunk entity --------------------------------------------------------------------------
 
 local ENT = {}
@@ -167,25 +228,41 @@ function ENT:Build(flat, n)
 	end
 	local verts = {}
 	for i = 1, n * 9, 3 do verts[#verts + 1] = { pos = Vector(flat[i], flat[i + 1], flat[i + 2]) } end
-	-- InfMap2's chunk recipe, in its order.
+	-- The setup calls. S2b (test 119): with gmsky_chunks_flagfirst 1 the "two static meshes never
+	-- collide" flag comes right after PhysicsFromMesh, so the engine's filter already says "no" to
+	-- every other chunk while the new mesh is still movable; 0 = the old order (flag last).
+	local flagFirst = C.flagFirst:GetBool()
+	local steps = {}
+	-- `onPhys`: the call is on the physics object (skipped if there is none).
+	local function Add(what, onPhys, fn) steps[#steps + 1] = { what, onPhys, fn } end
+	local function Flags()
+		Add("AddGameFlag(CONSTRAINT_STATIC, NO_SELF_COLLISIONS)", true, function(p)
+			p:AddGameFlag(FVPHYSICS_CONSTRAINT_STATIC)
+			p:AddGameFlag(FVPHYSICS_NO_SELF_COLLISIONS)
+		end)
+	end
+	if flagFirst then Flags() end
+	Add("SetSolid(SOLID_VPHYSICS)", false, function() self:SetSolid(SOLID_VPHYSICS) end)
+	Add("SetMoveType(MOVETYPE_NONE)", false, function() self:SetMoveType(MOVETYPE_NONE) end)
+	Add("EnableCustomCollisions(true)", false, function() self:EnableCustomCollisions(true) end)
+	Add("EnableMotion(false)", true, function(p) p:EnableMotion(false) end)
+	Add("SetMass(50000)", true, function(p) p:SetMass(50000) end)
+	if not flagFirst then Flags() end
 	self:PhysicsDestroy()
 	local ok = self:PhysicsFromMesh(verts)
-	self:SetSolid(SOLID_VPHYSICS)
-	self:SetMoveType(MOVETYPE_NONE)
-	self:EnableCustomCollisions(true)
-	local phys = self:GetPhysicsObject()
-	if IsValid(phys) then
-		phys:EnableMotion(false)
-		phys:SetMass(50000)
-		phys:AddGameFlag(FVPHYSICS_CONSTRAINT_STATIC)
-		phys:AddGameFlag(FVPHYSICS_NO_SELF_COLLISIONS)
+	local logMs = C.StepLog(self, "PhysicsFromMesh", flagFirst, steps[1][1])
+	for i, st in ipairs(steps) do
+		local p = self:GetPhysicsObject()
+		if not st[2] or IsValid(p) then st[3](p) end
+		logMs = logMs + C.StepLog(self, st[1], flagFirst, steps[i + 1] and steps[i + 1][1] or "nothing")
 	end
+	local phys = self:GetPhysicsObject()
 	self:DrawShadow(false)
 	self:AddSolidFlags(FSOLID_FORCE_WORLD_ALIGNED)
 	self:AddFlags(FL_STATICPROP)
 	self:AddEFlags(EFL_KEEP_ON_RECREATE_ENTITIES)
 	self.gmskyBuilt, self.gmskyTris = true, n
-	local ms = (SysTime() - t0) * 1000
+	local ms = (SysTime() - t0) * 1000 - logMs
 	local s = C.stats
 	s.builds, s.tris = s.builds + 1, s.tris + n
 	s.worst, s.mostTris = math.max(s.worst, ms), math.max(s.mostTris, n)
@@ -193,7 +270,9 @@ function ENT:Build(flat, n)
 		gmsky.Log(string.format("chunks: %s: PhysicsFromMesh FAILED (%s, physics object %s), %d triangles", name, tostring(ok), tostring(IsValid(phys)), n))
 	else
 		-- The address lets a crash dump's register be matched to a chunk.
-		gmsky.Log(string.format("chunks: built %s (%s): %d triangles, %.1f ms", name, tostring(gmsky.PhysAddress and gmsky.PhysAddress(phys)), n, ms))
+		gmsky.Log(string.format("chunks: built %s (%s): %d triangles, %.1f ms (+ %.1f ms of step logging); flag %s; CONSTRAINT_STATIC %s, NO_SELF_COLLISIONS %s, motion %s at the end",
+			name, tostring(gmsky.PhysAddress and gmsky.PhysAddress(phys)), n, ms, logMs, flagFirst and "first" or "last",
+			tostring(phys:HasGameFlag(FVPHYSICS_CONSTRAINT_STATIC)), tostring(phys:HasGameFlag(FVPHYSICS_NO_SELF_COLLISIONS)), tostring(phys:IsMotionEnabled())))
 	end
 	return true
 end
@@ -268,10 +347,11 @@ function C.StatusLine()
 	end
 	local dead = 0
 	for _ in pairs(C.dead) do dead = dead + 1 end
-	local line = string.format("chunks: %d entities (%d built, %d not built yet), %d old meshes still in the engine; this second: %d builds (%d triangles, most %d, slowest %.1f ms), %d engine waits, %d physics moved to their entity%s",
-		built + waiting, built, waiting, dead, s.builds, s.tris, s.mostTris, s.worst, s.engineWaits, s.moved,
+	local line = string.format("chunks: %d entities (%d built, %d not built yet), %d old meshes still in the engine; flag %s; this second: %d builds (%d triangles, most %d, slowest %.1f ms), %d engine waits, %d physics moved to their entity%s%s",
+		built + waiting, built, waiting, dead, C.flagFirst:GetBool() and "first" or "last", s.builds, s.tris, s.mostTris, s.worst, s.engineWaits, s.moved,
+		SERVER and string.format(", most records a new chunk had with other chunks %d", s.worstChunkRecords or 0) or "",
 		C.mismatches and string.format(", fingerprint mismatches so far %d", C.mismatches) or "")
-	s.builds, s.tris, s.mostTris, s.worst, s.engineWaits, s.moved = 0, 0, 0, 0, 0, 0
+	s.builds, s.tris, s.mostTris, s.worst, s.engineWaits, s.moved, s.worstChunkRecords = 0, 0, 0, 0, 0, 0, 0
 	return line
 end
 
@@ -443,6 +523,49 @@ if SERVER then
 		s.rebuilds, s.removed, s.empties = 0, 0, 0
 		return line
 	end
+
+	-- S2b's stress test: every 0.5 s one built chunk touching the player's is rebuilt (retired and
+	-- built again from the same triangles, as if Skyrim had changed them), next to its live
+	-- neighbours. Not the player's own chunk. `gmsky_chunks_stress` toggles; 1 / 0 sets.
+	C.stress = C.stress or { on = false, n = 0 }
+	concommand.Add("gmsky_chunks_stress", function(ply, _, args)
+		if IsValid(ply) and not ply:IsListenServerHost() then return end
+		local want = args[1] and args[1] ~= "0" or (not args[1] and not C.stress.on)
+		C.stress.on = want
+		gmsky.Log(string.format("chunks: stress %s (flag %s)", want and "ON: a chunk next to the player's rebuilt every 0.5 s" or "OFF", C.flagFirst:GetBool() and "first" or "last"))
+		print("gmsky_chunks_stress: " .. (want and "on" or "off"))
+	end)
+	timer.Create("gmsky_chunks_stress", 0.5, 0, function()
+		if not C.stress.on then return end
+		local ply = player.GetAll()[1]
+		local bx, by, bz, size = gmsky.ShapesLattice()
+		if not IsValid(ply) or not bx then return end
+		local a
+		for _, rec in pairs(C.chunks) do if IsValid(rec.ent) then a = rec.ent:GetPos() break end end
+		if not a then return end
+		local p = ply:GetPos() - a
+		local w = C.N * size
+		local px, py, pz = math.floor((p.x - bx) / w), math.floor((p.y - by) / w), math.floor((p.z - bz) / w)
+		local cands = {}
+		for dx = -1, 1 do
+			for dy = -1, 1 do
+				for dz = -1, 1 do
+					local key = Key(px + dx, py + dy, pz + dz)
+					local rec = C.chunks[key]
+					if (dx ~= 0 or dy ~= 0 or dz ~= 0) and rec and IsValid(rec.ent) and rec.ent.gmskyBuilt then cands[#cands + 1] = key end
+				end
+			end
+		end
+		if #cands == 0 then return end
+		table.sort(cands)
+		C.stress.n = C.stress.n + 1
+		local key = cands[(C.stress.n - 1) % #cands + 1]
+		local rec = C.chunks[key]
+		gmsky.Log(string.format("chunks: stress rebuild %d: chunk %s (%d triangles), player in chunk %s, %d candidates",
+			C.stress.n, key, rec.tris or 0, Key(px, py, pz), #cands))
+		C.Retire(rec.ent, "stress rebuild")
+		C.chunks[key] = nil
+	end)
 
 	-- Every 5 s: the biggest pair-record lists (a list growing towards 65,532 is seen early).
 	timer.Create("gmsky_chunks_lists", 5, 0, function()

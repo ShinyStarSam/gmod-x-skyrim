@@ -2493,6 +2493,12 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
   - **Differs from InfMap2:** the setup order (InfMap2 adds `CONSTRAINT_STATIC` last, like us
     today; its chunks have tens of triangles, so it never gets near the limit). **SkyCraft** has
     no Source physics; nothing to compare.
+  - **Built 2026-10-06** (`chunks.lua`, as planned). **Tests 120-121:** flag last + stress crashed
+    inside `SetSolid` of a new chunk after 55 builds; flag first: no crash in 1,515 builds (212
+    stress rebuilds, 5 re-centres, props). The per-step count from the new chunk's own list stayed 0
+    in both orders (the records seem to sit in the neighbour's list), so the fix is proven by the
+    crash going away, not by that count. InfMap2 is only
+    general reference from here on (the user), so differing from its order needs no special case.
 - **S3. Props, ragdolls and grenades on it.** Mostly free once S2 works. Added: a prop moving into
   a chunk that isn't built yet is frozen for that moment and released with its speed (like the
   player's hold; InfMap2 doesn't need this because it makes its terrain itself, instantly; we
