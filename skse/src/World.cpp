@@ -15,6 +15,7 @@
 
 #include "Draw.h"
 #include "Input.h"
+#include "Render.h"
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -392,6 +393,8 @@ PSOut PSMain(VSOut i)
 		void DrawInFrame()
 		{
 			g_calls.fetch_add(1, std::memory_order_relaxed);
+			// G2: read what Garry's Mod sent (every frame, menus or not, so the ring never fills).
+			Render::Drain();
 			if (!kTestCube) {
 				return;
 			}

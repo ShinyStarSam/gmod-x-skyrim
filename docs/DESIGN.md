@@ -1719,6 +1719,38 @@ they hide what's behind them.
   objects: model id, colour, and each bone's matrix relative to the anchor), `Forget` (a model
   Skyrim may free). Rust writer in the module, C++ reader in the plugin, unit tests (round trip,
   ring wrap-around, a reader joining late), a fake writer tool. No game needed.
+
+  *G2 in detail (2026-10-05).* Block `Local\GmodSkyrim_render_v1`, 64 MB of ring (SkyCraft's size):
+  a control header (magic, version, size, `writer_session`, `reader_epoch`, counters) at 0, the
+  ring counters at 0x1000 / 0x1040 (head = bytes written by Garry's Mod, tail = bytes read by
+  Skyrim), data from 0x1080. Messages as the collision ring: 8-byte header (type, bytes), 8-byte
+  aligned, `PAD` = "skip to the start"; a message may use at most half the ring.
+  - `RESET` {session}: Skyrim drops every model and texture it holds. Garry's Mod sends it first in
+    every stream, and again whenever `reader_epoch` changes (a Skyrim that started after it). A
+    Skyrim that attaches skips everything unread (tail = head) and adds 1 to `reader_epoch`, so
+    Garry's Mod resends everything.
+  - `TEXTURE` {id, width, height, format, bytes} + pixels: format BC1 / BC2 / BC3 (Direct3D 11 reads
+    Source's DXT1 / 3 / 5 directly) or RGBA8; top row first; one mip level (Skyrim makes the rest).
+  - `MODEL` {id, vertex count, index count, part count, bone count} + parts {first index, index
+    count, texture id, material flags, alpha reference} + vertices {position, normal (model space,
+    Garry's Mod units), u, v, 4 bone numbers, 4 weights (0-255, summing to 255)} + u32 indices.
+  - `FORGET` {kind, id}: a model or texture Skyrim may free.
+  - `FRAME` {frame number, time (QueryPerformanceCounter), origin epoch, object count, matrix count}
+    + objects {model id, first matrix, matrix count, colour RGBA8, flags} + matrices (3 x 4 floats,
+    rows of [rotation | translation]): a model-space point -> Garry's Mod world units relative to
+    the anchor of that origin epoch. Bone b's matrix is `ent:GetBoneMatrix(b)` x the model's
+    inverse bind pose (`util.GetModelMeshes`' second result, "poseToBone"), so a vertex is
+    `sum(weight x matrix[bone] x position)`. Skyrim converts with `GmodToSkyrim` (§5, no axis swap).
+    Skyrim keeps only the newest frame it read; frames naming a model it doesn't hold are counted
+    and skipped.
+  - Skyrim (`skse/src/Render.cpp`) drains the ring each frame in the in-frame hook (as SkyCraft's
+    `DrainMessages`), checks every message's sizes, keeps models / textures on the CPU, and logs
+    once a second: messages by type, bytes, resets, bad messages, models / textures held, the newest
+    frame's objects and age. Uploading to the graphics card is G3.
+  - Tests without a game: Rust unit tests (each message round trip, wrap-around, full ring refuses,
+    late reader + reset), C++ `protocol_test` (layout numbers equal Rust's; the C++ reader reads a
+    ring written by a C++ copy of the writer), `fake_render` (writes a test model, texture and
+    moving frames into the real block, for G3's first test without Garry's Mod).
 - **G3. Props.** Garry's Mod (client Lua): every frame, the objects with a model within range
   (not the local player, its view model, our hitbox stand-ins, `gmsky_field`, brush models
   `*N`, `GetNoDraw()` objects). New models are read once with `util.GetModelMeshes` and their

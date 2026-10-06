@@ -18,3 +18,7 @@ gmsky-protocol = { path = "../../protocol" }
 [[bin]]
 name = "fake_overlay"
 path = "src/fake_overlay.rs"
+
+[[bin]]
+name = "fake_render"
+path = "src/fake_render.rs"

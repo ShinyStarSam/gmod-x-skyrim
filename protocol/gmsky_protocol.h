@@ -493,6 +493,128 @@ typedef struct GmskyOverlaySlotHdr {  // written by Garry's Mod into its own slo
 
 #define GMSKY_OV_SLOT_HDR_OFF 0x40u  // three GmskyOverlaySlotHdr
 
+// ---- Render block (Garry's Mod -> Skyrim; geometry route step G2, DESIGN.md §12) ----
+// Garry's Mod's models, textures and, every frame, where its objects are and how their bones are
+// posed; Skyrim draws them inside its own frame. A third shared memory block, so the link block
+// and GMSKY_VERSION stay as they are. A byte ring (as SkyCraft's render ring, MIT, and our
+// collision ring): u64 head (bytes written by Garry's Mod) at GMSKY_RND_HEAD_OFF, u64 tail (bytes
+// read by Skyrim) at GMSKY_RND_TAIL_OFF, data from GMSKY_RND_DATA_OFF. Every message starts 8-byte
+// aligned with a GmskyColMsgHeader {type, bytes}, its size rounded up to 8; GMSKY_RND_PAD = "the
+// rest of the ring is unused: go to its start". A message is at most half the ring.
+// Restarts: Garry's Mod's stream starts with RESET. A Skyrim that attaches skips everything unread
+// (tail = head) and adds 1 to reader_epoch; Garry's Mod then sends RESET and everything again.
+#define GMSKY_RND_SHM_NAME L"Local\\GmodSkyrim_render_v1"
+#define GMSKY_RND_MAGIC 0x444E524Du  // "MRND"
+#define GMSKY_RND_VERSION 1u
+#define GMSKY_RND_RING_BYTES (64u << 20)
+#define GMSKY_RND_HEAD_OFF 0x1000u
+#define GMSKY_RND_TAIL_OFF 0x1040u
+#define GMSKY_RND_DATA_OFF 0x1080u
+#define GMSKY_RND_MAP_SIZE (GMSKY_RND_DATA_OFF + GMSKY_RND_RING_BYTES)
+
+#define GMSKY_RND_PAD 0u
+#define GMSKY_RND_RESET 1u    // GmskyRndReset: drop every model and texture
+#define GMSKY_RND_TEXTURE 2u  // GmskyRndTexture + pixels (bytes)
+#define GMSKY_RND_MODEL 3u    // GmskyRndModel + GmskyRndPart[part_count] + GmskyRndVertex[vertex_count] + uint32_t[index_count]
+#define GMSKY_RND_FORGET 4u   // GmskyRndForget: a model or texture Skyrim may free
+#define GMSKY_RND_FRAME 5u    // GmskyRndFrame + GmskyRndObject[object_count] + GmskyRndMatrix[matrix_count]
+
+// GmskyRndTexture.format: one mip level, top row first
+#define GMSKY_RND_TEX_BC1 1u    // Source DXT1: 8 bytes per 4x4 block
+#define GMSKY_RND_TEX_BC2 2u    // DXT3: 16 bytes per block
+#define GMSKY_RND_TEX_BC3 3u    // DXT5: 16 bytes per block
+#define GMSKY_RND_TEX_RGBA8 4u  // bytes R, G, B, A per pixel
+
+// GmskyRndPart.flags (from the material)
+#define GMSKY_RND_MAT_TRANSLUCENT 0x1u
+#define GMSKY_RND_MAT_ADDITIVE 0x2u
+#define GMSKY_RND_MAT_ALPHATEST 0x4u
+#define GMSKY_RND_MAT_SELFILLUM 0x8u
+#define GMSKY_RND_MAT_NOCULL 0x10u
+
+#define GMSKY_RND_FORGET_MODEL 1u
+#define GMSKY_RND_FORGET_TEXTURE 2u
+
+typedef struct GmskyRenderCtl {
+    uint32_t magic;            // GMSKY_RND_MAGIC once initialized (GMSKY_MAGIC_INIT while one side sets it up)
+    uint32_t version;          // GMSKY_RND_VERSION
+    uint64_t map_size;         // GMSKY_RND_MAP_SIZE
+    uint32_t writer_session;   // Garry's Mod's stream (its process id); 0 = no writer yet
+    uint32_t reader_epoch;     // +1 each time a Skyrim attaches
+    uint64_t messages_written;
+    uint64_t messages_read;
+    uint64_t writes_refused;   // ring too full (Garry's Mod drops a frame, retries a model later)
+} GmskyRenderCtl;
+
+typedef struct GmskyRndReset {
+    uint32_t session;          // = writer_session
+    uint32_t reader_epoch;     // the reader_epoch this RESET answers
+} GmskyRndReset;
+
+typedef struct GmskyRndTexture {
+    uint32_t id;               // 1+, referenced by GmskyRndPart.texture_id
+    uint32_t width, height;
+    uint32_t format;           // GMSKY_RND_TEX_*
+    uint32_t bytes;            // pixel bytes that follow (exactly what the format and size need)
+    uint32_t flags;            // reserved, 0
+} GmskyRndTexture;
+
+typedef struct GmskyRndModel {
+    uint32_t id;               // 1+, referenced by GmskyRndObject.model_id
+    uint32_t vertex_count;
+    uint32_t index_count;      // whole triangles
+    uint32_t part_count;
+    uint32_t bone_count;       // an object of this model sends this many matrices
+    uint32_t flags;            // reserved, 0
+} GmskyRndModel;
+
+typedef struct GmskyRndPart {  // triangles drawn with one material
+    uint32_t first_index;
+    uint32_t index_count;
+    uint32_t texture_id;       // 0 = none (white)
+    uint32_t flags;            // GMSKY_RND_MAT_*
+    float alpha_ref;           // GMSKY_RND_MAT_ALPHATEST: pixels below this alpha are dropped
+    uint32_t reserved;
+} GmskyRndPart;
+
+typedef struct GmskyRndVertex {
+    float pos[3];              // model space (rest pose), Garry's Mod units
+    float normal[3];
+    float u, v;
+    uint8_t bones[4];          // bone numbers (< bone_count)
+    uint8_t weights[4];        // 0-255, summing to 255
+} GmskyRndVertex;
+
+typedef struct GmskyRndForget {
+    uint32_t kind;             // GMSKY_RND_FORGET_*
+    uint32_t id;
+} GmskyRndForget;
+
+typedef struct GmskyRndFrame {
+    uint64_t frame;            // Garry's Mod's frame number
+    int64_t qpc;               // QueryPerformanceCounter when the poses were taken
+    uint32_t origin_epoch;     // the anchor the matrices are relative to (GmskyPlayerState.origin_epoch)
+    uint32_t object_count;
+    uint32_t matrix_count;
+    uint32_t flags;            // reserved, 0
+} GmskyRndFrame;
+
+typedef struct GmskyRndObject {
+    uint32_t model_id;
+    uint32_t first_matrix;
+    uint32_t matrix_count;     // = the model's bone_count
+    uint32_t color;            // RGBA8 tint (ent:GetColor()), R in the low byte
+    uint32_t flags;            // reserved, 0
+    uint32_t reserved;
+} GmskyRndObject;
+
+// Rows of [rotation | translation]: a model-space point -> Garry's Mod units relative to the anchor.
+// Bone b: ent:GetBoneMatrix(b) x the model's inverse bind pose ("poseToBone"). A vertex is drawn at
+// sum(weight x matrix[bone] x pos), then GmodToSkyrim (no axis swap).
+typedef struct GmskyRndMatrix {
+    float m[3][4];
+} GmskyRndMatrix;
+
 // ---- Layout checks. The same numbers are asserted in protocol/src/lib.rs. ----
 #ifdef __cplusplus
 #define GMSKY_ASSERT(c) static_assert(c, #c)
@@ -583,10 +705,27 @@ GMSKY_ASSERT(sizeof(GmskyOverlayCtl) <= GMSKY_OV_SLOT_HDR_OFF);
 GMSKY_ASSERT(GMSKY_OV_SLOT_HDR_OFF + 3 * sizeof(GmskyOverlaySlotHdr) <= GMSKY_OV_PIXELS_OFF);
 GMSKY_ASSERT(GMSKY_OV_SLOT_BYTES == 33751040u);
 GMSKY_ASSERT(GMSKY_OV_MAP_SIZE == 101257216u);
+GMSKY_ASSERT(sizeof(GmskyRenderCtl) == 48);
+GMSKY_ASSERT(offsetof(GmskyRenderCtl, writer_session) == 16);
+GMSKY_ASSERT(offsetof(GmskyRenderCtl, messages_written) == 24);
+GMSKY_ASSERT(offsetof(GmskyRenderCtl, writes_refused) == 40);
+GMSKY_ASSERT(sizeof(GmskyRndReset) == 8);
+GMSKY_ASSERT(sizeof(GmskyRndTexture) == 24);
+GMSKY_ASSERT(sizeof(GmskyRndModel) == 24);
+GMSKY_ASSERT(sizeof(GmskyRndPart) == 24);
+GMSKY_ASSERT(sizeof(GmskyRndVertex) == 40);
+GMSKY_ASSERT(offsetof(GmskyRndVertex, bones) == 32);
+GMSKY_ASSERT(sizeof(GmskyRndForget) == 8);
+GMSKY_ASSERT(sizeof(GmskyRndFrame) == 32);
+GMSKY_ASSERT(offsetof(GmskyRndFrame, origin_epoch) == 16);
+GMSKY_ASSERT(sizeof(GmskyRndObject) == 24);
+GMSKY_ASSERT(sizeof(GmskyRndMatrix) == 48);
+GMSKY_ASSERT(GMSKY_RND_MAP_SIZE == 67113088u);
 
 #ifdef __cplusplus
 #include <atomic>
 #include <cmath>
+#include <cstring>
 
 namespace gmsky {
 
@@ -744,6 +883,151 @@ inline double SkyrimHeadingToGmodYaw(double heading_rad) {
 // Both games: positive pitch looks down. VERIFIED in game 2026-10-04: looking straight down gave
 // Skyrim 90.0 deg and Garry's Mod 89.0 deg.
 inline double GmodPitchToSkyrimPitch(double pitch_deg) { return pitch_deg * kPi / 180.0; }
+
+// ---- Render ring (step G2): the C++ reader Skyrim uses, its message checks, and a C++ copy of
+// the writer (for protocol_test). The same rules as protocol/src/render.rs. ----
+namespace rnd {
+
+inline uint64_t TextureBytes(uint32_t width, uint32_t height, uint32_t format) {
+    const uint64_t bw = (uint64_t(width) + 3) / 4, bh = (uint64_t(height) + 3) / 4;
+    switch (format) {
+    case GMSKY_RND_TEX_BC1: return bw * bh * 8;
+    case GMSKY_RND_TEX_BC2:
+    case GMSKY_RND_TEX_BC3: return bw * bh * 16;
+    case GMSKY_RND_TEX_RGBA8: return uint64_t(width) * height * 4;
+    default: return 0;
+    }
+}
+
+inline std::atomic_ref<uint64_t> Counter(uint8_t* a_base, uint32_t a_off) {
+    return std::atomic_ref<uint64_t>(*reinterpret_cast<uint64_t*>(a_base + a_off));
+}
+
+// Writer: one message; false if the ring is too full now or the message is over half the ring.
+inline bool Write(uint8_t* a_base, uint32_t a_type, const void* a_payload, uint32_t a_bytes) {
+    constexpr uint64_t size = GMSKY_RND_RING_BYTES;
+    const uint64_t msg = (8 + uint64_t(a_bytes) + 7) & ~7ull;
+    uint64_t head = Counter(a_base, GMSKY_RND_HEAD_OFF).load(std::memory_order_relaxed);
+    const uint64_t tail = Counter(a_base, GMSKY_RND_TAIL_OFF).load(std::memory_order_acquire);
+    uint64_t pos = head % size;
+    const uint64_t pad = pos + msg > size ? size - pos : 0;
+    if (msg > size / 2 || size - (head - tail) < msg + pad) {
+        return false;
+    }
+    uint8_t* data = a_base + GMSKY_RND_DATA_OFF;
+    if (pad) {
+        const GmskyColMsgHeader p{GMSKY_RND_PAD, 0};
+        std::memcpy(data + pos, &p, sizeof(p));
+        head += pad;
+        pos = 0;
+    }
+    const GmskyColMsgHeader h{a_type, a_bytes};
+    std::memcpy(data + pos, &h, sizeof(h));
+    std::memcpy(data + pos + 8, a_payload, a_bytes);
+    Counter(a_base, GMSKY_RND_HEAD_OFF).store(head + msg, std::memory_order_release);
+    return true;
+}
+
+// Reader: calls a_fn(type, payload, bytes) per message, oldest first, until the ring is empty or
+// about a_maxBytes were read. Returns the bytes read; a_bad is set (and everything pending skipped)
+// if the ring holds something that isn't a message.
+template <class F>
+inline uint64_t Drain(uint8_t* a_base, F&& a_fn, uint64_t a_maxBytes, bool& a_bad) {
+    constexpr uint64_t size = GMSKY_RND_RING_BYTES;
+    a_bad = false;
+    const uint64_t head = Counter(a_base, GMSKY_RND_HEAD_OFF).load(std::memory_order_acquire);
+    const uint64_t start = Counter(a_base, GMSKY_RND_TAIL_OFF).load(std::memory_order_relaxed);
+    uint64_t tail = start;
+    const uint8_t* data = a_base + GMSKY_RND_DATA_OFF;
+    while (tail < head && tail - start < a_maxBytes) {
+        const uint64_t pos = tail % size;
+        GmskyColMsgHeader h;
+        std::memcpy(&h, data + pos, sizeof(h));
+        if (h.type == GMSKY_RND_PAD) {
+            tail += size - pos;
+            continue;
+        }
+        const uint64_t msg = (8 + uint64_t(h.bytes) + 7) & ~7ull;
+        if (pos + msg > size || tail + msg > head) {
+            a_bad = true;
+            tail = head;
+            break;
+        }
+        a_fn(h.type, data + pos + 8, h.bytes);
+        tail += msg;
+    }
+    Counter(a_base, GMSKY_RND_TAIL_OFF).store(tail, std::memory_order_release);
+    return tail - start;
+}
+
+// A checked view into a MODEL message (pointers into the payload; unaligned reads are fine on x64).
+struct ModelView {
+    GmskyRndModel model;
+    const GmskyRndPart* parts;
+    const GmskyRndVertex* vertices;
+    const uint32_t* indices;
+};
+
+// Every check render.rs's decode_model makes. Returns nullptr if fine, else what's wrong.
+inline const char* ParseModel(const uint8_t* a_p, uint32_t a_bytes, ModelView& a_out) {
+    if (a_bytes < sizeof(GmskyRndModel)) return "model header cut short";
+    std::memcpy(&a_out.model, a_p, sizeof(GmskyRndModel));
+    const auto& m = a_out.model;
+    const uint64_t atV = sizeof(GmskyRndModel) + uint64_t(m.part_count) * sizeof(GmskyRndPart);
+    const uint64_t atI = atV + uint64_t(m.vertex_count) * sizeof(GmskyRndVertex);
+    if (a_bytes != atI + uint64_t(m.index_count) * 4) return "model sizes don't add up";
+    if (m.index_count % 3) return "model indices aren't whole triangles";
+    a_out.parts = reinterpret_cast<const GmskyRndPart*>(a_p + sizeof(GmskyRndModel));
+    a_out.vertices = reinterpret_cast<const GmskyRndVertex*>(a_p + atV);
+    a_out.indices = reinterpret_cast<const uint32_t*>(a_p + atI);
+    for (uint32_t k = 0; k < m.part_count; ++k) {
+        const auto& part = a_out.parts[k];
+        if (part.index_count % 3 || uint64_t(part.first_index) + part.index_count > m.index_count) return "model part outside its indices";
+    }
+    for (uint32_t k = 0; k < m.index_count; ++k) {
+        if (a_out.indices[k] >= m.vertex_count) return "model index past its vertices";
+    }
+    for (uint32_t k = 0; k < m.vertex_count; ++k) {
+        const auto& v = a_out.vertices[k];
+        for (int b = 0; b < 4; ++b) {
+            if (v.weights[b] && v.bones[b] >= m.bone_count) return "model vertex on a bone past its bones";
+        }
+    }
+    return nullptr;
+}
+
+struct FrameView {
+    GmskyRndFrame frame;
+    const GmskyRndObject* objects;
+    const GmskyRndMatrix* matrices;
+};
+
+inline const char* ParseFrame(const uint8_t* a_p, uint32_t a_bytes, FrameView& a_out) {
+    if (a_bytes < sizeof(GmskyRndFrame)) return "frame header cut short";
+    std::memcpy(&a_out.frame, a_p, sizeof(GmskyRndFrame));
+    const auto& f = a_out.frame;
+    const uint64_t atM = sizeof(GmskyRndFrame) + uint64_t(f.object_count) * sizeof(GmskyRndObject);
+    if (a_bytes != atM + uint64_t(f.matrix_count) * sizeof(GmskyRndMatrix)) return "frame sizes don't add up";
+    a_out.objects = reinterpret_cast<const GmskyRndObject*>(a_p + sizeof(GmskyRndFrame));
+    a_out.matrices = reinterpret_cast<const GmskyRndMatrix*>(a_p + atM);
+    for (uint32_t k = 0; k < f.object_count; ++k) {
+        const auto& o = a_out.objects[k];
+        if (!o.matrix_count || uint64_t(o.first_matrix) + o.matrix_count > f.matrix_count) return "frame object's matrices outside the frame";
+    }
+    return nullptr;
+}
+
+inline const char* ParseTexture(const uint8_t* a_p, uint32_t a_bytes, GmskyRndTexture& a_out, const uint8_t*& a_pixels) {
+    if (a_bytes < sizeof(GmskyRndTexture)) return "texture header cut short";
+    std::memcpy(&a_out, a_p, sizeof(a_out));
+    const uint64_t want = TextureBytes(a_out.width, a_out.height, a_out.format);
+    if (!want) return "texture format unknown";
+    if (!a_out.width || !a_out.height || a_out.bytes != want || a_bytes != sizeof(GmskyRndTexture) + a_out.bytes) return "texture size doesn't match its format";
+    a_pixels = a_p + sizeof(GmskyRndTexture);
+    return nullptr;
+}
+
+}  // namespace rnd
 
 }  // namespace gmsky
 #endif
