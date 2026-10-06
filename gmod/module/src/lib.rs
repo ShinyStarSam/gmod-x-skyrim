@@ -11,6 +11,8 @@ mod lua;
 mod present;
 mod window;
 mod shapes;
+mod vtf;
+mod render_out;
 
 use gmsky_protocol::shm::{now_ms, now_qpc, Mapping, Side};
 use gmsky_protocol::{PlayerState, PF_INPUT_APPLIED};
@@ -181,7 +183,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 47] = [
+    let funcs: [(&str, lua::CFn); 51] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -229,6 +231,10 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("ConsoleWindow", l_console_window),
         ("ConsoleKey", l_console_key),
         ("WaterZ", l_water_z),
+        ("RenderTexture", l_render_texture),
+        ("RenderModel", l_render_model),
+        ("RenderFrame", l_render_frame),
+        ("RenderStatus", l_render_status),
     ];
     for (name, f) in funcs {
         (a.pushnumber)(l, side as f64); // upvalue 1 = side
@@ -1339,5 +1345,92 @@ unsafe extern "C" fn l_status(l: *mut State) -> c_int {
             }
         }
         5
+    })
+}
+
+// ---- Geometry route step G3b (DESIGN.md §12): Garry's Mod's objects to Skyrim (render_out.rs) ----
+
+static RENDER_OUT: Mutex<Option<render_out::RenderOut>> = Mutex::new(None);
+static RENDER_OPEN_TRY: Mutex<u64> = Mutex::new(0);
+
+/// Runs `f` with the render writer, opening the render block first if needed (every 2 s until it
+/// works). Err with why if it isn't open.
+fn with_render_out<R>(side: u32, f: impl FnOnce(&mut render_out::RenderOut) -> R) -> Result<R, String> {
+    let mut guard = RENDER_OUT.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        let mut last = RENDER_OPEN_TRY.lock().unwrap_or_else(|e| e.into_inner());
+        if now_ms() - *last < 2000 {
+            return Err("render block not open (retrying every 2 s)".into());
+        }
+        *last = now_ms();
+        match gmsky_protocol::render::RenderMapping::open() {
+            Ok(m) => {
+                log(side, &format!("render block open (session {})", std::process::id()));
+                *guard = Some(render_out::RenderOut::new(m, std::process::id()));
+            }
+            Err(e) => {
+                log(side, &format!("ERROR opening the render block: {e}"));
+                return Err(e);
+            }
+        }
+    }
+    Ok(f(guard.as_mut().unwrap()))
+}
+
+/// Pushes (true, line) or (false, why).
+unsafe fn push_result(a: &Api, l: *mut State, r: Result<String, String>) -> c_int {
+    let (ok, line) = match r { Ok(s) => (true, s), Err(e) => (false, e) };
+    (a.pushboolean)(l, ok as c_int);
+    lua::push_str(a, l, &line);
+    2
+}
+
+/// gmsky.RenderTexture(id, vtf_bytes) -> ok, line: decodes a .vtf and sends it to Skyrim.
+unsafe extern "C" fn l_render_texture(l: *mut State) -> c_int {
+    guarded(l, |a, side| {
+        let id = (a.tonumber)(l, 1) as u32;
+        let r = match lua::to_bytes(a, l, 2) {
+            Some(bytes) => with_render_out(side, |o| o.add_texture(id, &bytes)).and_then(|r| r),
+            None => Err(format!("texture {id}: no file data")),
+        };
+        push_result(a, l, r)
+    })
+}
+
+/// gmsky.RenderModel(id, bone_count, vertices, parts, bind_poses) -> ok, line: flat number tables
+/// (16 per corner, 5 per part, 12 per bone; render_out.rs).
+unsafe extern "C" fn l_render_model(l: *mut State) -> c_int {
+    guarded(l, |a, side| {
+        let (id, bones) = ((a.tonumber)(l, 1) as u32, (a.tonumber)(l, 2) as u32);
+        let r = match (lua::to_numbers(a, l, 3), lua::to_numbers(a, l, 4), lua::to_numbers(a, l, 5)) {
+            (Some(v), Some(p), Some(b)) => with_render_out(side, |o| o.add_model(id, bones, &v, &p, &b)).and_then(|r| r),
+            _ => Err(format!("model {id}: vertices, parts and bind poses must be tables")),
+        };
+        push_result(a, l, r)
+    })
+}
+
+/// gmsky.RenderFrame(frame_number, flat) -> objects sent: per object model id, colour, bone
+/// count, 12 numbers per bone (world). Uses the anchor and origin epoch this module holds.
+unsafe extern "C" fn l_render_frame(l: *mut State) -> c_int {
+    guarded(l, |a, side| {
+        let frame = (a.tonumber)(l, 1) as u64;
+        let flat = lua::to_numbers(a, l, 2).unwrap_or_default();
+        let (epoch, anchor) = {
+            let link = LINK.lock().unwrap_or_else(|e| e.into_inner());
+            (link.epoch, link.anchor)
+        };
+        let n = with_render_out(side, |o| o.frame(frame, &flat, epoch, anchor)).unwrap_or(0);
+        (a.pushnumber)(l, n as f64);
+        1
+    })
+}
+
+/// gmsky.RenderStatus() -> line for the log (counts since the last call).
+unsafe extern "C" fn l_render_status(l: *mut State) -> c_int {
+    guarded(l, |a, side| {
+        let line = with_render_out(side, |o| o.status()).unwrap_or_else(|e| format!("render out: {e}"));
+        lua::push_str(a, l, &line);
+        1
     })
 }

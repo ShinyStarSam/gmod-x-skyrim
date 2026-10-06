@@ -76,7 +76,9 @@ L.halofix = L.halofix or CreateConVar("gmsky_overlay_halofix", "1", 0,
 L.halos = L.halos or { fixed = 0, unfixed = 0, ms = 0 }
 
 -- Step W1: keep Garry's Mod's world objects and effects (wiped at the entity pass, not the view model).
-L.world = L.world or CreateConVar("gmsky_overlay_world", "1", 0,
+-- Off by default since G3b: Skyrim draws Garry's Mod's objects itself (render.lua); 1 brings the
+-- picture world layer back (objects then show twice).
+L.world = L.world or CreateConVar("gmsky_overlay_world", "0", 0,
 	"1 = keep Garry's Mod's world objects and effects (grenades, explosions, props) in the overlay")
 -- Per 5 s status line: where frames were wiped, and entity passes not used (why).
 L.wipes = L.wipes or {}

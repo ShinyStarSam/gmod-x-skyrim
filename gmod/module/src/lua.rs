@@ -30,6 +30,8 @@ pub struct Api {
     pub gettop: unsafe extern "C" fn(*mut State) -> c_int,
     pub loadbuffer: unsafe extern "C" fn(*mut State, *const c_char, usize, *const c_char) -> c_int,
     pub pcall: unsafe extern "C" fn(*mut State, c_int, c_int, c_int) -> c_int,
+    pub rawgeti: unsafe extern "C" fn(*mut State, c_int, c_int),
+    pub objlen: unsafe extern "C" fn(*mut State, c_int) -> usize,
 }
 
 #[link(name = "kernel32")]
@@ -76,6 +78,8 @@ fn load() -> Result<Api, String> {
         gettop: sym!("lua_gettop"),
         loadbuffer: sym!("luaL_loadbuffer"),
         pcall: sym!("lua_pcall"),
+        rawgeti: sym!("lua_rawgeti"),
+        objlen: sym!("lua_objlen"),
     })
 }
 
@@ -103,6 +107,22 @@ pub unsafe fn to_bytes(a: &Api, l: *mut State, idx: c_int) -> Option<Vec<u8>> {
         return None;
     }
     Some(std::slice::from_raw_parts(p as *const u8, len).to_vec())
+}
+
+/// A Lua array of numbers (t[1] .. t[#t]) as f64s; None if the value isn't a table.
+pub unsafe fn to_numbers(a: &Api, l: *mut State, idx: c_int) -> Option<Vec<f64>> {
+    const LUA_TTABLE: c_int = 5;
+    if (a.type_)(l, idx) != LUA_TTABLE {
+        return None;
+    }
+    let n = (a.objlen)(l, idx);
+    let mut out = Vec::with_capacity(n);
+    for i in 1..=n as c_int {
+        (a.rawgeti)(l, idx, i);
+        out.push((a.tonumber)(l, -1));
+        (a.settop)(l, -2);
+    }
+    Some(out)
 }
 
 pub unsafe fn set_field(a: &Api, l: *mut State, idx: c_int, key: &str) {

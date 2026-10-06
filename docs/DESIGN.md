@@ -1775,7 +1775,44 @@ they hide what's behind them.
     `fake_render` follows Skyrim's current origin epoch, so its bar stands 150 Garry's Mod units
     (282 Skyrim units) east of the origin and 40 up. Logs: GPU models / textures held, uploads and
     their ms, objects drawn / skipped and why (epoch, unknown model, bone count), triangles, ms.
-  - **G3b, Garry's Mod sends its props** (Lua + module): the rest of G3 above.
+  - **G3b, Garry's Mod sends its props** (Lua + module): the rest of G3 above. In detail:
+    - *Which objects* (client Lua, new `gmod/lua/gmsky/render.lua`, `gmsky_render 1`): every entity
+      with a model within 8,000 units, except the local player and what it holds or wears (its
+      weapons, view model, hands), our own `gmsky_*` entities (hitbox stand-ins, the ground), brush
+      models (`*N`), `GetNoDraw()` and fully transparent ones. This includes Garry's Mod NPCs,
+      ragdolls, rockets and grenades: they all go through the same bones path (G4 is then only
+      checking that they look right).
+    - *A new model* (cached per model + skin; at most one new model per Garry's Mod frame, as it
+      costs a few ms): `util.GetModelMeshes(model, 0, 0, skin)`; each mesh becomes a part. Its
+      `triangles` list is sent as is (3 corners per triangle, no sharing; simple, at most ~3x the
+      vertices). Per corner: position, normal, u, v, up to 3 bones + weights (`weights`). The bind
+      poses' matrices (`poseToBone`) go along. Body groups: the model's defaults for now (mask 0).
+    - *Its materials*: `Material(mesh.material)`; flags from `$flags` (translucent 0x200000,
+      additive 0x80, alpha test 0x100, self-illum 0x40, no-cull 0x2000) and
+      `$alphatestreference`; the texture `$basetexture`, read once per texture with
+      `file.Read("materials/<name>.vtf", "GAME")` (all mounted content). The module decodes the VTF
+      (`gmod/module/src/vtf.rs`): header 7.0-7.5, the biggest mip level no larger than 1024, formats
+      DXT1 / DXT3 / DXT5 / BGRA8888 / BGR888 / RGBA8888 / RGB888 / ABGR8888 / BGRX8888 /
+      DXT1_ONEBITALPHA / I8 / IA88 decoded to RGBA8 (so Skyrim can make the mip levels); others are
+      logged and drawn white.
+    - *Every Garry's Mod frame* (`PostDrawOpaqueRenderables`, once per frame, not for the 3D sky or
+      depth passes): for each object, `SetupBones()` then each bone's `GetBoneMatrix(b)` (the
+      entity's own matrix if a bone has none), 12 numbers each, in one flat table to
+      `gmsky.RenderFrame`. The module multiplies each by the model's `poseToBone`, subtracts the
+      anchor, and writes the FRAME with the origin epoch it holds.
+    - *The module* (`gmod/module/src/render_out.rs`, client side): owns the `Writer`; keeps every
+      model and texture message it sent, and after a RESET (a Skyrim that started later) sends them
+      all again before frames. New Lua functions: `RenderTexture(id, vtf bytes)`, `RenderModel(id,
+      bones, vertices, indices, parts, bind poses)` (flat number tables), `RenderFrame(flat)`,
+      `RenderStatus()`. Reading flat Lua tables needs `lua_rawgeti` and `lua_objlen` (added to
+      `lua.rs`).
+    - The world layer picture goes off by default (`gmsky_overlay_world 0`; `1` brings it back), so
+      objects aren't drawn twice.
+    - Logs (Garry's Mod, every 5 s): objects sent, models / textures known and failed (with why),
+      Lua ms for new models and per frame; the module's line: messages, bytes, refused, resets.
+    - Tests: VTF decoding unit tests (hand-made files: DXT1 / DXT5 blocks with known colours, BGR888,
+      a 7.3 file with a resource table, mip choice); harness check: `render.lua` with fake
+      entities and a fake `util.GetModelMeshes` sends the right model / frame numbers.
 - **G4. Moving and bending things.** Bone matrices every frame (`ent:SetupBones()`,
   `GetBoneMatrix`), skinning in Skyrim's vertex shader: ragdolls, Garry's Mod NPCs, rockets,
   grenades. **Test:** ragdolls flop, rockets fly, all in Skyrim's world.

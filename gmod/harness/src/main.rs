@@ -89,7 +89,8 @@ FCVAR_REPLICATED = 8192
 -- the step D tests switch gmsky_ground to shapes.
 -- gmsky_overlay_hidewindow 0: the harness never asks to move a window (step 2d-2).
 -- gmsky_overlay 0: the overlay (on by default since test 67) runs only where a check turns it on.
-HARNESS_CVARS = { gmsky_ground = "grid", gmsky_overlay_hidewindow = "0", gmsky_overlay = "0" }
+-- gmsky_render 0: Garry's Mod's objects go to Skyrim only where a check turns it on (step G3b).
+HARNESS_CVARS = { gmsky_ground = "grid", gmsky_overlay_hidewindow = "0", gmsky_overlay = "0", gmsky_render = "0" }
 function CreateConVar(name, default)
 	local function v() local o = HARNESS_CVARS[name] if o ~= nil then return o end return default end
 	return { GetFloat = function() return tonumber(v()) end, GetBool = function() return tonumber(v()) ~= 0 end,
@@ -1189,6 +1190,112 @@ fn main() {
                 let r = lua.run(lc, &format!("do return 'compiles' end\n{code}"));
                 check(r == Ok(Some("compiles".into())), &format!("patched HOLOHUD render.lua compiles: {r:?}"));
             }
+        }
+
+        // 8e. Geometry route step G3b: render.lua sends a prop's model, texture and bone matrices
+        //     through the real module into the render block (read here as Skyrim would). The
+        //     player's own weapon, view model, our stand-ins, hidden and far objects are left out.
+        {
+            use gmsky_protocol::render::*;
+            let anchor = match sky.shared().player_state.read() { Some((p, _)) => p.anchor, None => [0.0; 3] };
+            let skyrim = RenderMapping::open().expect("open the render block");
+            skyrim.attach_reader();
+            // A 4x4 BGRA8888 VTF 7.2, every pixel B=10 G=20 R=30 A=255.
+            let mut vtf: Vec<u8> = b"VTF\0".to_vec();
+            for v in [7u32, 2, 80] { vtf.extend_from_slice(&v.to_le_bytes()); }
+            vtf.extend_from_slice(&4u16.to_le_bytes());
+            vtf.extend_from_slice(&4u16.to_le_bytes());
+            vtf.extend_from_slice(&[0; 32]);
+            vtf.extend_from_slice(&12u32.to_le_bytes());
+            vtf.push(1);
+            vtf.extend_from_slice(&u32::MAX.to_le_bytes());
+            vtf.extend_from_slice(&[0, 0, 1, 0, 0, 0, 0]);
+            vtf.resize(80, 0);
+            vtf.extend(std::iter::repeat([10u8, 20, 30, 255]).take(16).flatten());
+            let vtf_lua: String = vtf.iter().map(|b| format!("\\x{b:02X}")).collect();
+            let (bx, by, bz) = (anchor[0] + 10.0, anchor[1] + 20.0, anchor[2] + 30.0);
+            let setup = format!(r#"
+                HARNESS_CVARS.gmsky_render = "1"
+                local frame = 100
+                function FrameNumber() return frame end
+                HARNESS_FILES = {{ ["materials/harness/box.vtf"] = "{vtf_lua}" }}
+                file = {{ Read = function(name, path) HARNESS_READ_PATH = path return HARNESS_FILES[name] end }}
+                local function M(t) return {{ Unpack = function() return 1, 0, 0, t[1], 0, 1, 0, t[2], 0, 0, 1, t[3], 0, 0, 0, 1 end }} end
+                function Material(name)
+                    return {{ IsError = function() return false end,
+                        GetInt = function(_, k) return k == "$flags" and 0x100 or 0 end,
+                        GetFloat = function() return 0 end,
+                        GetTexture = function() return {{ IsError = function() return false end, GetName = function() return "harness/box" end }} end }}
+                end
+                local corner = function(x) return {{ pos = Vector(x, 0, 0), normal = Vector(0, 0, 1), u = x, v = 0, weights = {{ {{ bone = 0, weight = 1 }} }} }} end
+                util.GetModelMeshes = function(model, lod, mask, skin)
+                    HARNESS_MESHES_ASKED = (HARNESS_MESHES_ASKED or 0) + 1
+                    return {{ {{ material = "harness/box", triangles = {{ corner(0), corner(1), corner(0) }} }} }}, {{ [0] = {{ matrix = M({{ -1, 0, 0 }}), parent = -1 }} }}
+                end
+                local function Ent(class, model, at, extra)
+                    return {{ GetClass = function() return class end, GetModel = function() return model end, GetSkin = function() return 0 end,
+                        IsDormant = function() return false end, GetNoDraw = function() return extra == "nodraw" end, IsWeapon = function() return class == "weapon_mine" end,
+                        GetOwner = function() return class == "weapon_mine" and HARNESS_PLY or nil end, GetColor = function() return {{ r = 255, g = 255, b = 255, a = 255 }} end,
+                        GetPos = function() return at end, SetupBones = function() end,
+                        GetBoneMatrix = function(_, b) return b == 0 and M({{ at.x, at.y, at.z }}) or nil end,
+                        GetWorldTransformMatrix = function() return M({{ at.x, at.y, at.z }}) end }}
+                end
+                local near = Vector({bx}, {by}, {bz})
+                local realEye = HARNESS_PLY.EyePos
+                HARNESS_PLY.EyePos = function() return near end
+                getmetatable(near).DistToSqr = function(a, b) local d = a - b return d.x * d.x + d.y * d.y + d.z * d.z end
+                ents.GetAll = function() return {{
+                    Ent("prop_physics", "models/harness/box.mdl", near),
+                    Ent("gmsky_actor", "models/harness/box.mdl", near),
+                    Ent("viewmodel", "models/harness/box.mdl", near),
+                    Ent("weapon_mine", "models/harness/box.mdl", near),
+                    Ent("prop_physics", "models/harness/box.mdl", near + Vector(9000, 0, 0)),
+                    Ent("prop_physics", "models/harness/box.mdl", near, "nodraw"),
+                    Ent("func_brush", "*3", near),
+                }} end
+                hook.Run("PostDrawOpaqueRenderables", false, false, false)
+                hook.Run("PostDrawOpaqueRenderables", false, false, false)  -- the same frame: not sent twice
+                frame = 101
+                hook.Run("PostDrawOpaqueRenderables", false, true, true)  -- the 3D sky: not sent
+                hook.Run("PostDrawOpaqueRenderables", true, false, false)  -- a depth pass: not sent
+                hook.Run("PostDrawOpaqueRenderables", false, true, false)  -- a 2D-sky map's main view (test 78): sent
+                local line = gmsky.render.Status()
+                HARNESS_CVARS.gmsky_render = "0"
+                HARNESS_PLY.EyePos = realEye
+                return HARNESS_MESHES_ASKED .. " " .. HARNESS_READ_PATH .. " | " .. line
+            "#);
+            let r = lua.run(lc, &setup);
+            let ok = matches!(&r, Ok(Some(s)) if s.starts_with("1 GAME | render: on; 2 frames, 1.0 objects a frame, 0 skipped") && s.contains("models 1 ok, 0 can't be drawn") && s.contains("textures 1 (1 new, 0 failed)"));
+            check(ok, &format!("render.lua: one prop wanted, its model read once, its texture from GAME: {r:?}"));
+            let mut kinds = Vec::new();
+            let mut frames = Vec::new();
+            let mut model_ok = false;
+            let mut texture_ok = false;
+            skyrim.read(u64::MAX, |kind, p| {
+                kinds.push(kind);
+                match kind {
+                    MSG_TEXTURE => {
+                        let (t, px) = decode_texture(p).unwrap();
+                        texture_ok = t.id == 1 && (t.width, t.height, t.format) == (4, 4, TEX_RGBA8) && px[0..4] == [30, 20, 10, 255];
+                    }
+                    MSG_MODEL => {
+                        let m = decode_model(p).unwrap();
+                        model_ok = m.model.id == 1 && m.model.bone_count == 1 && m.indices.len() == 3 && m.parts.len() == 1
+                            && m.parts[0].texture_id == 1 && m.parts[0].flags == MAT_ALPHATEST && m.parts[0].alpha_ref == 0.5
+                            && m.vertices[1].pos == [1.0, 0.0, 0.0] && m.vertices[1].u == 1.0 && m.vertices[1].weights[0] == 255;
+                    }
+                    MSG_FRAME => frames.push(decode_frame(p).unwrap()),
+                    _ => {}
+                }
+            }).unwrap();
+            check(kinds.first() == Some(&MSG_RESET) && kinds.iter().filter(|&&k| k == MSG_FRAME).count() == 2,
+                  &format!("render.lua: RESET first, one FRAME per Garry's Mod frame (also on a 2D-sky map; not for the 3D sky, depth or a repeat): {kinds:?}"));
+            check(texture_ok, "render.lua: the VTF reaches Skyrim as a 4x4 RGBA8 texture (BGRA swapped)");
+            check(model_ok, "render.lua: the model reaches Skyrim (1 triangle, alpha-tested part on texture 1, corner on bone 0)");
+            let first = frames.first().map(|(f, o, m)| (f.frame, f.origin_epoch, o.len(), o.first().map(|o| (o.model_id, o.color)), m.first().map(|m| [m.m[0][3], m.m[1][3], m.m[2][3]])));
+            // Bone at anchor + (10, 20, 30), poseToBone moves by -1 in x: (9, 20, 30) from the anchor.
+            check(first == Some((100, 1, 1, Some((1, 0xFFFF_FFFF)), Some([9.0, 20.0, 30.0]))),
+                  &format!("render.lua: the frame has the prop at bone x poseToBone minus the anchor, origin epoch 1: {first:?}"));
         }
 
         // 8c. Collision field (re-plan step A): swept box against triangles.
