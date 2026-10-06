@@ -1760,6 +1760,22 @@ they hide what's behind them.
   conversion. The world layer picture is switched off by default (`gmsky_overlay_world 0`).
   Logs: models / textures sent (bytes, formats, any it couldn't read and why), objects per frame,
   Lua ms, Skyrim draw ms. **Test:** spawn props; they stand in Skyrim's world, hidden by walls.
+
+  *G3 in two halves (2026-10-05).*
+  - **G3a, Skyrim draws what the block holds** (`World.cpp`, tested with `fake_render`, no Garry's
+    Mod): models into vertex / index buffers, textures into textures (RGBA8 as sRGB with Skyrim
+    making the smaller mip levels; BC1-3 as sRGB, one level), uploaded when a model or texture
+    arrives or changes, freed on RESET / FORGET. Every Skyrim frame, the newest Garry's Mod frame,
+    if its origin epoch is the one Skyrim published (`origin` slot): per object, its matrices into
+    a buffer the vertex shader reads, and its triangles drawn per part. The vertex shader bends the
+    model (up to 4 bones per corner, the weights summing to 1) and places it at `origin - camera +
+    position / scale` (§5; the camera subtraction in double precision on the CPU). Same pass,
+    targets, depth and motion vectors as G1; fixed light (Skyrim's light is G5); alpha-tested parts
+    drop pixels under `alpha_ref`; no face culling yet. The test cube is switched off.
+    `fake_render` follows Skyrim's current origin epoch, so its bar stands 150 Garry's Mod units
+    (282 Skyrim units) east of the origin and 40 up. Logs: GPU models / textures held, uploads and
+    their ms, objects drawn / skipped and why (epoch, unknown model, bone count), triangles, ms.
+  - **G3b, Garry's Mod sends its props** (Lua + module): the rest of G3 above.
 - **G4. Moving and bending things.** Bone matrices every frame (`ent:SetupBones()`,
   `GetBoneMatrix`), skinning in Skyrim's vertex shader: ragdolls, Garry's Mod NPCs, rockets,
   grenades. **Test:** ragdolls flop, rockets fly, all in Skyrim's world.

@@ -274,3 +274,18 @@ impl Drop for Mapping {
         }
     }
 }
+
+/// Reads the origin Skyrim published last, without registering as either side (for tools such as
+/// fake_render). None if Skyrim hasn't published one; an error if the block isn't usable.
+pub fn peek_origin() -> Result<Option<crate::Origin>, String> {
+    let (handle, base) = map_named(crate::SHM_NAME, MAP_SIZE)?;
+    let s = unsafe { &*(base as *const Shared) };
+    let (magic, version) = (s.header.magic.load(Ordering::Acquire), s.header.version.load(Ordering::Acquire));
+    let r = if magic == MAGIC && version == VERSION {
+        Ok(s.origin.read().map(|(o, _)| o))
+    } else {
+        Err(format!("link block not ready (magic {magic:#x}, version {version})"))
+    };
+    unmap(handle, base);
+    r
+}

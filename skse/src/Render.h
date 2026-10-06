@@ -11,6 +11,7 @@ namespace gmsky::Render
 
 	struct Model
 	{
+		uint64_t serial = 0;  // new for every MODEL message (the drawing side re-uploads on change)
 		GmskyRndModel header{};
 		std::vector<GmskyRndPart> parts;
 		std::vector<GmskyRndVertex> vertices;
@@ -19,6 +20,7 @@ namespace gmsky::Render
 
 	struct Texture
 	{
+		uint64_t serial = 0;
 		GmskyRndTexture header{};
 		std::vector<uint8_t> pixels;
 	};

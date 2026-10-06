@@ -19,6 +19,7 @@ namespace gmsky::Render
 		uint64_t g_lastOpenTry = 0;
 		std::string g_lastError;
 		uint32_t g_readerEpoch = 0;
+		uint64_t g_serial = 0;
 
 		std::unordered_map<uint32_t, Model> g_models;
 		std::unordered_map<uint32_t, Texture> g_textures;
@@ -149,6 +150,7 @@ namespace gmsky::Render
 						return Bad(err, a_type, a_bytes);
 					}
 					t.pixels.assign(px, px + t.header.bytes);
+					t.serial = ++g_serial;
 					g_textures[t.header.id] = std::move(t);
 					return;
 				}
@@ -163,6 +165,7 @@ namespace gmsky::Render
 					m.parts.assign(mv.parts, mv.parts + mv.model.part_count);
 					m.vertices.assign(mv.vertices, mv.vertices + mv.model.vertex_count);
 					m.indices.assign(mv.indices, mv.indices + mv.model.index_count);
+					m.serial = ++g_serial;
 					g_models[m.header.id] = std::move(m);
 					return;
 				}

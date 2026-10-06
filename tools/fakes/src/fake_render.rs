@@ -4,7 +4,9 @@
 //! The model: a bar 64 units long, 8 thick, in two halves on two bones (bone 0: x < 0, bone 1:
 //! x > 0), textured with a 64 x 64 orange / white checker (RGBA8). The object sits at (150, 0, 40)
 //! relative to the anchor, turns 90 degrees a second, and its second half bends up and down.
-//! Usage: fake_render [--seconds N] [--epoch N]   (defaults 600, 0 = origin epoch in the frames)
+//! Positions are relative to the anchor of the origin epoch in the frames: by default the epoch
+//! Skyrim published last (read every second), so with no Garry's Mod the anchor is Skyrim's origin.
+//! Usage: fake_render [--seconds N] [--epoch N]   (defaults 600, the current origin epoch)
 //! Log: logs/fake_render.log
 
 mod common;
@@ -14,9 +16,25 @@ use gmsky_protocol::render::*;
 use gmsky_protocol::shm::{now_ms, now_qpc};
 use std::time::Duration;
 
-fn epoch_arg() -> u32 {
+fn epoch_arg() -> Option<u32> {
     let args: Vec<String> = std::env::args().collect();
-    args.iter().position(|a| a == "--epoch").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).unwrap_or(0)
+    args.iter().position(|a| a == "--epoch").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok())
+}
+
+/// The origin epoch Skyrim published last (0 if none yet).
+fn current_epoch(log: &mut Log, last: &mut u32) -> u32 {
+    let e = match gmsky_protocol::shm::peek_origin() {
+        Ok(o) => o.map(|o| o.epoch).unwrap_or(0),
+        Err(e) => {
+            log.line(&format!("fake_render: can't read the origin: {e}"));
+            0
+        }
+    };
+    if e != *last {
+        log.line(&format!("fake_render: origin epoch now {e}"));
+        *last = e;
+    }
+    e
 }
 
 /// A box from `lo` to `hi` on one bone: 6 faces, 4 corners each (own normals and texture corners).
@@ -72,7 +90,9 @@ fn main() {
         }
     };
     let mut w = Writer::new(map, std::process::id());
-    let epoch = epoch_arg();
+    let fixed_epoch = epoch_arg();
+    let mut seen_epoch = u32::MAX;
+    let mut epoch = fixed_epoch.unwrap_or_else(|| current_epoch(&mut log, &mut seen_epoch));
     let mut verts = Vec::new();
     let mut indices = Vec::new();
     push_box([-32.0, -4.0, -4.0], [0.0, 4.0, 4.0], 0, &mut verts, &mut indices);
@@ -111,6 +131,9 @@ fn main() {
         if !need_assets && w.map.write(MSG_FRAME, &msg) { sent_frames += 1 } else { dropped_frames += 1 }
         if now_ms() - last_print >= 1000 {
             last_print = now_ms();
+            if fixed_epoch.is_none() {
+                epoch = current_epoch(&mut log, &mut seen_epoch);
+            }
             let c = w.map.ctl();
             log.line(&format!("fake_render: frame {frame}: {sent_frames} sent, {dropped_frames} not sent, {resets} resets; ring {} bytes unread, {} written / {} read / {} refused in all",
                               w.map.pending(), c.messages_written.load(std::sync::atomic::Ordering::Relaxed),
