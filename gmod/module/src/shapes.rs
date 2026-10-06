@@ -228,10 +228,13 @@ impl Store {
     /// Every stored triangle touching the box lo..hi (relative to the anchor), at most `max`, for
     /// building a Garry's Mod physics mesh (DESIGN.md "One collision system", S1). A shape touching
     /// two regions comes from Skyrim in both; identical triangles (to 1/16 unit, same vertex
-    /// order) are returned once.
-    pub fn tris_in_box(&self, lo: [f64; 3], hi: [f64; 3], max: usize) -> Vec<[f64; 9]> {
+    /// order) are returned once. With `clip`, every triangle is cut exactly at the box's faces
+    /// (only the part inside is kept), so a mesh never reaches outside its box and boxes laid
+    /// edge to edge never share a piece (S1c's chunks); the second value counts the triangles cut.
+    pub fn tris_in_box(&self, lo: [f64; 3], hi: [f64; 3], max: usize, clip: bool) -> (Vec<[f64; 9]>, usize) {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
+        let mut cut = 0;
         for r in self.regions.values() {
             if (0..3).any(|k| r.lo[k] > hi[k] || r.lo[k] + r.size < lo[k]) {
                 continue;
@@ -244,13 +247,47 @@ impl Store {
                 if !seen.insert(key) {
                     continue;
                 }
-                if out.len() >= max {
-                    return out;
+                if !clip || (0..3).all(|k| t.lo[k] >= lo[k] && t.hi[k] < hi[k]) {
+                    if out.len() >= max {
+                        return (out, cut);
+                    }
+                    out.push(t.v);
+                    continue;
                 }
-                out.push(t.v);
+                let pieces = clip_to_box(&t.v, lo, hi);
+                if !(pieces.is_empty() || pieces.len() == 1 && pieces[0] == t.v) {
+                    cut += 1;
+                }
+                for piece in pieces {
+                    if out.len() >= max {
+                        return (out, cut);
+                    }
+                    out.push(piece);
+                }
             }
         }
-        out
+        (out, cut)
+    }
+
+    /// Where region (0, 0, 0) starts and the region size (Garry's Mod units, relative to the
+    /// anchor), once the first region has arrived.
+    pub fn lattice(&self) -> Option<([f64; 3], f64)> {
+        self.lattice
+    }
+
+    /// How many of the regions r0..=r1 (inclusive, Skyrim's region numbers) have arrived, and
+    /// how many there are.
+    pub fn regions_arrived(&self, r0: [i32; 3], r1: [i32; 3]) -> (usize, usize) {
+        let (mut arrived, mut total) = (0, 0);
+        for x in r0[0]..=r1[0] {
+            for y in r0[1]..=r1[1] {
+                for z in r0[2]..=r1[2] {
+                    total += 1;
+                    arrived += self.regions.contains_key(&(x, y, z)) as usize;
+                }
+            }
+        }
+        (arrived, total)
     }
 
     /// Triangles in the region containing p (for the log), or None if it hasn't arrived.
@@ -423,6 +460,75 @@ fn sweep_tri(t: &Tri, c: [f64; 3], e: [f64; 3], d: [f64; 3]) -> Option<(f64, [f6
     Some((enter, n))
 }
 
+/// The part of triangle v inside the box lo..hi, as triangles (Sutherland-Hodgman against the
+/// six faces, then a fan). A piece lying entirely on a high face (x = hi.x, ...) is dropped: it
+/// belongs to the neighbouring box, whose low face it is on. Pieces with no area are dropped.
+pub fn clip_to_box(v: &[f64; 9], lo: [f64; 3], hi: [f64; 3]) -> Vec<[f64; 9]> {
+    let mut poly: Vec<[f64; 3]> = (0..3).map(|i| [v[3 * i], v[3 * i + 1], v[3 * i + 2]]).collect();
+    for k in 0..3 {
+        for (bound, keep_above) in [(lo[k], true), (hi[k], false)] {
+            let inside = |p: &[f64; 3]| if keep_above { p[k] >= bound } else { p[k] <= bound };
+            let mut next = Vec::with_capacity(poly.len() + 2);
+            for i in 0..poly.len() {
+                let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+                let (ia, ib) = (inside(&a), inside(&b));
+                if ia {
+                    next.push(a);
+                }
+                if ia != ib {
+                    let t = (bound - a[k]) / (b[k] - a[k]);
+                    let mut p: [f64; 3] = std::array::from_fn(|j| a[j] + (b[j] - a[j]) * t);
+                    p[k] = bound; // exactly on the face, so neighbours meet without a gap
+                    next.push(p);
+                }
+            }
+            poly = next;
+            if poly.len() < 3 {
+                return Vec::new();
+            }
+        }
+    }
+    if (0..3).any(|k| poly.iter().all(|p| p[k] >= hi[k])) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for i in 1..poly.len() - 1 {
+        let (a, b, c) = (poly[0], poly[i], poly[i + 1]);
+        let t = [a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]];
+        if Tri::new(t).is_some() {
+            out.push(t);
+        }
+    }
+    out
+}
+
+/// Shape of a mesh, for the log: (thin triangles, shortest edge, smallest corner angle in
+/// degrees). Thin = a corner under 1 degree or an edge under 0.5 units.
+pub fn mesh_quality(tris: &[[f64; 9]]) -> (usize, f64, f64) {
+    let (mut thin, mut shortest, mut smallest) = (0, f64::MAX, 180.0f64);
+    for v in tris {
+        let p: [[f64; 3]; 3] = std::array::from_fn(|i| [v[3 * i], v[3 * i + 1], v[3 * i + 2]]);
+        let mut tri_short = f64::MAX;
+        let mut tri_angle = 180.0f64;
+        for i in 0..3 {
+            let (a, b, c) = (p[i], p[(i + 1) % 3], p[(i + 2) % 3]);
+            let e1: [f64; 3] = std::array::from_fn(|j| b[j] - a[j]);
+            let e2: [f64; 3] = std::array::from_fn(|j| c[j] - a[j]);
+            let l1 = (e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2]).sqrt();
+            let l2 = (e2[0] * e2[0] + e2[1] * e2[1] + e2[2] * e2[2]).sqrt();
+            tri_short = tri_short.min(l1);
+            let cos = if l1 > 0.0 && l2 > 0.0 { (e1[0] * e2[0] + e1[1] * e2[1] + e1[2] * e2[2]) / (l1 * l2) } else { 1.0 };
+            tri_angle = tri_angle.min(cos.clamp(-1.0, 1.0).acos().to_degrees());
+        }
+        if tri_angle < 1.0 || tri_short < 0.5 {
+            thin += 1;
+        }
+        shortest = shortest.min(tri_short);
+        smallest = smallest.min(tri_angle);
+    }
+    (thin, shortest, smallest)
+}
+
 /// A region message payload (for tests and the harness's fake Skyrim).
 #[cfg(test)]
 pub fn region_payload(rx: i32, ry: i32, rz: i32, col_epoch: u32, lo: [f32; 3], size: f32, tris: &[[f32; 9]]) -> Vec<u8> {
@@ -473,10 +579,65 @@ mod tests {
         // The same floor sent again in the neighbouring region: still two triangles.
         let tris = [[-100.0, -100.0, 0.0, 100.0, -100.0, 0.0, 100.0, 100.0, 0.0], [-100.0, -100.0, 0.0, 100.0, 100.0, 0.0, -100.0, 100.0, 0.0]];
         s.apply(COL_REGION, &region_payload(1, 0, 0, 1, [136.0, -136.0, -136.0], 272.0, &tris));
-        assert_eq!(s.tris_in_box([-200.0; 3], [200.0; 3], 100).len(), 2);
-        assert_eq!(s.tris_in_box([-200.0; 3], [200.0; 3], 1).len(), 1);
+        assert_eq!(s.tris_in_box([-200.0; 3], [200.0; 3], 100, false).0.len(), 2);
+        assert_eq!(s.tris_in_box([-200.0; 3], [200.0; 3], 1, false).0.len(), 1);
         // A box above the floor touches nothing.
-        assert_eq!(s.tris_in_box([-50.0, -50.0, 10.0], [50.0, 50.0, 20.0], 100).len(), 0);
+        assert_eq!(s.tris_in_box([-50.0, -50.0, 10.0], [50.0, 50.0, 20.0], 100, false).0.len(), 0);
+    }
+
+    fn area(tris: &[[f64; 9]]) -> f64 {
+        tris.iter()
+            .map(|v| {
+                let e1 = [v[3] - v[0], v[4] - v[1], v[5] - v[2]];
+                let e2 = [v[6] - v[0], v[7] - v[1], v[8] - v[2]];
+                let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+                0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt()
+            })
+            .sum()
+    }
+
+    #[test]
+    fn tris_in_box_clip_stays_inside_and_never_shares() {
+        let s = floor_store();
+        // The 200 x 200 floor cut at x = 0 into two boxes: both triangles are cut, the halves
+        // stay inside their box and add up to the whole floor.
+        let (left, cut_l) = s.tris_in_box([-200.0, -200.0, -10.0], [0.0, 200.0, 10.0], 100, true);
+        let (right, cut_r) = s.tris_in_box([0.0, -200.0, -10.0], [200.0, 200.0, 10.0], 100, true);
+        assert_eq!((cut_l, cut_r), (2, 2));
+        assert!(left.iter().all(|v| v[0] <= 0.0 && v[3] <= 0.0 && v[6] <= 0.0));
+        assert!(right.iter().all(|v| v[0] >= 0.0 && v[3] >= 0.0 && v[6] >= 0.0));
+        assert!((area(&left) - 20000.0).abs() < 1e-6 && (area(&right) - 20000.0).abs() < 1e-6);
+        // Without clipping both boxes get both whole triangles.
+        assert_eq!(s.tris_in_box([-200.0, -200.0, -10.0], [0.0, 200.0, 10.0], 100, false).0.len(), 2);
+    }
+
+    #[test]
+    fn clip_drops_pieces_on_the_high_face() {
+        // A wall exactly on x = 0 belongs to the box whose low face is x = 0, not to the one
+        // whose high face it is.
+        let wall = [0.0, -50.0, 0.0, 0.0, 50.0, 0.0, 0.0, 0.0, 50.0];
+        assert_eq!(clip_to_box(&wall, [-100.0; 3], [0.0, 100.0, 100.0]).len(), 0);
+        assert_eq!(clip_to_box(&wall, [0.0, -100.0, -100.0], [100.0; 3]).len(), 1);
+    }
+
+    #[test]
+    fn mesh_quality_finds_thin_triangles() {
+        let good = [0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0, 0.0];
+        let sliver = [0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 50.0, 0.1, 0.0];
+        let (thin, shortest, angle) = mesh_quality(&[good, sliver]);
+        assert_eq!(thin, 1);
+        assert!((shortest - 10.0).abs() < 1e-9);
+        assert!(angle < 1.0);
+    }
+
+    #[test]
+    fn lattice_and_regions_arrived() {
+        let s = floor_store();
+        let (base, size) = s.lattice().unwrap();
+        assert_eq!(size, 272.0);
+        assert_eq!(base, [-136.0, -136.0, -136.0]);
+        assert_eq!(s.regions_arrived([0, 0, -1], [0, 0, 0]), (2, 2));
+        assert_eq!(s.regions_arrived([0, 0, -1], [1, 0, 0]), (2, 4));
     }
 
     #[test]

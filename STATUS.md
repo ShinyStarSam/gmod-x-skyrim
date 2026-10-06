@@ -1,7 +1,7 @@
 # STATUS
 
-**2026-10-06, after in-game tests 101-103 and 107: BLOCKED on Garry's Mod's physics crash again** (physics
-props on Skyrim's ground, plan `docs/DESIGN.md` "One collision system", step S1). See "The current
+**2026-10-06, after in-game tests 101-111: BLOCKED on Garry's Mod's physics crash** (physics props on
+Skyrim's ground, plan `docs/DESIGN.md` "One collision system", step S1c). See "The current
 problem". Waiting for the user's choice of the next experiment.
 
 **2026-10-06: the indoor shadow problem below is solved (test 93: Community Shaders' formula agrees
@@ -117,71 +117,66 @@ publishes the origin.
 
 ## The current problem
 
-### Physics ground crashes Garry's Mod (2026-10-06, tests 101-103 and 107; blocked)
+### Physics ground crashes Garry's Mod (2026-10-06, tests 101-111; blocked)
 
-**What we did:** to make Garry's Mod's physics props, ragdolls and grenades land on Skyrim's ground
-(today they fall ~16,300 units to gm_flatmap's floor: test 100, 67 floor crossings by 25 objects
-in 70 s), the plan is one collision system like InfMap2's (a Garry's Mod addon for huge maps,
-`reference/infmap2`): Skyrim's triangles as Garry's Mod physics objects (`PhysicsFromMesh`) that the
-player, props and bullets all use. Step S1 tests the old engine crash first:
-`gmsky_test_physground old|infmap` builds a ~3,200-triangle physics mesh of Skyrim's triangles
-around the player every 0.5 s and removes the previous one after the new one exists.
-**What we expected:** `old` (tests 12-17's entity setup) crashes; `infmap` (InfMap2's chunk setup:
-mass 50000, `FVPHYSICS_CONSTRAINT_STATIC`, `FVPHYSICS_NO_SELF_COLLISIONS`, `FL_STATICPROP`,
-`FSOLID_FORCE_WORLD_ALIGNED`, custom collision checks) survives 10 minutes.
-**What happened:** both crashed within seconds (old: build 5; infmap: build 6), in exactly tests
-12-17's place.
+**Goal:** Garry's Mod's physics props, ragdolls and grenades land on Skyrim's ground (today they
+fall ~16,300 units to gm_flatmap's floor: test 100). Plan: one collision system like InfMap2's:
+Skyrim's triangles as Garry's Mod physics objects (`PhysicsFromMesh`) that the player, props and
+bullets all use.
 
-**Evidence:**
-- Dumps `GarrysMod/crashes/gmod_win64_20261006_022401_1_accessviolation.mdmp` (old) and
-  `..._022524_...` (infmap): `0xc0000005` write past a heap block at `vphysics.dll+0xaaff0`;
-  `rbp=0xfffd r12=0xffff r13=0xfffe rcx=0x2fff7` (a sorted list with 16-bit numbering, full at
-  65,532 items); inner chain `0x97c9b ← 0x99523 ← 0x97912 ← 0x977b8 ← 0x96cea … 0xa0728 ← 0x98cfc`,
-  reached from `server.dll+0x2eb909` (`CollisionRulesChanged` → `RecheckCollisionFilter`). Identical
-  in both dumps and to tests 12-17.
-- Logs (`build/logs-ingame-test-101/` = run 1, `-103/` = run 2): run 2's player stood **still**
-  (speed 0) at the same spot for all 6 builds, so each new mesh was the same triangles in the same
-  place as the previous one, which still existed (Garry's Mod deletes removed entities at the end
-  of the tick). The player touched the test mesh in 35 of 157 ticks. `ShouldCollide` ran (2,578
-  calls in 2 s).
-- A Lua error the user saw: almost certainly our log line after each build (`PhysObj:GetGameFlags`
-  doesn't exist; fixed). It ran after every setup call and didn't cause the crash.
+**The crash (identical in all 6 dumps, and in tests 12-17):** `0xc0000005` writing past a heap
+block at `vphysics.dll+0xaaff0`, `rbp=0xfffd r12=0xffff r13=0xfffe rcx=0x2fff7` (= 3 x 0xfffd: index
+65,533 of a 3-wide element), inner chain `0x97c9b ← 0x99523 ← 0x97912 ← 0x977b8 ← 0x96cea … 0xa0728
+← 0x98cfc`, called from Lua on the **server**. It happens in a re-check the physics engine runs
+after a new mesh object is set up: the last log line was `SetSolid` (tests 109, 110) or `SetMass`
+(test 111). The values never change, which fits a list that always fills up at the same size
+(about 65,533 entries) better than random damage. **Not sure** what the list holds.
 
-**What this rules out:** the player moving is **not** needed (run 2). InfMap2's settings don't help.
-**Pattern that fits every run so far (not proven):** a new mesh created **overlapping an existing
-mesh**, where **something touches both** (the player). Test 16 (pieces never overlapped, 272 builds)
-never crashed; the 2026-10-04 overlap experiment (overlap, nobody touching) survived; tests 12-15
-rebuilt pieces where old pieces still were; InfMap2 never puts two meshes of one chunk in the same
-place.
+**Every run (`gmsky_test_physground`, InfMap2's setup, the old mesh's physics destroyed first):**
 
-**Test 107 (idea 1, "no overlap", the user's rule "never two meshes in the same place"):** the old
-mesh's physics destroyed before the new one was built ("meshes with physics now: 0" on both
-sides), player standing still on the spot: **crashed on build 2**, same dump signature. So the
-overlap is not the trigger. What every crash shares: a mesh created where the player's body touches
-it. Every mesh created where nothing touches it survived (hundreds, tests 12-16). But the *first*
-build of every run also touched the player and survived, so it isn't that simple either.
+| Test | What | Triangles per mesh | Player | Result |
+|---|---|---|---|---|
+| 101 | rebuild every 0.5 s, our old setup | 3,223-3,281 Skyrim | walked | crash, build 5 |
+| 103 | same, InfMap2's setup | ~3,225 Skyrim | standing still | crash, build 6 |
+| 107 | never two meshes at once | 3,869 Skyrim | standing still on it | crash, build 2 |
+| **108** | **2 flat triangles** | **2** | still and walking (~40 builds moving) | **no crash, 117 builds** |
+| 109 | chunks beside the player (whole triangles) | 3,675 / 5,244 / 7,413 | walking | crash, build 3 (reached under the player) |
+| 110 | chunks cut exactly at their faces | 6,043 / 4,316 | walking, body ≥ 3 units away | crash, build 2 |
+| **111** | **even grid, no thin triangles** | **7,442** | 8 builds still, then walking | **crash, build 9 (first one moving)** |
 
-**What differs from InfMap2, which builds chunks under players without crashing:** its triangles
-come from a smooth height function (2 per square, about 600 units across in `gm_inf_bliss`);
-ours are Skyrim's real collision: thousands of small triangles, stacked layers (test 100: props
-crossed 2-3 surfaces in one fall), and probably slivers, near-duplicates and tiny edges. Nobody
-has measured the quality of what we feed `PhysicsFromMesh`.
+**What is now known:**
+- **The number of triangles matters; Skyrim's shapes are not needed.** 2 triangles never crashed
+  (108); a tidy 7,442-triangle grid crashed (111). Skyrim's meshes do hold ~3% thin triangles, some
+  with ~0-length edges (110), but they aren't required for the crash.
+- **Not a simple threshold:** 4,316 crashed (110), 5,244 survived (109). The first build of every run
+  survived, even under the player.
+- **Moving makes it worse but isn't required:** 111 survived 8 builds standing still and crashed on
+  the first moving one; but 103 and 107 crashed standing still (Skyrim's triangles).
+- **Building "beside" the player didn't avoid it:** in 110 the player's body was at least 3 units from
+  the new mesh. Not a clean test of "far away", though (the start chunk's neighbours were needed at once).
+- **Ruled out:** InfMap2's settings (103), overlap (107), setting collision rules before the mesh
+  exists (test 15: the crash moved into `PhysicsFromMesh`), a particular setup call (109-111 crashed
+  at different calls).
+- **Bigger chunks push towards the crash, not away from it** (more triangles per mesh).
+- **The one long run that never crashed** (test 16, 272 builds): 512-triangle pieces built only away
+  from the player, from a grid that arrived ahead of them.
 
-**Ideas not tried yet (in the order I'd suggest; one variable each):**
-1. **Clean the mesh before building it.** Weld vertices closer than 1/16 unit, drop degenerate and
-   sliver triangles (tiny area or a near-zero angle), drop duplicates in any vertex order. Log the
-   mesh's quality every build (counts of each kind, shortest edge, smallest angle) so we see what
-   Skyrim's data looks like. Same test as 107 (player standing on it). If it survives, the trigger
-   is bad geometry and cleaning is part of the real design.
-2. **Not touching:** the same test but the mesh built 2,000 units from the player. Confirms that
-   something touching the new mesh is needed.
-3. **Player's body off for the moment of creation:** turn the player's physics collisions off,
-   build, turn them back on the next tick. Shows whether the crash is in working out the pairs
-   between the player and the new mesh (then it would crash on turning back on instead).
-4. **A static physics object** (like the map's own ground) made by our Rust module through the
-   engine's physics interface. More work; only if 1-3 don't lead anywhere.
-5. If none works: a different route for props (see `docs/DESIGN.md` fallbacks), decided with the
-   user.
+**Ideas not tried yet (my order; one variable each):**
+1. **Find out what the 65,533-entry list is.** Read `vphysics.dll` around `+0xaaff0` and its callers
+   with a disassembler (read only; nothing written to the game or the repo). Knowing what fills it
+   (pairs between the new mesh and nearby objects? pieces of the new mesh?) tells us which number to
+   keep small. Needs Ghidra (free, a download): **only with your go-ahead.**
+2. **Build only far from the player.** The opposite of 110's start-up problem: build a chunk only when
+   the player's body is at least ~1,000 units from it (needs Skyrim to collect further out, S1d), and
+   log the real distance. Test 16 is the only pattern that never crashed.
+3. **Small meshes.** Measure where the threshold is with the tidy grid: 500, 1,000, 2,000, 4,000
+   triangles under the walking player (test 111's setup). Tells us how small pieces must be.
+4. **A truly static physics object** made by our Rust module through the engine's physics interface
+   (like the map's own ground, which is created once at load and never runs this re-check), instead
+   of `PhysicsFromMesh`, which makes a movable object and freezes it. More work; not sure the
+   engine's static path avoids the re-check.
+5. **Replace the physics engine** (VPhysics-Jolt, open source): a `vphysics.dll` swap in the game
+   folder, a big change, **only with your go-ahead**; not sure it supports this Garry's Mod version.
 
 ### Solved (2026-10-06, test 93): how Skyrim reads its indoor shadow maps
 
@@ -381,6 +376,10 @@ percentile), = 94/255.
   no difference.
 - **Never two meshes at once (S1, test 107):** old mesh's physics destroyed before building the
   new one: crashed on build 2, player standing still. Overlap is not the trigger.
+- **Big chunks built beside the player (S1c, tests 109-110):** crashed on build 3 and 2. Cutting the
+  chunks exactly at their faces (110) didn't help.
+- **A tidy grid instead of Skyrim's triangles (test 111):** crashed too (7,442 triangles).
+  2 flat triangles (test 108) never crashed.
 - **Lift rule using the highest point under the footprint:** popped the player onto object
   spikes up to 23×/s (test 17). Now judged at the player's centre (test 18: 0 lifts).
 - **Grids centred where the player was:** fast players outran them (test 20). Now centred ahead.

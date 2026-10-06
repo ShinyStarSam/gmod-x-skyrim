@@ -2224,6 +2224,64 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
   the same physical spot, but its `ShouldCollide` stops them colliding with each other; two meshes
   of the same ground that may collide never exist there.) S1's experiment follows this rule from
   run 2b on; S2's chunks lie on a fixed lattice and never overlap.
+- **S1c. Big chunks built ahead, a flat stand-in, and a log line before every call (planned
+  2026-10-06 after test 107, the user's choice).** Test 107 crashed with a single mesh, built where
+  the player stood. The user: make chunks as big as possible, never build under the player, and
+  at the same time test a flat stand-in and log every call and every mesh's triangle count. One
+  command, four runs, each run changes one thing against test 107:
+  `gmsky_test_physground <rebuild|chunks> <skyrim|flat>` (`off` stops it). Every run uses
+  InfMap2's recipe (`old` is gone: tests 101/103 showed it makes no difference).
+  - *`rebuild`* = test 107 exactly: a new mesh around the player every 0.5 s, the old one's
+    physics destroyed first.
+  - *`chunks`* = a fixed lattice of chunk columns lined up with Skyrim's regions, **N × N regions
+    wide** (`gmsky_physground_chunk`, default 4 = 2,048 Skyrim units ≈ 1,088 Garry's Mod units) and
+    as tall as Skyrim's collection window at build time (3 regions below the player's region to 2
+    above, ≈ 1,632 units). A chunk is built **once**, when the player comes within 1 region
+    (≈ 272 units) of it **and every one of its regions has arrived from Skyrim**; never rebuilt;
+    removed when the player is more than 2 chunks away. So a chunk is normally built *beside* the
+    player, never under it. The only exception is the chunk the player starts in (the "first
+    build", which has survived every run so far); any build with the player inside its box is
+    logged as `UNDER THE PLAYER`. **Every triangle is cut exactly at the chunk's faces** (after test
+    109, where whole triangles assigned by their centre reached ~170 units past the box and under
+    the player), so a chunk's mesh never leaves its box and neighbouring chunks never share a piece
+    (the "never two meshes in the same place" rule; a piece lying exactly on a shared face goes to
+    one side only). Logged per build: how many triangles were cut, how many thin ones (a corner
+    under 1° or an edge under 0.5 units), and the gap between the player's body and the new mesh. A re-centre or new origin stops the experiment (logged); re-centring only
+    happens 8,000 units from home.
+  - *`skyrim`* = Skyrim's real triangles; *`flat`* = 2 triangles covering the same box, at the
+    height of the player's feet when the experiment started (idea: is it Skyrim's geometry or our
+    method?).
+  - **Why 4 regions is "as big as possible" today:** Skyrim collects collision only 5 regions
+    around the player (`skse/src/Collision.cpp` `kRadius = 5`, ≈ 1,360 units each way), and a
+    chunk must be complete before the player reaches it: lead (1) + width (4) ≤ 5. Bigger chunks
+    need Skyrim to collect further out; that is its own step (S1d, below), not part of this one. A
+    bigger `gmsky_physground_chunk` is allowed but such chunks wait forever (logged as "waiting:
+    a of b regions arrived").
+  - **Triangle cap:** 127,474 per mesh (the user's figure for Source models; **not sure** it is
+    the limit for physics meshes, which are made differently). A chunk over the cap is **not
+    built** and logged, rather than built with holes.
+  - **Logs:** before each build: mode, source, chunk, triangles, box size, where the player is
+    (inside / distance to the box). Then a line **before every setup call** (`PhysicsFromMesh`,
+    `SetSolid`, ...; lines are flushed one by one, so after a crash the last line names the call).
+    After: build ms. Every 5 s: chunks alive with their triangle counts, chunks waiting and why.
+    (Already tried, for the record: per-call lines in tests 14-15, and "solid first" in test 15,
+    which only moved the crash into `PhysicsFromMesh`.)
+  - **New in Rust:** `gmsky.ShapesLattice()` (where Skyrim's region grid starts, region size),
+    `gmsky.ShapesRegionsArrived(rx0, ry0, rz0, rx1, ry1, rz1)` (arrived / total regions in a
+    range), and `gmsky.TrisInBox`'s optional 8th argument `clip` (plus shape numbers returned).
+  - *Tests (fresh Garry's Mod each):* (1) `rebuild flat`; (2) `chunks skyrim`, walk around for
+    5 minutes; (3) `chunks flat`, same. *Reading the results:* if (1) survives, Skyrim's geometry
+    is involved (next: clean the mesh); if (1) crashes, it's our method. If (2) survives, building
+    beside the player instead of under it avoids the crash, and S2 follows that rule.
+  - *Then (the user's order, after test 109): B, number or shape?* `rebuild grid`: test 108 under
+    the player, but a neat flat grid with as many triangles as the chunk that crashed (~7,400).
+    Crashes = the number matters (smaller meshes); survives = Skyrim's shapes matter (clean them).
+- **S1d (only if S1c's chunks work and the user wants them bigger): Skyrim collects further out.**
+  `kRadius` 5 → e.g. 12 regions, and the store keeps regions longer (`EVICT_REGIONS`, `kForget`),
+  so a chunk can be one Skyrim cell (8 regions, 4,096 Skyrim units ≈ 2,176 Garry's Mod units) or
+  more. Cost to measure: about 5× more regions to collect (filling the window takes longer at 3
+  regions per frame), more triangles in memory. Skyrim only has collision for its loaded cells
+  (`uGridsToLoad`, 5 by default ≈ 2 cells each way), which is the real ceiling.
 - **S2. Physics ground from Skyrim's regions (`gmsky_ground physics`).** New file
   `gmod/lua/gmsky/physground.lua`: InfMap2-style chunk entities, each holding the triangles of a
   block of 2×2×2 Skyrim regions (1,024 Skyrim units, ~544 Garry's Mod units; about 150 entities

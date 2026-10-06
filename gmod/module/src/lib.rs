@@ -183,7 +183,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 48] = [
+    let funcs: [(&str, lua::CFn); 50] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -202,6 +202,8 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("ShapesBounds", l_shapes_bounds),
         ("ShapesStatus", l_shapes_status),
         ("TrisInBox", l_tris_in_box),
+        ("ShapesLattice", l_shapes_lattice),
+        ("ShapesRegionsArrived", l_shapes_regions_arrived),
         ("GraphicsInfo", l_graphics_info),
         ("WriteLogFile", l_write_log_file),
         ("D3DState", l_d3d_state),
@@ -951,20 +953,25 @@ unsafe extern "C" fn l_sweep(l: *mut State) -> c_int {
     })
 }
 
-/// gmsky.TrisInBox(lx, ly, lz, hx, hy, hz, max) -> list, count: Skyrim's triangles touching the
-/// box (relative to the anchor) as a flat list of numbers, 9 per triangle (3 corners x, y, z),
-/// at most `max` triangles, duplicates removed. Empty when not anchored to the store's epoch.
+/// gmsky.TrisInBox(lx, ly, lz, hx, hy, hz, max [, clip]) -> list, count, cut, thin, shortest,
+/// smallestAngle: Skyrim's triangles touching the box (relative to the anchor) as a flat list of
+/// numbers, 9 per triangle (3 corners x, y, z), at most `max` triangles, duplicates removed. With
+/// clip, every triangle is cut exactly at the box's faces (`cut` = how many were cut). The last
+/// three describe the returned triangles' shape (shapes::mesh_quality). Empty when not anchored
+/// to the store's epoch.
 unsafe extern "C" fn l_tris_in_box(l: *mut State) -> c_int {
     guarded(l, |a, _| {
         let n = |i: c_int| (a.tonumber)(l, i);
         let max = n(7).max(0.0) as usize;
+        let clip = (a.toboolean)(l, 8) != 0;
         let epoch = anchored_epoch();
-        let tris = with_shapes(|st| {
+        let (tris, cut) = with_shapes(|st| {
             if epoch == 0 || st.origin_epoch != epoch {
-                return Vec::new();
+                return (Vec::new(), 0);
             }
-            st.tris_in_box([n(1), n(2), n(3)], [n(4), n(5), n(6)], max)
+            st.tris_in_box([n(1), n(2), n(3)], [n(4), n(5), n(6)], max, clip)
         });
+        let (thin, shortest, smallest) = shapes::mesh_quality(&tris);
         (a.createtable)(l, (tris.len() * 9) as c_int, 0);
         let mut i = 1;
         for t in &tris {
@@ -974,7 +981,44 @@ unsafe extern "C" fn l_tris_in_box(l: *mut State) -> c_int {
                 i += 1;
             }
         }
-        (a.pushnumber)(l, tris.len() as f64);
+        let shortest = if tris.is_empty() { 0.0 } else { shortest };
+        for v in [tris.len() as f64, cut as f64, thin as f64, shortest, smallest] {
+            (a.pushnumber)(l, v);
+        }
+        6
+    })
+}
+
+/// gmsky.ShapesLattice() -> bx, by, bz, size: where Skyrim's region (0, 0, 0) starts (relative to
+/// the anchor) and the region size, in Garry's Mod units; nothing before the first region arrived
+/// or when not anchored to the store's epoch.
+unsafe extern "C" fn l_shapes_lattice(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let epoch = anchored_epoch();
+        match with_shapes(|st| if epoch != 0 && st.origin_epoch == epoch { st.lattice() } else { None }) {
+            Some((base, size)) => {
+                for v in [base[0], base[1], base[2], size] {
+                    (a.pushnumber)(l, v);
+                }
+                4
+            }
+            None => 0,
+        }
+    })
+}
+
+/// gmsky.ShapesRegionsArrived(rx0, ry0, rz0, rx1, ry1, rz1) -> arrived, total: how many of the
+/// regions in that inclusive range (Skyrim's region numbers) have arrived from Skyrim.
+unsafe extern "C" fn l_shapes_regions_arrived(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let n = |i: c_int| (a.tonumber)(l, i).floor() as i32;
+        let epoch = anchored_epoch();
+        let (arrived, total) = with_shapes(|st| {
+            let r = st.regions_arrived([n(1), n(2), n(3)], [n(4), n(5), n(6)]);
+            if epoch != 0 && st.origin_epoch == epoch { r } else { (0, r.1) }
+        });
+        (a.pushnumber)(l, arrived as f64);
+        (a.pushnumber)(l, total as f64);
         2
     })
 }
