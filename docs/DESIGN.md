@@ -1992,6 +1992,79 @@ they hide what's behind them.
     its mask (`$selfillummask`, else base alpha) and `$selfillumtint` (render block version 6).
   - Differences from SkyCraft: SkyCraft also has VoxelAO (contact shadows where Minecraft blocks
     meet Skyrim's world); not done for props (it needs a voxel grid of Minecraft blocks).
+- **Next: indoor shadows, steps I1b-I3 (planned 2026-10-06, after test 89; waiting for the
+  user's go-ahead).** Indoors Skyrim has no sun; its shadows come from a few point lights that cast
+  shadows (`BSShadowParabolicLight`, 2-3 active at a time, test 85). Today our objects take those
+  lights as plain lights: no shadow on them, none from them.
+  **Differs from SkyCraft:** SkyCraft has no indoor shadows (it adds Skyrim's shadow lights to its
+  point lights, as we do now). So this part is ours, built on Skyrim's own data the way SkyCraft
+  uses the sun's.
+  - **I1b. Learn how Skyrim reads its parabolic maps (probe only, nothing drawn differently).**
+    Known (test 85): per light, two halves of one slice of a 4096 x 4096 x 8 D16 array, each with an
+    affine transform (light-local axes: x = world z, y = -/+ world y, z = 1.111 x world x - 0.11,
+    relative to the light). Unknown: how a direction becomes a texel (the paraboloid divide), which
+    half is which, and what depth is stored (distance / radius, or something else).
+    Method, by numbers, not by eye: right after Skyrim renders a light's map (the parabolic hook we
+    have), copy its slice. In our frame, a full-screen probe turns Skyrim's depth back into world
+    positions (as the sun-shadow pass does), and for each of ~8 candidate formulas looks up the
+    copied map and checks: is a pixel's predicted depth equal to the stored one where the light
+    clearly sees it (floor and walls near the light)? The log line per light gives each formula's
+    match rate ("H3: 94% of 4096 samples within 1%"). The right formula should match about 90% or more,
+    the wrong ones near chance. If none does, stop and report (STATUS.md rule) instead of guessing.
+    *Built (2026-10-06, user: "Start on the indoor shadow plan"):* every 5 s the parabolic hook
+    copies one light's slice (a different light each time; 4096 x 4096 D16, about 32 MB, a copy every
+    5 s). The same frame, a probe pass takes a 32 x 32 grid of Skyrim's pixels, turns them back into
+    positions, and for each of **96 candidates** looks the point up in the copy. A candidate picks the
+    paraboloid's axis (world z, y or x; y is the one that flips between the two descriptors, so the
+    likely one), which hemisphere sits in the map's lower half, the order and signs of the other two
+    axes, and whether the second half is mirrored; uv = (the other two components) / (1 + |axis
+    component|) of the unit direction, into that half. The numbers come back to the CPU, which tests
+    three depth formulas per candidate: distance / radius, (distance / radius - 0.1) / 0.9 (the
+    descriptors' near 0.1 / far 1), and the best straight line. Logged ("indoor shadow probe I1b"):
+    best and median match rate, the top 6 candidates with each formula's rate, per-half rates and
+    correlation, and 10 (distance / radius -> stored) pairs of the best one.
+    **Not covered by the 96:** a uv not divided by (1 + axis) (for example a cube map or an
+    octahedral layout), halves side by side instead of stacked, or the scaled light-local z (1.111)
+    used in the divide. If the best candidate is near the median, it's one of these.
+    *Test 91:* no consistent match. Depth looks like distance / radius (slope 0.99-1.01 in two runs,
+    paraboloid axis world x), but the uv layout is not one of the 96. Most high scores were flat-line
+    fits to uniform texels. Attempt 2: the first 4 captures are dumped to `logs/parabolic/` (light,
+    1024 points relative to it, the raw 4096 x 4096 map) to fit offline and to look at the layout.
+    *Test 92:* the maps are two stretched discs stacked (top / bottom halves); my best layout matched
+    22%; stopped (STATUS.md). *Attempt 3 (user: "Just use community shaders"):* Skyrim's own lookup
+    as Community Shaders reconstructs it (`Utility.hlsl`, MIT): the point through the light's
+    transform **including its 1.111 stretch**, the -z side in the lower half with v flipped,
+    depth = |p| / radius. 35% exact depth matches offline; the misses lean deeper (likely the map's
+    straight-line fill across curved paraboloid triangles). So the test is now Skyrim's own answer:
+    each shadow light writes lit / dark into one channel of Skyrim's screen shadow mask (the
+    light's `maskIndex`), and the probe logs how often our lookup agrees with it, per bias.
+    **Differs from SkyCraft:** SkyCraft has no indoor shadows; this part follows Community Shaders.
+    *Test 93: confirmed.* Our lit / dark agrees with Skyrim's own shadow mask on 99.86% of 4,942
+    points at bias 0.005 (in units of the light's radius); 97.1% at 0, 98.2% at 0.02. **I1b done.**
+  - *I2 built (2026-10-06):* each parabolic map copied as Skyrim draws it into 4 slots of ours
+    (least recently drawn light gives up its slot); our point lights with a slot get Skyrim's lookup
+    (bias 0.005, 3 x 3 texels) on their diffuse and shine. Lights listed both as lights and as shadow
+    lights are used once. Details and test: MODLOG.md.
+  - **I2. Skyrim's indoor shadows on our objects.** Copy each active shadow light's slice after
+    it renders (kept with its transforms, as `CaptureSunShadows` does for the sun). In our pixel
+    shader, each point light that is a shadow light gets a visibility from its map (the formula
+    from I1b, 3 x 3 samples, small offset off the surface), multiplying its diffuse and shine.
+    Test: an NPC walked behind a pillar next to a torch-lit wall goes dark on the side the pillar
+    hides; with `gmsky_render_shadow_debug 1` the colours show it (indoor version of the colours).
+  - **I3. Our objects' shadows onto Skyrim indoors.** For each of the 2-3 shadow lights, render
+    our objects into a small depth map of our own (two paraboloid halves, the same formula, 1024 x
+    1024 each). The darkening pass then, per Skyrim pixel, removes that light's share where our
+    objects hide it: share = the light's estimated contribution (colour x falloff x n.l, as our
+    shader computes it) / (ambient + all lights), the indoor form of the sun's `keep`. Test: a
+    prop between a torch and a wall throws a shadow on the wall that moves with it.
+  - **Not sure:** whether Skyrim redraws every light's map every frame (if not, copies stay valid
+    until it does, as with the sun); whether interior shadow lights ever use the frustum
+    (spotlight) kind (test 85 saw none); the cost of 2-3 extra small depth renders (logged per
+    second).
+  - **Other open items, for after this or whenever you choose:** G7 effects (tracers, explosions,
+    physgun beam: needs your choice of route); G8 removing the old picture-route code (W1-W4);
+    props falling through Skyrim's ground; a Combine soldier texture that resolves to Source's
+    error texture (test 89 log); the polish list above.
 - **G7. Effects (later, needs its own plan and your choice).** Options: (a) for effects drawn from
   Lua (`render.DrawBeam`, `DrawSprite`, `DrawQuadEasy`), a collector like SkyCraft's that wraps
   those calls; (b) for engine effects, send events (explosion at X, tracer from A to B) and draw

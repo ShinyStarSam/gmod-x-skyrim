@@ -1,5 +1,7 @@
 # STATUS
 
+**2026-10-06: the indoor shadow problem below is solved (test 93: Community Shaders' formula agrees
+with Skyrim's own shadow mask on 99.86% of points). Kept below as a record.**
 Written 2026-10-04 after in-game test 31; rewritten 2026-10-05 after in-game test 37 (blocked on
 HOLOHUD 2's alpha); **unblocked after test 39** (see "The current problem"). **Phase 1 is complete and committed.** Phase 2 (the
 overlay) is in step 2a, an experiment in Garry's Mod alone. "Verified" means checked with logged
@@ -110,7 +112,61 @@ publishes the origin.
 
 ## The current problem
 
-### Now (2026-10-05, after test 74): Garry's Mod's world objects are never hidden by Skyrim's geometry
+### Solved (2026-10-06, test 93): how Skyrim reads its indoor shadow maps
+
+**Goal of the step:** indoor shadows (plan `docs/DESIGN.md`, "Next: indoor shadows, steps I1b-I3").
+Indoors Skyrim's shadows come from point lights with "parabolic" shadow maps. Before our objects
+can receive (I2) or cast (I3) those shadows, we need the exact formula from "point in the world"
+to "texel and stored depth" in those maps. Step I1b was to find it by numbers.
+**Stopped after two real attempts (AGENTS.md rule).** Nothing is drawn differently; the probe only logs.
+
+**What is known (measured):**
+- Every indoor parabolic light renders into **slice 0** of a shared 4096 x 4096 x 8 depth array
+  (R16 / D16), one light after another; we copy the slice right after its Render (vtable 0x0A) returns.
+- **The layout, seen in the dumped maps (test 92):** two stretched round images, one in the top
+  half (rows 0-2047), one in the bottom half, each filling the full width; the two are 180° turns of
+  each other. Empty texels store 1.0. So a dual paraboloid, one hemisphere per half, as the ports say.
+- **Depth is probably distance / radius:** stored ≈ 1.0 x d/R in the runs that matched (slopes
+  0.99-1.01, test 91), and in test 92 stored is mostly equal to or a few % above d/R (median ratio
+  1.04-1.07), almost never below.
+- **Best layout found (offline, 2,231 points, 4 maps):** paraboloid axis = world x, u = +z, v = -y,
+  uv = (u, v) / (1 + |axis|), the -x hemisphere with u mirrored, +x in the top half. This agrees with
+  the light's own descriptor transforms (light-local x = world z, y = -/+ world y, forward world x).
+  **But only 22% of points match within 0.01** (wrong layouts: median 2.4%, so it's not chance),
+  and 9% of points would come out shadowed where they probably aren't.
+
+**What's wrong:** close, not exact. A layout that's this close but this inaccurate would give
+blotchy, misplaced shadows. Not good enough to build I2 on.
+
+**Evidence:** `build/logs-ingame-test-91/skyrim.log` and `-92/skyrim.log`, lines `indoor shadow
+probe I1b`; dumps `build/logs-ingame-test-92/parabolic/map_0..3.bin` (untracked, 32 MB each);
+`python tools\parabolic_fit.py build\logs-ingame-test-92\parabolic [--png <folder>]` reproduces the
+numbers above and saves pictures of the maps.
+
+**What we've already tried:**
+1. In-game probe, 96 candidate layouts x 3 depth formulas (test 91): no consistent winner; most
+   high scores were flat-line fits to uniform texels (a flaw in that score). Two runs showed depth =
+   d/R with the axis on world x.
+2. Offline fit on the raw maps (test 92): all 192 axis / sign / half layouts; then the paraboloid's
+   strength k in uv / (1 + k |axis|) from 0.6 to 1.5 and a uv scale 0.9-1.1 (best: k 0.9, 25%); then a
+   light position offset up to ±80 units per axis (each map wants a different offset, at most +10%).
+   None explains it.
+
+**Ideas not tried yet (my order):**
+1. **Read how Skyrim's own shaders do it, instead of guessing.** Skyrim's shadow-map vertex shader
+   and its lighting pixel shader contain the exact formula. Community Shaders (open source) has
+   readable reconstructions of Skyrim's vanilla shaders; its parabolic / "omni" shadow code would
+   settle it. Needs reading their source online (read only, credit if used).
+2. **Read the numbers Skyrim gives its shaders.** Hook the shadow render's draw calls and log the
+   vertex shader's constant buffer for one parabolic light (the real matrix and any extra numbers
+   such as radius or a near plane). The descriptor transform we log has a 1.111 scale and -0.111
+   offset that we don't use; the real formula probably does.
+3. **Check whether the map changes between our copy and Skyrim's use** (several lights share slice
+   0). A second copy at the end of the frame, compared texel by texel with the first.
+4. A frame capture with RenderDoc would show the shaders directly, but that means a download and
+   attaching a tool to Skyrim: only with your go-ahead.
+
+### Earlier (2026-10-05, after test 74; superseded: Skyrim now draws Garry's Mod's objects itself, steps G3-G6): Garry's Mod's world objects are never hidden by Skyrim's geometry
 
 **What we did:** Garry's Mod's world objects (props, rockets, grenades) and effects are drawn into
 a "world layer" that Skyrim draws over its frame. To hide them behind Skyrim's walls and trees,

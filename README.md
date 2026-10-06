@@ -117,11 +117,16 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
 - **Garry's Mod's objects inside Skyrim's world** (geometry route, tests 75-80): props, rockets,
   grenades, broken pieces, Garry's Mod NPCs with their animations and weapons are drawn by Skyrim
   itself in its own frame, with their textures; they stay put in the world and hide behind walls.
+  Lit by Skyrim's own sun, ambient and lights at Skyrim's brightness, with normal maps, Source's
+  phong shine and glowing (self-lit) parts; outdoors they get Skyrim's sun shadows and cast their
+  own onto Skyrim, and NPCs get a soft contact shadow under their feet, indoors too (tests 81-89).
+  Indoors, Skyrim's shadow-casting torches and fires shadow them too, using Skyrim's own shadow maps
+  (test 94).
 
 ## What doesn't work yet
 
 - Garry's Mod's **effects** are invisible in Skyrim (tracers, explosions, the physgun beam, sprites); planned as step G7.
-- Garry's Mod's objects are lit by a fixed test light, so they look a bit dark (Skyrim's own light: step G5); a prop dragged with the physgun lags a little behind the view (step G6).
+- Indoors, Garry's Mod's objects don't cast shadows onto Skyrim or each other yet (next step, I3). A prop dragged with the physgun lags a little behind the view; phong values not fine-tuned (polish list).
 - Grenades and AR2 balls fall through Skyrim's world and don't hurt NPCs; the physgun can't grab
   NPCs or corpses (Garry's Mod's physics doesn't see Skyrim's world or NPCs).
 - Skyrim potions and healing don't heal Garry's Mod's player. Skyrim's ragdolls are still
