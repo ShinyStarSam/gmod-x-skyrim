@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::*};
 
 pub const SHM_NAME: &str = r"Local\GmodSkyrim_overlay_v1";
 pub const MAGIC: u32 = 0x564F_534D; // "MSOV"
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2; // 2: slot header 128 bytes with the picture's camera (step W4)
 pub const MAX_W: u32 = 3840;
 pub const MAX_H: u32 = 2160;
 pub const MASK_MAX_W: u32 = MAX_W / 4;
@@ -38,6 +38,10 @@ pub const F_PREMULTIPLIED: u32 = 0x1;
 pub const F_SRGB: u32 = 0x2;
 /// Skyrim blurs its picture behind see-through parts (gmsky_overlay_blur).
 pub const F_BLUR: u32 = 0x4;
+/// Step W2: the world layer follows the HUD picture in the slot (see gmsky_protocol.h).
+pub const F_WORLD: u32 = 0x8;
+/// Step W2: the world layer's depth follows it (f32 Garry's Mod units along the view, 0 = none).
+pub const F_DEPTH: u32 = 0x10;
 
 #[repr(C)]
 pub struct Ctl {
@@ -55,7 +59,7 @@ pub struct Ctl {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SlotHdr {
     pub width: u32,
     pub height: u32,
@@ -66,8 +70,25 @@ pub struct SlotHdr {
     pub row_bytes: u32,
     pub mask_width: u32,
     pub mask_height: u32,
-    pub reserved0: u32,
-    pub reserved: [u8; 16],
+    pub depth_width: u16,
+    pub depth_height: u16,
+    /// Step W4: the camera the world layer was drawn with (see gmsky_protocol.h).
+    pub view_eye: [f32; 3],
+    pub view_angles: [f32; 3],
+    pub view_fov: f32,
+    pub view_aspect: f32,
+    pub view_epoch: u32,
+    pub reserved: [u8; 44],
+}
+
+impl Default for SlotHdr {
+    fn default() -> Self {
+        SlotHdr {
+            width: 0, height: 0, format: 0, flags: 0, frame: 0, capture_qpc: 0, row_bytes: 0, mask_width: 0, mask_height: 0,
+            depth_width: 0, depth_height: 0, view_eye: [0.0; 3], view_angles: [0.0; 3], view_fov: 0.0, view_aspect: 0.0,
+            view_epoch: 0, reserved: [0; 44],
+        }
+    }
 }
 
 const _: () = {
@@ -76,10 +97,13 @@ const _: () = {
     assert!(offset_of!(Ctl, frames_published) == 24);
     assert!(offset_of!(Ctl, skyrim_width) == 40);
     assert!(offset_of!(Ctl, skyrim_size_qpc) == 48);
-    assert!(size_of::<SlotHdr>() == 64);
+    assert!(size_of::<SlotHdr>() == 128);
+    assert!(offset_of!(SlotHdr, view_eye) == 48);
+    assert!(offset_of!(SlotHdr, view_epoch) == 80);
     assert!(offset_of!(SlotHdr, frame) == 16);
     assert!(offset_of!(SlotHdr, capture_qpc) == 24);
     assert!(offset_of!(SlotHdr, row_bytes) == 32);
+    assert!(offset_of!(SlotHdr, depth_width) == 44);
     assert!(size_of::<Ctl>() <= SLOT_HDR_OFF);
     assert!(SLOT_HDR_OFF + 3 * size_of::<SlotHdr>() <= PIXELS_OFF);
     assert!(SLOT_BYTES == 33_751_040);

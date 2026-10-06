@@ -9,9 +9,18 @@
 //!              which is then published (the newest finished copy only; older ones are dropped).
 //! Only frames Lua prepared (gmsky.OverlayPrepared) are copied. Our pictures are released before
 //! the device is reset (resolution change) and made again at the new size.
+//!
+//! Step W2 (DESIGN.md "Garry's Mod's world objects and effects in Skyrim"): during the frame, Lua
+//! asks for two more copies into the same set: the world layer (gmsky.OverlayGrabWorld, whatever
+//! picture is being drawn into once the world objects are done) and the depth picture
+//! (gmsky.OverlayGrabDepth, Lua's half-size RGBA16F target drawn with Source's DepthWrite shader).
+//! All three come to normal memory together; the depth becomes distances (f32, Garry's Mod units).
+//! Test 72: copying at the moment Lua asks found the depth picture empty, because Source still held
+//! some of its drawing back (it sends batches to the graphics card later). So Lua's calls only
+//! remember which picture to copy; the copies are made at the Present, when Source has finished.
 
 use crate::d3d::{func, RELEASE, SURFACE_GET_DESC};
-use gmsky_protocol::overlay::{OverlayMapping, SlotHdr, FMT_BGRA8, F_BLUR, F_PREMULTIPLIED, F_SRGB, MAX_H, MAX_W};
+use gmsky_protocol::overlay::{OverlayMapping, SlotHdr, FMT_BGRA8, F_BLUR, F_DEPTH, F_PREMULTIPLIED, F_SRGB, F_WORLD, MASK_OFF, MAX_H, MAX_W};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::*};
 use std::sync::Mutex;
@@ -22,6 +31,7 @@ const CREATE_RENDER_TARGET: usize = 28;
 const GET_RENDER_TARGET_DATA: usize = 32;
 const STRETCH_RECT: usize = 34;
 const CREATE_OFFSCREEN_PLAIN_SURFACE: usize = 36;
+const GET_RENDER_TARGET: usize = 38;
 const CREATE_QUERY: usize = 118;
 // IDirect3DSurface9
 const LOCK_RECT: usize = 13;
@@ -31,6 +41,8 @@ const QUERY_ISSUE: usize = 6;
 const QUERY_GET_DATA: usize = 7;
 
 const FMT_A8R8G8B8: u32 = 21;
+/// D3DFMT_A16B16G16R16F: four half floats per pixel, red first in memory.
+const FMT_A16B16G16R16F: u32 = 113;
 const POOL_SYSTEMMEM: u32 = 2;
 const QUERY_EVENT: u32 = 8;
 const ISSUE_END: u32 = 1;
@@ -57,7 +69,37 @@ struct Set {
     stage: Stage,
     frame: u64,
     qpc: i64,
+    /// Step W2: the world layer (same size and format as `rt`) and the depth picture (RGBA16F, its
+    /// own size), made the first time Lua asks; whether this frame's copies were made.
+    world_rt: usize,
+    world_sys: usize,
+    depth_rt: usize,
+    depth_sys: usize,
+    depth_w: u32,
+    depth_h: u32,
+    has_world: bool,
+    has_depth: bool,
+    /// After test 73: the distances of Lua's two calibration squares (Garry's Mod units).
+    depth_refs: [f32; 2],
+    /// Step W4: the camera the world layer was drawn with (epoch 0 = none this frame).
+    view: View,
 }
+
+/// Step W4: a picture's camera (gmsky_protocol.h GmskyOverlaySlotHdr view_*).
+#[derive(Clone, Copy, Default)]
+pub struct View {
+    pub eye: [f32; 3],
+    pub angles: [f32; 3],
+    pub fov: f32,
+    pub aspect: f32,
+    pub epoch: u32,
+}
+
+const NO_SET: Set = Set {
+    rt: 0, sys: 0, query: 0, stage: Stage::Free, frame: 0, qpc: 0, world_rt: 0, world_sys: 0, depth_rt: 0, depth_sys: 0,
+    depth_w: 0, depth_h: 0, has_world: false, has_depth: false, depth_refs: [0.0; 2],
+    view: View { eye: [0.0; 3], angles: [0.0; 3], fov: 0.0, aspect: 0.0, epoch: 0 },
+};
 
 struct Capture {
     /// The device the sets were made on.
@@ -69,9 +111,18 @@ struct Capture {
     sets: [Set; SETS],
     block: Option<OverlayMapping>,
     frame: u64,
+    /// Step W2 / test 72: this frame's pictures to copy at the Present (surfaces Lua drew into,
+    /// referenced until then), the depth's reference distance, and the camera.
+    pending_world: usize,
+    pending_depth: usize,
+    pending_refs: [f32; 2],
+    pending_view: View,
 }
 
-static CAP: Mutex<Capture> = Mutex::new(Capture { dev: 0, w: 0, h: 0, format: 0, sets: [const { Set { rt: 0, sys: 0, query: 0, stage: Stage::Free, frame: 0, qpc: 0 } }; SETS], block: None, frame: 0 });
+static CAP: Mutex<Capture> = Mutex::new(Capture {
+    dev: 0, w: 0, h: 0, format: 0, sets: [NO_SET; SETS], block: None, frame: 0, pending_world: 0, pending_depth: 0, pending_refs: [0.0; 2],
+    pending_view: View { eye: [0.0; 3], angles: [0.0; 3], fov: 0.0, aspect: 0.0, epoch: 0 },
+});
 static ENABLED: AtomicBool = AtomicBool::new(false);
 /// gmsky_overlay_blur: Skyrim blurs behind see-through parts (flag in each picture's header).
 static BLUR: AtomicBool = AtomicBool::new(true);
@@ -103,6 +154,29 @@ static OPAQUE_SUM: AtomicU64 = AtomicU64::new(0);
 static OPAQUE_MAX: AtomicU64 = AtomicU64::new(0);
 /// The last error, for the log.
 static LAST_ERROR: Mutex<String> = Mutex::new(String::new());
+// Step W2 counters (status line "world layer: ...").
+static WORLD_GRABS: AtomicU64 = AtomicU64::new(0);
+static DEPTH_GRABS: AtomicU64 = AtomicU64::new(0);
+/// Grabs refused: copies not made yet (first frames), all sets busy, or the target didn't fit.
+static GRABS_REFUSED: AtomicU64 = AtomicU64::new(0);
+static WORLD_SENT: AtomicU64 = AtomicU64::new(0);
+static DEPTH_SENT: AtomicU64 = AtomicU64::new(0);
+/// Pictures whose layers didn't fit the slot (sent as the HUD picture only).
+static LAYERS_TOO_BIG: AtomicU64 = AtomicU64::new(0);
+/// Depth pixels in all published depth pictures: with a depth, drawn without the override
+/// ("foreign": not red-only with alpha 1), and all.
+static DEPTH_PX_VALID: AtomicU64 = AtomicU64::new(0);
+static DEPTH_PX_FOREIGN: AtomicU64 = AtomicU64::new(0);
+static DEPTH_PX_ALL: AtomicU64 = AtomicU64::new(0);
+/// Agreement: sampled solid world-layer pixels (alpha 255), and those with a depth next to them.
+static AGREE_SOLID: AtomicU64 = AtomicU64::new(0);
+static AGREE_DEPTH: AtomicU64 = AtomicU64::new(0);
+/// The nearest depth around the screen centre in the newest published depth picture (f64 bits;
+/// 0 = none), for Lua's calibration line.
+static CENTRE_DEPTH: AtomicU64 = AtomicU64::new(0);
+/// Step W4: time spent bringing the world layer and the depth to normal memory (ticks).
+static WORLD_TICKS: AtomicU64 = AtomicU64::new(0);
+static DEPTH_TICKS: AtomicU64 = AtomicU64::new(0);
 
 fn fail(msg: String) {
     FAILURES.fetch_add(1, Relaxed);
@@ -124,10 +198,139 @@ impl Capture {
             release(&mut s.rt);
             release(&mut s.sys);
             release(&mut s.query);
-            s.stage = Stage::Free;
+            release(&mut s.world_rt);
+            release(&mut s.world_sys);
+            release(&mut s.depth_rt);
+            release(&mut s.depth_sys);
+            *s = NO_SET;
         }
         self.w = 0;
         self.h = 0;
+        self.drop_pending();
+    }
+
+    /// Test 72: forgets this frame's pictures to copy (and lets go of them).
+    unsafe fn drop_pending(&mut self) {
+        release(&mut self.pending_world);
+        release(&mut self.pending_depth);
+        self.pending_view = View::default();
+    }
+
+    /// Step W2 / test 72: remembers the picture Source is drawing into right now (render target 0)
+    /// as this frame's world layer (`depth_ref` None) or depth picture; copied at the Present.
+    unsafe fn grab(&mut self, depth_ref: Option<[f32; 2]>) -> Result<(), String> {
+        type GetRt = unsafe extern "system" fn(usize, u32, *mut usize) -> i32;
+        type Desc = unsafe extern "system" fn(usize, *mut [u32; 8]) -> i32;
+        let dev = self.dev;
+        if !ENABLED.load(Acquire) || dev == 0 || self.w == 0 {
+            GRABS_REFUSED.fetch_add(1, Relaxed);
+            return Ok(()); // the copies are made on the first prepared Present
+        }
+        let vt = *(dev as *const usize);
+        let get_rt: GetRt = std::mem::transmute(func(vt, GET_RENDER_TARGET));
+        let mut surf = 0usize;
+        let hr = get_rt(dev, 0, &mut surf); // adds a reference: ours until the Present
+        if hr != S_OK || surf == 0 {
+            return Err(format!("GetRenderTarget: 0x{:08x}", hr as u32));
+        }
+        let desc: Desc = std::mem::transmute(func(*(surf as *const usize), SURFACE_GET_DESC));
+        let mut d = [0u32; 8];
+        if desc(surf, &mut d) != S_OK {
+            release(&mut surf);
+            return Err("render target GetDesc failed".to_string());
+        }
+        let (fmt, w, h) = (d[0], d[6], d[7]);
+        match depth_ref {
+            None => {
+                if (w, h) != (self.w, self.h) {
+                    release(&mut surf);
+                    GRABS_REFUSED.fetch_add(1, Relaxed);
+                    return Err(format!("world layer: render target {w}x{h}, not the picture's {}x{}", self.w, self.h));
+                }
+                release(&mut self.pending_world);
+                self.pending_world = surf;
+                WORLD_GRABS.fetch_add(1, Relaxed);
+            }
+            Some(r) => {
+                if fmt != FMT_A16B16G16R16F || w == 0 || h == 0 || w > 0xFFFF || h > 0xFFFF {
+                    release(&mut surf);
+                    GRABS_REFUSED.fetch_add(1, Relaxed);
+                    return Err(format!("depth: render target {w}x{h} format {fmt}, not RGBA16F ({FMT_A16B16G16R16F})"));
+                }
+                release(&mut self.pending_depth);
+                self.pending_depth = surf;
+                self.pending_refs = r;
+                DEPTH_GRABS.fetch_add(1, Relaxed);
+            }
+        }
+        Ok(())
+    }
+
+    /// Test 72: at the Present, this frame's remembered pictures are copied into set `i` (on the
+    /// graphics card; the set's event query, issued after, covers these copies too).
+    unsafe fn apply_pending(&mut self, dev: usize, i: usize) -> Result<(), String> {
+        type Desc = unsafe extern "system" fn(usize, *mut [u32; 8]) -> i32;
+        type CreateRt = unsafe extern "system" fn(usize, u32, u32, u32, u32, u32, i32, *mut usize, *mut c_void) -> i32;
+        type CreateOff = unsafe extern "system" fn(usize, u32, u32, u32, u32, *mut usize, *mut c_void) -> i32;
+        type Stretch = unsafe extern "system" fn(usize, usize, *const c_void, usize, *const c_void, u32) -> i32;
+        let vt = *(dev as *const usize);
+        let create_rt: CreateRt = std::mem::transmute(func(vt, CREATE_RENDER_TARGET));
+        let create_off: CreateOff = std::mem::transmute(func(vt, CREATE_OFFSCREEN_PLAIN_SURFACE));
+        let stretch: Stretch = std::mem::transmute(func(vt, STRETCH_RECT));
+        let (w, h, fmt) = (self.w, self.h, self.format);
+        let (world, depth, r, view) = (self.pending_world, self.pending_depth, self.pending_refs, self.pending_view);
+        let s = &mut self.sets[i];
+        s.has_world = false;
+        s.has_depth = false;
+        s.view = View::default();
+        if world != 0 {
+            if s.world_rt == 0 {
+                let hr = create_rt(dev, w, h, fmt, 0, 0, 0, &mut s.world_rt, std::ptr::null_mut());
+                if hr != S_OK {
+                    return Err(format!("CreateRenderTarget world {w}x{h}: 0x{:08x}", hr as u32));
+                }
+                let hr = create_off(dev, w, h, fmt, POOL_SYSTEMMEM, &mut s.world_sys, std::ptr::null_mut());
+                if hr != S_OK {
+                    release(&mut s.world_rt);
+                    return Err(format!("CreateOffscreenPlainSurface world: 0x{:08x}", hr as u32));
+                }
+            }
+            // (Lua's copy may have another 8-bit format; StretchRect converts.)
+            let hr = stretch(dev, world, std::ptr::null(), s.world_rt, std::ptr::null(), 0 /* D3DTEXF_NONE */);
+            if hr != S_OK {
+                return Err(format!("StretchRect (world): 0x{:08x}", hr as u32));
+            }
+            s.has_world = true;
+            s.view = view;
+        }
+        if depth != 0 && s.has_world {
+            let desc: Desc = std::mem::transmute(func(*(depth as *const usize), SURFACE_GET_DESC));
+            let mut d = [0u32; 8];
+            desc(depth, &mut d);
+            let (dw, dh) = (d[6], d[7]);
+            if s.depth_rt == 0 || (s.depth_w, s.depth_h) != (dw, dh) {
+                release(&mut s.depth_rt);
+                release(&mut s.depth_sys);
+                let hr = create_rt(dev, dw, dh, FMT_A16B16G16R16F, 0, 0, 0, &mut s.depth_rt, std::ptr::null_mut());
+                if hr != S_OK {
+                    return Err(format!("CreateRenderTarget depth {dw}x{dh}: 0x{:08x}", hr as u32));
+                }
+                let hr = create_off(dev, dw, dh, FMT_A16B16G16R16F, POOL_SYSTEMMEM, &mut s.depth_sys, std::ptr::null_mut());
+                if hr != S_OK {
+                    release(&mut s.depth_rt);
+                    return Err(format!("CreateOffscreenPlainSurface depth: 0x{:08x}", hr as u32));
+                }
+                s.depth_w = dw;
+                s.depth_h = dh;
+            }
+            let hr = stretch(dev, depth, std::ptr::null(), s.depth_rt, std::ptr::null(), 0);
+            if hr != S_OK {
+                return Err(format!("StretchRect (depth): 0x{:08x}", hr as u32));
+            }
+            s.has_depth = true;
+            s.depth_refs = r;
+        }
+        Ok(())
     }
 
     /// Makes the three sets for a w x h picture of `format`.
@@ -209,10 +412,61 @@ impl Capture {
         OPAQUE_SUM.fetch_add(opaque, Relaxed);
         OPAQUE_MAX.fetch_max(opaque, Relaxed);
         unlock(s.sys);
+        // Step W2: the world layer after the HUD picture, its depth after that (if they fit).
+        let mut flags = F_PREMULTIPLIED | F_SRGB | if BLUR.load(Relaxed) { F_BLUR } else { 0 };
+        let (mut dw, mut dh) = (0u32, 0u32);
+        if s.has_world {
+            let layer = row * h as usize;
+            let depth_bytes = if s.has_depth { (s.depth_w * s.depth_h * 4) as usize } else { 0 };
+            if 2 * layer + depth_bytes > MASK_OFF {
+                LAYERS_TOO_BIG.fetch_add(1, Relaxed);
+            } else {
+                let world = dst.add(layer);
+                let tw = qpc();
+                copy_surface(dev, s.world_rt, s.world_sys, |bits, pitch| {
+                    for y in 0..h as usize {
+                        std::ptr::copy_nonoverlapping(bits.add(y * pitch), world.add(y * row), row);
+                    }
+                })?;
+                flags |= F_WORLD;
+                WORLD_SENT.fetch_add(1, Relaxed);
+                WORLD_TICKS.fetch_add(qpc() - tw, Relaxed);
+                if s.has_depth {
+                    let td = qpc();
+                    let (sw, sh, refs) = (s.depth_w, s.depth_h, s.depth_refs);
+                    let tx = (s.view.fov.max(1.0).min(179.0) as f64 * 0.5).to_radians().tan();
+                    let ty = tx / (s.view.aspect.max(0.1) as f64);
+                    let depth = world.add(layer) as *mut f32;
+                    let stats = copy_surface(dev, s.depth_rt, s.depth_sys, |bits, pitch| depth_to_distance(bits, pitch, sw, sh, refs, (tx, ty), depth))?;
+                    let Some(stats) = stats else {
+                        // No calibration yet: the world layer goes without depth.
+                        block.publish(&SlotHdr {
+                            width: w, height: h, format: FMT_BGRA8, flags, frame: s.frame, capture_qpc: s.qpc, row_bytes: row as u32,
+                            view_eye: s.view.eye, view_angles: s.view.angles, view_fov: s.view.fov, view_aspect: s.view.aspect,
+                            view_epoch: s.view.epoch, ..Default::default()
+                        });
+                        return Ok(());
+                    };
+                    DEPTH_PX_VALID.fetch_add(stats.0, Relaxed);
+                    DEPTH_PX_FOREIGN.fetch_add(stats.1, Relaxed);
+                    DEPTH_PX_ALL.fetch_add((sw * sh) as u64, Relaxed);
+                    let (solid, with_depth) = agreement(world, row, w, h, depth, sw, sh);
+                    AGREE_SOLID.fetch_add(solid, Relaxed);
+                    AGREE_DEPTH.fetch_add(with_depth, Relaxed);
+                    CENTRE_DEPTH.store(centre_depth(depth, sw, sh).to_bits(), Relaxed);
+                    flags |= F_DEPTH;
+                    (dw, dh) = (sw, sh);
+                    DEPTH_SENT.fetch_add(1, Relaxed);
+                    DEPTH_TICKS.fetch_add(qpc() - td, Relaxed);
+                }
+            }
+        }
+        let v = if flags & F_WORLD != 0 { s.view } else { View::default() };
         block.publish(&SlotHdr {
-            width: w, height: h, format: FMT_BGRA8,
-            flags: F_PREMULTIPLIED | F_SRGB | if BLUR.load(Relaxed) { F_BLUR } else { 0 }, frame: s.frame,
-            capture_qpc: s.qpc, row_bytes: row as u32, ..Default::default()
+            width: w, height: h, format: FMT_BGRA8, flags, frame: s.frame,
+            capture_qpc: s.qpc, row_bytes: row as u32, depth_width: dw as u16, depth_height: dh as u16,
+            view_eye: v.eye, view_angles: v.angles, view_fov: v.fov, view_aspect: v.aspect, view_epoch: v.epoch,
+            ..Default::default()
         });
         Ok(())
     }
@@ -250,6 +504,215 @@ unsafe fn opaque_permille(bits: *const u8, pitch: usize, w: u32, h: u32) -> u64 
     if all == 0 { 0 } else { opaque * 1000 / all }
 }
 
+/// Step W2: GetRenderTargetData into the system-memory surface, then `read(bits, pitch)` while locked.
+unsafe fn copy_surface<R>(dev: usize, rt: usize, sys: usize, read: impl FnOnce(*const u8, usize) -> R) -> Result<R, String> {
+    type Grtd = unsafe extern "system" fn(usize, usize, usize) -> i32;
+    #[repr(C)]
+    struct Locked { pitch: i32, bits: *mut u8 }
+    type Lock = unsafe extern "system" fn(usize, *mut Locked, *const c_void, u32) -> i32;
+    type Unlock = unsafe extern "system" fn(usize) -> i32;
+    let grtd: Grtd = std::mem::transmute(func(*(dev as *const usize), GET_RENDER_TARGET_DATA));
+    let hr = grtd(dev, rt, sys);
+    if hr != S_OK {
+        return Err(format!("GetRenderTargetData (layer): 0x{:08x}", hr as u32));
+    }
+    let svt = *(sys as *const usize);
+    let lock: Lock = std::mem::transmute(func(svt, LOCK_RECT));
+    let unlock: Unlock = std::mem::transmute(func(svt, UNLOCK_RECT));
+    let mut l = Locked { pitch: 0, bits: std::ptr::null_mut() };
+    let hr = lock(sys, &mut l, std::ptr::null(), LOCK_READONLY);
+    if hr != S_OK || l.bits.is_null() {
+        return Err(format!("LockRect (layer): 0x{:08x}", hr as u32));
+    }
+    let r = read(l.bits, l.pitch as usize);
+    unlock(sys);
+    Ok(r)
+}
+
+/// IEEE half float to f32.
+pub(crate) fn half(h: u16) -> f32 {
+    let (sign, exp, man) = ((h >> 15) as u32, ((h >> 10) & 0x1F) as u32, (h & 0x3FF) as u32);
+    let bits = match (exp, man) {
+        (0, 0) => sign << 31,
+        (0, m) => {
+            // Subnormal: normalize.
+            let mut e = 127 - 15 + 1;
+            let mut m = m;
+            while m & 0x400 == 0 {
+                m <<= 1;
+                e -= 1;
+            }
+            (sign << 31) | ((e as u32) << 23) | ((m & 0x3FF) << 13)
+        }
+        (0x1F, m) => (sign << 31) | (0xFF << 23) | (m << 13),
+        (e, m) => (sign << 31) | ((e + 127 - 15) << 23) | (m << 13),
+    };
+    f32::from_bits(bits)
+}
+
+/// After test 73 (Source's DepthWrite drew nothing in the main view): the depth picture is drawn with
+/// fog. Every model is black under white linear fog from 0 to Lua's fog end, so a pixel's grey level
+/// grows with its distance. Whether the fog measures distance along the view (planar) or along the
+/// ray to the pixel (radial), and its exact scale, come from Lua's squares, 8 x 8 depth pixels each:
+/// A at (4, 4) and C at (4, h/2), both `refs[0]` away along the view, B at (12, 4) `refs[1]` away,
+/// and D at (20, 4) plain white without fog (shows the picture receives drawing at all). Their
+/// areas are erased afterwards.
+const SQ: usize = 8;
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Cal {
+    /// distance = (a x grey + b), divided by the pixel's ray length if radial.
+    a: f64,
+    b: f64,
+    radial: bool,
+}
+/// The newest good calibration, and the newest squares' raw values (grey of A, B, C, and D's red),
+/// for the log.
+static CAL: Mutex<Option<Cal>> = Mutex::new(None);
+static SQUARES: Mutex<[f32; 4]> = Mutex::new([0.0; 4]);
+static CAL_MISSING: AtomicU64 = AtomicU64::new(0);
+
+/// The ray length (1 along the view) through depth pixel (x, y), for half-view tangents (tx, ty).
+fn ray_len(x: f64, y: f64, w: u32, h: u32, (tx, ty): (f64, f64)) -> f64 {
+    let nx = (x + 0.5) / w as f64 * 2.0 - 1.0;
+    let ny = 1.0 - (y + 0.5) / h as f64 * 2.0;
+    (1.0 + (nx * tx).powi(2) + (ny * ty).powi(2)).sqrt()
+}
+
+/// After test 73: the calibration from the squares' grey levels (A, B, C at refs 0, 1, 0), or None
+/// if they don't make sense (missing, or a model in front of them).
+pub(crate) fn calibrate(g: [f64; 3], refs: [f32; 2], w: u32, h: u32, tan: (f64, f64)) -> Option<Cal> {
+    let (ga, gb, gc) = (g[0], g[1], g[2]);
+    let (d1, d2) = (refs[0] as f64, refs[1] as f64);
+    if !(ga > 0.0 && gb > ga + 1e-4 && gc > 0.0 && d2 > d1 && d1 > 0.0) {
+        return None;
+    }
+    let (ka, kb, kc) = (
+        ray_len(4.0, 4.0, w, h, tan),
+        ray_len(12.0, 4.0, w, h, tan),
+        ray_len(4.0, (h / 2) as f64, w, h, tan),
+    );
+    // Planar: grey is linear in the distance along the view (C reads like A).
+    let ap = (d2 - d1) / (gb - ga);
+    let bp = d1 - ap * ga;
+    // Radial: grey is linear in the distance along the ray (C reads nearer than A).
+    let ar = (d2 * kb - d1 * ka) / (gb - ga);
+    let br = d1 * ka - ar * ga;
+    let gc_radial = (d1 * kc - br) / ar;
+    let radial = (gc - gc_radial).abs() < (gc - ga).abs();
+    Some(if radial { Cal { a: ar, b: br, radial } } else { Cal { a: ap, b: bp, radial } })
+}
+
+/// Step W2 / after test 73: the fog depth picture (RGBA16F: grey, alpha 1) into distances along
+/// the view (Garry's Mod units) at `out`, w x h floats; anything else is 0 (no depth). Returns
+/// (pixels with a depth, "foreign" pixels: drawn, but not grey with alpha 1), or None without any
+/// calibration yet.
+unsafe fn depth_to_distance(bits: *const u8, pitch: usize, w: u32, h: u32, refs: [f32; 2], tan: (f64, f64), out: *mut f32) -> Option<(u64, u64)> {
+    const ONE: u16 = 0x3C00;
+    let px = |x: usize, y: usize| std::ptr::read_unaligned((bits.add(y * pitch) as *const u16).add(x * 4) as *const [u16; 4]);
+    let grey = |p: [u16; 4]| -> Option<f64> {
+        let (r, g, b) = (half(p[0]) as f64, half(p[1]) as f64, half(p[2]) as f64);
+        (p[3] == ONE && r > 0.0 && (r - g).abs() < 2e-3 && (r - b).abs() < 2e-3).then_some(r)
+    };
+    let big_enough = (w as usize) > 3 * SQ + 2 && (h as usize) > 2 * SQ + 2;
+    let mut cal = *CAL.lock().unwrap_or_else(|e| e.into_inner());
+    if big_enough {
+        let (pa, pb, pc, pd) = (px(4, 4), px(12, 4), px(4, h as usize / 2), px(20, 4));
+        *SQUARES.lock().unwrap_or_else(|e| e.into_inner()) = [half(pa[0]), half(pb[0]), half(pc[0]), half(pd[0])];
+        match (grey(pa), grey(pb), grey(pc)) {
+            (Some(ga), Some(gb), Some(gc)) => match calibrate([ga, gb, gc], refs, w, h, tan) {
+                Some(c) => {
+                    cal = Some(c);
+                    *CAL.lock().unwrap_or_else(|e| e.into_inner()) = cal;
+                }
+                None => {
+                    CAL_MISSING.fetch_add(1, Relaxed);
+                }
+            },
+            _ => {
+                CAL_MISSING.fetch_add(1, Relaxed);
+            }
+        }
+    }
+    let cal = cal?;
+    let (mut valid, mut foreign) = (0u64, 0u64);
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let p = px(x, y);
+            let d = if p == [0; 4] {
+                0.0
+            } else if let Some(g) = grey(p) {
+                if g >= 0.999 {
+                    0.0 // beyond the fog's end: too far to know (always shown)
+                } else {
+                    valid += 1;
+                    let along = cal.a * g + cal.b;
+                    (if cal.radial { along / ray_len(x as f64, y as f64, w, h, tan) } else { along }).max(0.0) as f32
+                }
+            } else {
+                foreign += 1;
+                0.0
+            };
+            *out.add(y * w as usize + x) = d;
+        }
+    }
+    // The squares aren't Garry's Mod objects.
+    let erase = |x0: usize, x1: usize, y0: usize, y1: usize| {
+        for y in y0..y1.min(h as usize) {
+            for x in x0..x1.min(w as usize) {
+                *out.add(y * w as usize + x) = 0.0;
+            }
+        }
+    };
+    erase(0, 3 * SQ + 2, 0, SQ + 2);
+    let hm = h as usize / 2;
+    erase(0, SQ + 2, hm.saturating_sub(SQ / 2 + 1), hm + SQ / 2 + 1);
+    Some((valid, foreign))
+}
+
+/// Step W2: of the world layer's solid pixels (alpha 255; every 4th in each direction), how many
+/// have a depth in the 2 x 2 depth pixels nearest them. Low agreement = the depth view doesn't line
+/// up with the picture. Returns (solid, solid with a depth).
+unsafe fn agreement(world: *const u8, row: usize, w: u32, h: u32, depth: *const f32, dw: u32, dh: u32) -> (u64, u64) {
+    let (mut solid, mut with) = (0u64, 0u64);
+    if dw == 0 || dh == 0 {
+        return (0, 0);
+    }
+    for y in (0..h as usize).step_by(4) {
+        for x in (0..w as usize).step_by(4) {
+            if *world.add(y * row + x * 4 + 3) != 255 {
+                continue;
+            }
+            solid += 1;
+            // Depth pixel centres around this pixel (the depth picture covers the same view).
+            let fx = (x as f32 + 0.5) * dw as f32 / w as f32 - 0.5;
+            let fy = (y as f32 + 0.5) * dh as f32 / h as f32 - 0.5;
+            let (x0, y0) = (fx.floor().max(0.0) as u32, fy.floor().max(0.0) as u32);
+            let mut found = false;
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let (xx, yy) = ((x0 + dx).min(dw - 1), (y0 + dy).min(dh - 1));
+                found |= *depth.add((yy * dw + xx) as usize) > 0.0;
+            }
+            with += found as u64;
+        }
+    }
+    (solid, with)
+}
+
+/// Step W2: the nearest depth within 4 depth pixels of the centre; 0 if none.
+unsafe fn centre_depth(depth: *const f32, dw: u32, dh: u32) -> f64 {
+    let (cx, cy) = (dw as i64 / 2, dh as i64 / 2);
+    let mut best = 0.0f32;
+    for y in (cy - 4).max(0)..(cy + 5).min(dh as i64) {
+        for x in (cx - 4).max(0)..(cx + 5).min(dw as i64) {
+            let d = *depth.add((y * dw as i64 + x) as usize);
+            if d > 0.0 && (best == 0.0 || d < best) {
+                best = d;
+            }
+        }
+    }
+    best as f64
+}
+
 fn qpc() -> u64 {
     gmsky_protocol::shm::now_qpc().max(0) as u64
 }
@@ -262,10 +725,12 @@ pub unsafe fn on_present(dev: usize) {
         // A different device (the game made a new one): the old sets belong to the old device,
         // which may be gone, so they are forgotten, not released.
         for s in cap.sets.iter_mut() {
-            *s = Set::default();
+            *s = NO_SET;
         }
         cap.w = 0;
         cap.h = 0;
+        cap.pending_world = 0; // (belonged to the old device too)
+        cap.pending_depth = 0;
         cap.dev = dev;
     }
     if !ENABLED.load(Acquire) {
@@ -317,9 +782,10 @@ pub unsafe fn on_present(dev: usize) {
         FINISH_MAX.fetch_max(dt, Relaxed);
     }
 
-    // 2. This frame, if Lua prepared it.
+    // 2. This frame, if Lua prepared it (with its world layer / depth, if Lua grabbed them).
     if !PREPARED.swap(false, AcqRel) {
         UNPREPARED.fetch_add(1, Relaxed);
+        cap.drop_pending();
         return;
     }
     let t1 = qpc();
@@ -354,11 +820,21 @@ pub unsafe fn on_present(dev: usize) {
                     BUSY.fetch_add(1, Relaxed);
                     Ok(())
                 }
-                Some(i) => cap.start(dev, bb, i).map(|()| { STARTED.fetch_add(1, Relaxed); }),
+                Some(i) => {
+                    // This frame's world layer and depth first, then the picture (and the query).
+                    let layers = cap.apply_pending(dev, i);
+                    if let Err(e) = layers {
+                        fail(e);
+                        cap.sets[i].has_world = false;
+                        cap.sets[i].has_depth = false;
+                    }
+                    cap.start(dev, bb, i).map(|()| { STARTED.fetch_add(1, Relaxed); })
+                }
             },
         }
     };
     release(&mut bb);
+    cap.drop_pending();
     if let Err(e) = result {
         fail(e);
     }
@@ -380,6 +856,40 @@ pub fn enable(on: bool) {
 /// gmsky.OverlayPrepared(): Lua prepared this frame (cleared behind the view model, alpha forced).
 pub fn mark_prepared() {
     PREPARED.store(true, Release);
+}
+
+/// gmsky.OverlayGrabWorld(): step W2, the picture being drawn now is this frame's world layer.
+pub fn grab_world() {
+    let mut cap = CAP.lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(e) = unsafe { cap.grab(None) } {
+        fail(e);
+    }
+}
+
+/// gmsky.OverlayGrabDepth(d1, d2): step W2, the render target being drawn now (Lua's RGBA16F depth
+/// picture) is this frame's depth picture; after test 73: its calibration squares are d1 and d2 away.
+pub fn grab_depth(d1: f32, d2: f32) {
+    let mut cap = CAP.lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(e) = unsafe { cap.grab(Some([d1, d2])) } {
+        fail(e);
+    }
+}
+
+/// gmsky.OverlayView(...): step W4, the camera this frame's world layer is drawn with (eye already
+/// made relative to the anchor of origin epoch `v.epoch` by the caller).
+pub fn set_view(v: View) {
+    let mut cap = CAP.lock().unwrap_or_else(|e| e.into_inner());
+    if !ENABLED.load(Acquire) || cap.w == 0 {
+        return;
+    }
+    cap.pending_view = v;
+}
+
+/// gmsky.OverlayDepthCentre(): the nearest Garry's Mod depth at the screen centre in the newest
+/// depth picture (Garry's Mod units), None if there was none.
+pub fn depth_centre() -> Option<f64> {
+    let d = f64::from_bits(CENTRE_DEPTH.load(Relaxed));
+    (d > 0.0).then_some(d)
 }
 
 /// gmsky.OverlayBlur(on): the blur flag for the next pictures.
@@ -437,6 +947,22 @@ pub fn status(ms: impl Fn(u64) -> f64) -> String {
     let (failures, remade, resets) = (take(&FAILURES), take(&REMADE), take(&RESETS));
     let (start_t, finish_t, finish_max, lag) = (take(&START_TICKS), take(&FINISH_TICKS), take(&FINISH_MAX), take(&LAG_FRAMES));
     let (opaque_sum, opaque_max) = (take(&OPAQUE_SUM), take(&OPAQUE_MAX));
+    let (wg, dg, refused, ws, ds, big) = (take(&WORLD_GRABS), take(&DEPTH_GRABS), take(&GRABS_REFUSED), take(&WORLD_SENT), take(&DEPTH_SENT), take(&LAYERS_TOO_BIG));
+    let (pv, pf, pa, solid, agree) = (take(&DEPTH_PX_VALID), take(&DEPTH_PX_FOREIGN), take(&DEPTH_PX_ALL), take(&AGREE_SOLID), take(&AGREE_DEPTH));
+    let pct = |a: u64, b: u64| if b > 0 { a as f64 * 100.0 / b as f64 } else { 0.0 };
+    let (wt, dt) = (take(&WORLD_TICKS), take(&DEPTH_TICKS));
+    let each = |t: u64, n: u64| if n > 0 { ms(t) / n as f64 } else { 0.0 };
+    let cal = *CAL.lock().unwrap_or_else(|e| e.into_inner());
+    let sq = *SQUARES.lock().unwrap_or_else(|e| e.into_inner());
+    let cal_line = match cal {
+        Some(c) => format!("fog depth {} (distance = {:.1} x grey {:+.1})", if c.radial { "along the ray" } else { "along the view" }, c.a, c.b),
+        None => "no calibration yet".to_string(),
+    };
+    let layers = format!(
+        "world layer: {wg} grabbed, {ws} sent ({:.3} ms each to normal memory); depth: {dg} grabbed, {ds} sent ({:.3} ms each), \
+         {cal_line}; squares A {:.4} B {:.4} C {:.4} white {:.4}, {} pictures without a good calibration; \
+         pixels {:.2}% with depth, {:.2}% foreign; agreement {:.1}% of {solid} solid world pixels have a depth; {refused} grabs refused, {big} too big for the slot",
+        each(wt, ws), each(dt, ds), sq[0], sq[1], sq[2], sq[3], take(&CAL_MISSING), pct(pv, pa), pct(pf, pa), pct(agree, solid));
     let cap = CAP.lock().unwrap_or_else(|e| e.into_inner());
     let block = cap.block.as_ref().map(|b| {
         let c = b.ctl();
@@ -447,7 +973,7 @@ pub fn status(ms: impl Fn(u64) -> f64) -> String {
     format!(
         "overlay copy {}: {published} published, {started} started, {unprepared} frames not prepared by Lua, {busy} skipped (all copies busy), \
          {dropped} dropped (newer one ready), {too_big} too big, {failures} failures{}; {}x{}, made {remade}x, {resets} device resets; \
-         start {:.3} ms/frame, finish {:.3} ms/frame (max {:.3}), {:.2} frames from copy to publish; opaque {:.1}% avg, {:.1}% max; {block}",
+         start {:.3} ms/frame, finish {:.3} ms/frame (max {:.3}), {:.2} frames from copy to publish; opaque {:.1}% avg, {:.1}% max; {layers}; {block}",
         if enabled() { "ON" } else { "off" },
         if err.is_empty() { String::new() } else { format!(" (last: {err})") },
         cap.w, cap.h,
@@ -554,6 +1080,155 @@ mod tests {
                 enable(false);
             });
         }
+        *BLOCK_NAME.lock().unwrap() = None;
+        CAP.lock().unwrap().block = None;
+    }
+
+    /// After test 73: the fog's calibration tells "along the view" from "along the ray" fog by square
+    /// C (same distance along the view as A, nearer the middle of the screen), and decodes both.
+    #[test]
+    fn fog_calibration() {
+        let (w, h, tan) = (640u32, 360u32, (1.589f64, 0.894f64));
+        let (d1, d2, end) = (500.0f64, 4000.0f64, 20000.0f64);
+        let ka = ray_len(4.0, 4.0, w, h, tan);
+        let kb = ray_len(12.0, 4.0, w, h, tan);
+        let kc = ray_len(4.0, 180.0, w, h, tan);
+        // Along the view: grey = distance / end.
+        let c = calibrate([d1 / end, d2 / end, d1 / end], [d1 as f32, d2 as f32], w, h, tan).unwrap();
+        assert!(!c.radial && (c.a * (1234.0 / end) + c.b - 1234.0).abs() < 1e-6, "{c:?}");
+        // Along the ray: grey = ray distance / end; C (nearer the middle) reads nearer than A.
+        let c = calibrate([d1 * ka / end, d2 * kb / end, d1 * kc / end], [d1 as f32, d2 as f32], w, h, tan).unwrap();
+        assert!(c.radial, "{c:?}");
+        let k = ray_len(300.0, 100.0, w, h, tan);
+        assert!(((c.a * (1234.0 * k / end) + c.b) / k - 1234.0).abs() < 1e-6, "{c:?}");
+        // Nonsense (B not further than A, or missing): no calibration.
+        assert!(calibrate([0.1, 0.05, 0.1], [500.0, 4000.0], w, h, tan).is_none());
+        assert!(calibrate([0.0, 0.2, 0.0], [500.0, 4000.0], w, h, tan).is_none());
+    }
+
+    #[test]
+    fn half_floats() {
+        assert_eq!(half(0x3C00), 1.0);
+        assert_eq!(half(0x3800), 0.5);
+        assert_eq!(half(0x4400), 4.0);
+        assert_eq!(half(0xC000), -2.0);
+        assert_eq!(half(0x0000), 0.0);
+        assert_eq!(half(0x0001), 2f32.powi(-24)); // smallest subnormal
+        assert_eq!(half(0x7BFF), 65504.0);
+    }
+
+    /// Step W2 on a real hidden device: mid-frame, a world layer (an A8R8G8B8 target Lua would be
+    /// drawing into) and a half-size RGBA16F depth picture are grabbed; the Present then publishes
+    /// the HUD picture, the world layer after it and the depth (as distances) after that, with the
+    /// flags and depth size set. Depth: red-only with alpha 1 = red x far; another colour =
+    /// "foreign" (0); nothing drawn = 0. A frame without grabs has neither layer.
+    #[test]
+    fn world_layer_and_depth_arrive() {
+        let _one_at_a_time = GLOBAL_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let name = format!(r"Local\GmodSkyrim_overlay_test_{}_layers", std::process::id());
+        *BLOCK_NAME.lock().unwrap() = Some(name.clone());
+        let mut reader = OverlayMapping::open_named(&name).unwrap();
+        reader.attach(false);
+        let ms = |t: u64| t as f64 / 10_000.0;
+        let (hud, world) = (0x40_10_20_30u32, 0xFF_80_40_20u32);
+        with_test_device_sized(true, 64, 48, FMT_A8R8G8B8, |dev, vt| unsafe {
+            type Clear = unsafe extern "system" fn(usize, u32, *const [i32; 4], u32, u32, f32, u32) -> i32;
+            type Present = unsafe extern "system" fn(usize, *const c_void, *const c_void, *mut c_void, *const c_void) -> i32;
+            type CreateRt = unsafe extern "system" fn(usize, u32, u32, u32, u32, u32, i32, *mut usize, *mut c_void) -> i32;
+            type SetRt = unsafe extern "system" fn(usize, u32, usize) -> i32;
+            type GetBb = unsafe extern "system" fn(usize, u32, u32, u32, *mut usize) -> i32;
+            let clear: Clear = std::mem::transmute(func(vt, 43));
+            let present: Present = std::mem::transmute(func(vt, 17));
+            let create_rt: CreateRt = std::mem::transmute(func(vt, CREATE_RENDER_TARGET));
+            let set_rt: SetRt = std::mem::transmute(func(vt, 37));
+            let get_bb: GetBb = std::mem::transmute(func(vt, GET_BACK_BUFFER));
+            let null = std::ptr::null();
+            let (mut bb, mut wrt, mut drt) = (0usize, 0usize, 0usize);
+            assert_eq!(get_bb(dev, 0, 0, 0, &mut bb), 0);
+            assert_eq!(create_rt(dev, 64, 48, FMT_A8R8G8B8, 0, 0, 0, &mut wrt, std::ptr::null_mut()), 0);
+            assert_eq!(create_rt(dev, 32, 24, FMT_A16B16G16R16F, 0, 0, 0, &mut drt, std::ptr::null_mut()), 0, "RGBA16F render target");
+            enable(true);
+            status(ms);
+            // A first prepared frame makes the copies (grabs before that are refused).
+            grab_world();
+            mark_prepared();
+            on_present(dev);
+            present(dev, null, null, std::ptr::null_mut(), null);
+            // Each frame grabs again (as the game does): a frame whose copies find all three sets
+            // busy is skipped, and the next frame sends its own.
+            let frame = |grab: bool| -> u32 {
+              for _ in 0..500 {
+                if grab {
+                    set_view(View { eye: [1.0, 2.0, 3.0], angles: [10.0, 20.0, 0.5], fov: 106.0, aspect: 1.5, epoch: 7 });
+                    // Test 72: drawn into after the grab, as Source finishes its held-back drawing
+                    // later; the copy made at the Present must have it.
+                    set_rt(dev, 0, wrt);
+                    assert_eq!(clear(dev, 0, std::ptr::null(), 1, 0xFF_00_00_00, 1.0, 0), 0);
+                    grab_world();
+                    assert_eq!(clear(dev, 0, std::ptr::null(), 1, world, 1.0, 0), 0);
+                    set_rt(dev, 0, drt);
+                    // After test 73, fog depth: grey 0x40 everywhere; squares A and C (500 away) grey
+                    // 0x10, B (4,000 away) grey 0x80, D white; an off-grey patch and an empty patch.
+                    assert_eq!(clear(dev, 0, std::ptr::null(), 1, 0xFF_40_40_40, 1.0, 0), 0);
+                    for (r, c) in [([0i32, 0, 8, 8], 0xFF_10_10_10u32), ([8, 0, 16, 8], 0xFF_80_80_80), ([0, 8, 8, 16], 0xFF_10_10_10),
+                                   ([16, 0, 24, 8], 0xFF_FF_FF_FF), ([24, 0, 32, 12], 0xFF_00_FF_00), ([16, 12, 32, 24], 0)] {
+                        assert_eq!(clear(dev, 1, &r, 1, c, 1.0, 0), 0);
+                    }
+                    grab_depth(500.0, 4000.0);
+                    set_rt(dev, 0, bb);
+                }
+                assert_eq!(clear(dev, 0, std::ptr::null(), 1, hud, 1.0, 0), 0);
+                mark_prepared();
+                on_present(dev);
+                present(dev, null, null, std::ptr::null_mut(), null);
+                // (Pictures started before this frame can still arrive first: skip them.)
+                if let Some(slot) = reader.take() {
+                    if (reader.slot_hdr(slot).flags & F_WORLD != 0) == grab {
+                        return slot;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+              }
+              panic!("no picture arrived");
+            };
+            // Drain what the first frames published, then one frame with both grabs.
+            while reader.take().is_some() {}
+            let slot = frame(true);
+            let line = status(ms);
+            println!("{line}");
+            let h = reader.slot_hdr(slot);
+            assert_eq!(h.flags & (F_WORLD | F_DEPTH), F_WORLD | F_DEPTH, "{line}");
+            assert_eq!((h.depth_width, h.depth_height), (32, 24));
+            let base = reader.slot_ptr(slot);
+            let px = |off: usize, i: usize| std::ptr::read_unaligned((base.add(off) as *const u32).add(i));
+            assert_eq!(px(0, 0), hud);
+            assert_eq!(px(64 * 48 * 4, 0), world);
+            assert_eq!(px(64 * 48 * 4, 64 * 48 - 1), world);
+            let depth = std::slice::from_raw_parts(base.add(2 * 64 * 48 * 4) as *const f32, 32 * 24);
+            assert_eq!((depth[0], depth[4 * 32 + 20], depth[12 * 32 + 4]), (0.0, 0.0, 0.0), "the squares A, D, C are erased");
+            assert_eq!(depth[4 * 32 + 28], 0.0, "off-grey: no depth");
+            assert_eq!(depth[20 * 32 + 20], 0.0, "nothing drawn");
+            // Grey is linear in distance along the view: 500 at 0x10, 4,000 at 0x80.
+            let (g1, g2, g) = (16.0 / 255.0, 128.0 / 255.0, 64.0 / 255.0);
+            let want = (500.0 + (4000.0 - 500.0) * (g - g1) / (g2 - g1)) as f32;
+            assert!((depth[20 * 32 + 12] - want).abs() < 3.0, "grey 0x40: {} vs {want}", depth[20 * 32 + 12]);
+            assert!(line.contains("world layer: ") && line.contains(" 0 failures"), "{line}");
+            assert_eq!((h.view_eye, h.view_angles, h.view_fov, h.view_aspect, h.view_epoch),
+                ([1.0, 2.0, 3.0], [10.0, 20.0, 0.5], 106.0, 1.5, 7), "step W4: the picture's camera");
+            assert!(line.contains("pixels 54.17% with depth, 12.50% foreign"), "{line}"); // (every depth picture is the same)
+            assert!(line.contains(" 0 failures"), "{line}");
+            assert!(line.contains("fog depth along the view"), "{line}");
+            assert!((depth_centre().unwrap() - want as f64).abs() < 3.0, "{:?}", depth_centre());
+            // The next frame without grabs: the HUD picture only.
+            let slot = frame(false);
+            assert_eq!(reader.slot_hdr(slot).flags & (F_WORLD | F_DEPTH), 0);
+            assert_eq!(reader.slot_hdr(slot).view_epoch, 0, "no world layer: no camera");
+            release(&mut wrt);
+            release(&mut drt);
+            release(&mut bb);
+            on_reset();
+            enable(false);
+        });
         *BLOCK_NAME.lock().unwrap() = None;
         CAP.lock().unwrap().block = None;
     }

@@ -70,7 +70,7 @@ Single-player and offline only.
 - **The link** (shared memory `Local\GmodSkyrim_v2`, protocol version 13 (3b: actors; 3c-2: hitboxes; 3c-3: hit test; 3d: hit events): grids relative to the anchor, 16 MB collision ring, view punch), disconnect detection, coordinate
   conventions, scale 64 / 120.5 = 0.5311.
 - **Playing from the Skyrim window:** W/A/S/D, Shift, Space, Ctrl, mouse look, **V = Garry's
-  Mod noclip** (17 launches in test 21), E activates Skyrim objects, Esc/~/J/M/F9 reach Skyrim.
+  Mod noclip** (17 launches in test 21), E activates Skyrim objects, Esc/~/J/M/F9/T/Tab/I/P/F5 reach Skyrim.
   Mouse look without round-trip delay; smooth position (Skyrim blends Garry's Mod's ticks).
 - **Skyrim's player follows Garry's Mod in 3D (step 3d)**, including jumps and noclip flight.
   Skyrim's own push on the player stays under 3 units (test 17 `max-drift`).
@@ -109,6 +109,38 @@ health). Skyrim's player is a puppet. Skyrim owns the world, NPCs, quests and sa
 publishes the origin.
 
 ## The current problem
+
+### Now (2026-10-05, after test 74): Garry's Mod's world objects are never hidden by Skyrim's geometry
+
+**What we did:** Garry's Mod's world objects (props, rockets, grenades) and effects are drawn into
+a "world layer" that Skyrim draws over its frame. To hide them behind Skyrim's walls and trees,
+Garry's Mod must also send how far away each pixel is (a depth picture); Skyrim compares it with
+its own depth buffer (SkyCraft's method).
+**Expected:** objects behind Skyrim's geometry hidden.
+**What happened:** the depth picture is always empty, so every object shows on top. Three ways
+of drawing it from Lua failed:
+1. A second view with `render.RenderView` + DepthWrite override (test 71): RenderView ignores
+   `render.MaterialOverride`; the props came out in their normal materials.
+2. `ent:DrawModel()` under a DepthWrite override in the main view (tests 72-73): draws nothing at
+   all, not even a test square, even when copied after all of Source's drawing.
+3. Fog depth (models black under white fog; test 74): worked with nothing on screen (squares
+   0.0006 / 0.0399, but squared, not linear: Source gamma-corrects render targets), then turned
+   everything pure white once in game (0.00% pixels with depth for the rest of the test).
+
+**Evidence:** `build/logs-ingame-test-74/gmod_client.log`, lines `present hook: ... depth: ...
+fog depth ... squares A ... pixels ...% with depth ... agreement`; `skyrim.log` lines
+`re-projection matrix check` (correct) and `world layer drawn ... re-projected`.
+
+**The way out (not built, not tested):** the engine's own depth pass. Return `true` from the
+`NeedsDepthPass` hook; Source then draws the scene again itself with DepthWrite into
+`_rt_ResolvedFullFrameDepth` (`render.GetResolvedFullFrameDepth()`), upgraded to R32F. This is
+what the Garry's Mod wiki documents and what the GShader Library and other depth addons use. Plan
+W5 in `docs/DESIGN.md` (after "W4. The fixes").
+
+**Also open:** the RPG's laser glow sprite gets stamped solid (a pulsing black patch). Plan: stamp
+through a bone-merged `ClientsideModel` stand-in (DESIGN.md, same place).
+
+### Earlier (resolved): the Direct3D 9 device
 
 **None. Resolved 2026-10-05 in test 41.** The module finds Garry's Mod's Direct3D 9 device and
 hooks its `Present` (step 2b-1). Tests 32 and 40 failed because this `d3d9.dll` gives each device
@@ -159,8 +191,15 @@ multisampling; hook 0.001 ms per frame; no crash.
   **3d-2 works (tests 63-64):** shooting corpses pushes the ragdoll with Garry's Mod's force × 3;
   blasts throw limbs apart. F1 console works (test 64). **Phase 3 is done.**
   **Phase 4:** 4a world audit done (test 66: cities, interiors, fast travel, dungeon fine). Skyrim's
-  T / Tab / I / P / F5 now reach Skyrim. **4b swimming works (test 67);** W + Space fix and `gmsky_overlay`
-  on by default built, not tested in game (test 68).
+  T / Tab / I / P / F5 now reach Skyrim. **4b swimming works (tests 67-68),** W + Space too; `gmsky_overlay`
+  on by default works; menu keys work (test 68). **Phase 4 is done.**
+  **Now: Garry's Mod's world objects and effects in Skyrim** (DESIGN.md, W1-W3, SkyCraft's depth
+  test). Test 70: W1 never ran (2D-sky quirk), fixed. Test 71: W2/W3 showed black boxes, jitter and
+  no depth (override ignored by `render.RenderView`); W4 built (depth drawn in the main view with a
+  calibration square, camera re-projection in Skyrim, alpha off for effects). Test 72: black boxes
+  fixed; depth still empty (copied before Source's held-back drawing), re-projection aimed at the
+  wrong camera, see-through models. Test 73: stamp recursion (stack overflow, ~12 frames/s), depth
+  still empty (DepthWrite draws nothing from Lua: dead end). Fog depth + fixes built (test 74).
   Future (user): stamina / magicka bars and quest markers, locations, enemies in HOLOHUD.
 
 ## Evidence (tests 33-37)

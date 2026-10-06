@@ -149,8 +149,17 @@ Copied from SkyCraft's design (`reference/SkyCraft/docs/DESIGN.md` §6–8):
 
 ## 9. Drawing
 
-Same plan as SkyCraft: Skyrim draws the world, and Garry's Mod draws **only its own things**
-(hands, weapon, HUD, later props) into an offscreen picture that Skyrim draws on top.
+Skyrim draws the world. Garry's Mod's **hands, weapon and HUD** come over as a picture that
+Skyrim draws on top (as SkyCraft's hand and GUI layers, `Overlay.cpp`).
+
+**Garry's Mod's world objects (props, rockets, grenades, ragdolls, NPCs) are drawn by Skyrim
+itself, as 3D geometry, in Skyrim's own frame** (decided by the user 2026-10-05, after tests 70-74).
+This is what SkyCraft really does (`WorldRender.cpp`, `AvatarExporter.java`, `WorldExporter.java`):
+Minecraft ships its triangles and textures, and Skyrim draws them with its own camera, depth
+buffer and light, so they are locked to the world and hidden by Skyrim's walls. Correction: until
+2026-10-05 this file said the picture + depth-picture "world layer" (W1-W5) was SkyCraft's way. It
+was not; only its reading of Skyrim's depth buffer came from SkyCraft. Plan: §12, "Garry's Mod's
+things drawn inside Skyrim (geometry route)".
 
 - Garry's Mod uses **DirectX 9** and Skyrim uses **DirectX 11**. Sharing the picture directly on the
   graphics card only works if Garry's Mod's DirectX 9 device is the "9Ex" kind. **Unknown; Phase 2
@@ -1329,7 +1338,161 @@ and lakes while Skyrim's player is put there too (not checked).
     swimming and the deepest; Skyrim: the `WORLD` line.
   - Test: walk into Riverwood's river: you sink slowly, swim where you look, Space swims up, you
     climb out on the bank; Skyrim shows you underwater; staying under long enough hurts you.
-- Further steps from what 4a finds.
+- **4b done (tests 67-68):** swimming, bobbing, climbing out and drowning work; W + Space swims
+  forward and up together after the fix in test 68 (keys scaled like Source's `CheckParameters`).
+  The menu keys T, Tab, I, P, F5 work (test 68).
+- **Phase 4 is done (2026-10-05).** Its §12 list (real shapes, interiors, load doors, floating
+  origin) was met in Phase 1; 4a found nothing else to fix beyond the keys and water.
+
+### Garry's Mod's world objects and effects in Skyrim (planned 2026-10-05, after Phase 4)
+
+**The problem (found in test 60).** The overlay picture only carries Garry's Mod's hands, weapon
+and HUD: `liveoverlay.lua` wipes the frame to transparent where the view model starts, which also
+wipes everything else Garry's Mod drew in the world. So grenades, rockets, AR2 balls,
+explosions, tracers, the physgun beam, props and Garry's Mod's own NPCs are invisible in Skyrim.
+
+**What is needed.** (1) Garry's Mod keeps those things in the picture and drops only its own map
+(gm_flatmap's floor and sky). (2) They must be hidden where a Skyrim wall, hill or person is in
+front of them. That needs to know, for every pixel, which game's thing is nearer: "depth" (how
+far each pixel is from the camera). Both games have it, but in different places.
+
+**How (2) is done: SkyCraft's way (the user's decision after test 70).** SkyCraft draws its
+"world layer" depth-tested against **Skyrim's own depth buffer** (`WorldRender.cpp`, MIT): Skyrim
+walls hide Minecraft blocks exactly, leaves and all. We do the same with Garry's Mod's picture:
+- Garry's Mod sends **two pictures** instead of one: the **world layer** (everything Source drew
+  after the map: grenades, rockets, explosions, tracers, beams, props, NPCs) and the **hands / HUD
+  layer** (view model, hands, HUD, menus; always on top), plus a **depth picture** for the world
+  layer: for every pixel, how far the nearest Garry's Mod object is from the camera.
+- Skyrim, while drawing the pictures at the end of its frame, reads **its own depth buffer**
+  (the main one, `RENDER_TARGETS_DEPTHSTENCIL::kMAIN`'s shader view, as SkyCraft), turns both into
+  distances along the view, and drops every world-layer pixel that has Skyrim geometry in front
+  of it. Then the hands / HUD layer goes on top, as today.
+- *(Rejected first plan, for the record: Garry's Mod hiding its objects behind Skyrim's
+  collision triangles. Collision isn't the visible shape (leaves, grass, clutter), so it would
+  look wrong. The user: "Do it the way skycraft does".)*
+
+**Getting Garry's Mod's depth.** Direct3D 9 can't read Source's own depth buffer. Source has a
+shader made to write depth as a colour: `DepthWrite` with `$color_depth 1` (Source SDK 2013
+`depthwrite_ps2x.fxc`: red = the pixel's projected depth / 4000, green = blue = 0, alpha = 1).
+After the frame, Lua draws the same view a second time (`render.RenderView` with the main view's
+position, angles, FOV, near and far, no view model, no HUD) into a half-size floating-point
+picture (`RGBA16F`), with every object drawn through that material
+(`render.MaterialOverride`), after wiping the map the same way. "No depth" (nothing drawn there)
+stays 0. A pixel whose green / blue isn't 0 or alpha isn't 1 was drawn by something that ignored
+the override (a particle or sprite, maybe): counted, and treated as "no depth" (always shown).
+Half size: 1/4 of the copying; Skyrim takes the nearest of the 4 depth pixels around each
+picture pixel, so edges aren't cut.
+
+**Steps:**
+- **W1. World objects kept in the picture** (built; test 70 showed it never ran: Garry's Mod
+  reports "drawing the sky" on every main view of a map with a 2D sky (the wiki says so), and
+  W1 skipped those. *Fix:* only the 3D sky and depth passes are skipped.)
+- **W2. Two layers + Garry's Mod's depth (Garry's Mod side, module).**
+  - Lua: once the world layer is drawn (where the view model, hands or HUD start),
+    `gmsky.OverlayGrabWorld()`: the module copies the current picture on the graphics card
+    (`StretchRect`, as the capture already does at Present) into the world layer of this frame's
+    copy set; Lua then wipes the colour to transparent and Source draws the hands and HUD on it.
+    In `PostRender`, the depth view (above) into a half-size `RGBA16F` target, then
+    `gmsky.OverlayGrabDepth(far)` copies it the same way. New settings:
+    `gmsky_overlay_depth 1/0`, `gmsky_overlay_depth_far 4000` (the shader's constant; checked
+    in game, see logs).
+  - Module (`capture.rs`): each copy set gets a world layer and a depth picture next to the
+    HUD picture; all three come to normal memory together. The depth is turned into distances
+    (Garry's Mod units, `red x far`; 0 = none) as 32-bit floats.
+  - Overlay block (protocol): no new block; the slot holds the HUD picture, then the world layer
+    (same size), then the depth (`depth_width` x `depth_height` floats). Flags
+    `GMSKY_OVF_WORLD` 0x8, `GMSKY_OVF_DEPTH` 0x10; `reserved0` becomes `depth_width` /
+    `depth_height` (16 bits each). Pictures too big for the slot (above about 2560x1440) are
+    sent as one layer, as today (counted).
+  - Logs (5 s): world layers and depth pictures sent; depth pixels used / "foreign" (drawn
+    without the override); **agreement**: of the world layer's solid pixels, how many have a
+    depth (should be near 100%; low means the second view doesn't line up with the first, e.g.
+    the FOV); **calibration**: the depth at the screen centre against Garry's Mod's own trace to
+    the entity under the crosshair (tells whether 4000 is right).
+- **W3. Skyrim's depth test (Skyrim side, `Draw.cpp`, adapted from SkyCraft (MIT)).**
+  - Skyrim's depth: the main depth buffer's shader view; probed every 5 s (0.5 s until known)
+    with 16 samples read back without waiting, as SkyCraft's `RunProbe` / `ReadProbe`: flat
+    (cleared, e.g. a loading screen: no test), standard (1 = far) or reversed (0 = far).
+    Distance from depth with the camera's near / far (`viewFrustum`), SkyCraft's
+    `SceneViewDepth`.
+  - One drawing pass: world layer, minus pixels where Skyrim is nearer than Garry's Mod by more
+    than 1% + 6 Skyrim units (SkyCraft: 0.2% + 1.5; ours is wider because Garry's Mod's picture
+    is one frame older), then the HUD layer over it, then onto Skyrim's frame as today (blur
+    unchanged). No depth (old Garry's Mod picture, unknown Skyrim depth): the world layer is drawn
+    untested.
+  - Logs (1 s): depth probe result (once and on change), world layers drawn with / without the
+    test.
+  - Test: throw a grenade behind a house corner, fire the RPG past a tree, spawn a prop and
+    walk behind a wall: hidden exactly where Skyrim's geometry is in front, visible elsewhere;
+    hands and HUD never hidden.
+**Test 71 (the user: black boxes around see-through effects, objects "extremely jittery" when
+moving around them, depth "mostly shows on top") and what the logs said:**
+- *On top:* 0% of the depth picture had a depth. GMod's own `DepthWrite` is fine (its compiled
+  `depthwrite_ps30.vcs`, disassembled: red = distance / far plane, green = blue = 0, alpha = 1), but
+  the objects were drawn with their **normal** materials: the engine ignores
+  `render.MaterialOverride` for its own drawing of entities in `render.RenderView`. And the probe of
+  Skyrim's depth called it "flat" whenever all 16 samples were sky (1.0), turning the test off for 5 s.
+- *Jitter:* copying three pictures cost 4.7 ms a frame (was 1.2) and the second view 2 ms, so Garry's
+  Mod ran at ~80 frames/s instead of ~180 and its pictures reached Skyrim 20-27 ms old. Skyrim draws
+  its world with its camera of *now*, the objects come from Garry's Mod's camera of 20 ms ago: moving
+  sideways, they slide back and forth. (SkyCraft never had this: it draws its blocks inside Skyrim
+  with Skyrim's own camera.)
+- *Black boxes:* see-through effects (sprites, tracers, glows) also write their texture's alpha, so
+  their black corners became opaque black over Skyrim.
+
+**W4. The fixes:**
+- *Depth from the main view itself:* no second view. Right after the main view's see-through pass
+  (`PostDrawTranslucentRenderables`, the same camera matrices), Lua pushes the half-size RGBA16F
+  target and draws each visible Garry's Mod entity with a model itself (`ent:DrawModel()`) under the
+  DepthWrite override (the documented way the override works), then grabs it. Exact alignment, no FOV
+  question, ~no extra cost. Effects without a model (sprites, particles, tracers) have no depth:
+  they are re-projected as if far away and never hidden (known limit, logged).
+- *Re-projection (Skyrim):* each picture carries the camera Garry's Mod drew it with (eye relative to
+  the anchor + origin epoch, angles, horizontal FOV, aspect; the slot header grows to 128 bytes,
+  overlay block version 2). For every screen pixel, Skyrim finds where that point was in Garry's Mod's
+  picture (3 steps: take the depth there, place the point in the world from Garry's Mod's camera,
+  project it with Skyrim's own camera matrix, correct), takes the colour from there, and does the
+  depth test with that point's distance in **Skyrim's current** camera. The hands / HUD are not
+  re-projected (they move with the view). Logged: the camera difference (units, degrees) per second.
+- *Cost:* the world layer and depth are only copied while there is something to show (a drawable
+  Garry's Mod entity nearby, or a shot / effect in the last second); per-stage copy times logged.
+- *Black boxes:* alpha writes are switched off for the main view's see-through pass: effects add
+  light (alpha 0), solid objects keep alpha 1.
+- *Probe:* all-sky samples (all 1.0) keep the known convention instead of switching the test off;
+  probed every second.
+
+**After tests 72-74: depth from Garry's Mod's own depth pass (W5, planned 2026-10-05, not built).**
+Three home-made ways to draw depth failed (DepthWrite through `MaterialOverride` drew nothing,
+tests 72-73; fog depth turned pure white in game, test 74; details in MODLOG and STATUS). The
+references the user pointed to (meetric1's GMod shader guide, the Valve wiki "Depth buffer" page,
+Evgeny Akabenko's GShader Library, the Garry's Mod wiki) show the way every working GMod depth
+addon does it, and it is the engine's own:
+- Return `true` from the **`NeedsDepthPass`** hook. Garry's Mod then runs Source's
+  `SSAO_DepthPass` every frame: the scene drawn a second time by the engine itself with DepthWrite
+  (`$color_depth`) into **`_rt_ResolvedFullFrameDepth`** (`render.GetResolvedFullFrameDepth()`).
+  The engine sets the shader up properly, which is what our Lua override never managed.
+- Make that target **32-bit float** first (Garry's Mod wiki example: `GetRenderTargetEx(
+  "_rt_resolvedfullframedepth", 1, 1, RT_SIZE_FULL_FRAME_BUFFER, MATERIAL_RT_DEPTH_SHARED,
+  bit.bor(4, 8, 256, 512), 0, IMAGE_FORMAT_R32F)` with `IMAGE_FORMAT_R32F = 27`), so distance is not
+  cut to 8 bits. GShader Library does the same ("increasing the bit depth").
+- Value: red = distance along the view / a constant (my disassembly of `depthwrite_ps30.vcs`:
+  divided by the far plane `g_vNearFarPlanes.y`; the Valve wiki says the TF2 branch divides by 4000).
+  Not sure which; the module logs raw values at the centre with `OverlayDepthCentre` and the
+  Garry's Mod crosshair trace distance, so the constant is read from the numbers, not guessed.
+- The module grabs that texture's surface (format D3DFMT_R32F = 114 instead of 113) and copies it
+  at the Present like today; Skyrim's side (re-projection, depth test) stays as it is.
+- It holds only opaque things (no effects), like today's plan. It also holds gm_flatmap's ground;
+  that does not matter, because depth is only used where the world layer has a Garry's Mod pixel.
+- The fog path, its calibration squares and the Lua-drawn depth target are removed.
+
+**RPG black patch (test 74):** the stamp found no see-through sub-material on the RPG (0 left out),
+and the black patch pulses: it is the RPG's laser glow **sprite**, drawn by the weapon's own code
+whenever its model is drawn, so the stamp's second `DrawModel` draws it too, as solid. Plan: stamp
+the view model through a stand-in `ClientsideModel` of the same model, bone-merged to it
+(`EF_BONEMERGE`), whose drawing runs no weapon code. Not built.
+
+Not in these steps: Garry's Mod's physics against Skyrim's world (props, grenades and AR2 balls
+falling through), which is a separate plan.
 
 **Hitboxes: how bullets hit Skyrim's NPCs (planned 2026-10-05, the user asked for this plan before 3c).**
 
@@ -1492,6 +1655,107 @@ single-player):
 fallback). **3c-2** send them (protocol bump) and build the stand-ins in Garry's Mod, with the
 harness check (2). **3c-3** `gmsky_hitbox_test` (3) and the crosshair agreement (4) in game.
 Hits doing anything is 3d.
+
+### Garry's Mod's things drawn inside Skyrim (geometry route, planned 2026-10-05, after test 74)
+
+**Decision (user, 2026-10-05):** render Garry's Mod's world objects inside Skyrim, the way
+SkyCraft does, because it removes the jitter. This replaces the picture world layer (W1-W5). W5
+(the engine's depth pass) is **not built**.
+
+**Why it removes the jitter.** Today Skyrim pastes a flat picture that Garry's Mod drew 10-20 ms
+earlier with its own camera; when the two cameras differ, the objects slide. In the geometry
+route, Skyrim draws the object's triangles at their place in the world, with **Skyrim's camera of
+this frame**. A prop standing still is then glued to the world like any Skyrim rock. Depth also
+comes for free: the triangles are drawn into Skyrim's own depth buffer, so walls hide them and
+they hide what's behind them.
+
+**What SkyCraft does (read 2026-10-05, MIT):**
+- Minecraft side (`AvatarExporter.java`): every Minecraft frame, it runs Minecraft's own entity
+  and particle renderers, but into a "collector" of its own instead of the graphics card. Out come
+  the posed triangles (position, texture coordinate, colour) grouped by texture. It sends them
+  through a byte ring in shared memory (`kRenScene`, relative to an origin near the camera).
+  Textures go once (`kRenTexture`, `kRenAtlas`). Positions are taken at Minecraft's render time
+  (interpolated between physics ticks).
+- Skyrim side (`WorldRender.cpp`): a hook right after `Main::RenderWorld`
+  (`REL::ID(36559) + 0x85E`, the call to `REL::ID(107142)`, checked before patching) draws the
+  triangles into **Skyrim's HDR scene target** (`kMAIN`) with **Skyrim's main depth buffer** bound,
+  so they are depth-tested and write depth. It also writes motion vectors and normals so Skyrim's
+  anti-aliasing (TAA) and reflections treat them like Skyrim's own objects. The shader lights them
+  with Skyrim's sun, ambient, shadows and fog. Camera: Skyrim's own world -> clip matrix, re-based
+  on the camera position. The hands and HUD stay a picture (`Overlay.cpp`).
+
+**Differs from SkyCraft (on purpose, said up front):**
+1. *Transport.* SkyCraft sends fully posed triangles every frame. We send each **model once** (its
+   triangles in rest pose, with which bones move each corner) and then, every frame, only **where
+   each object is and how its bones are posed** (a few matrices). Skyrim's graphics card bends the
+   model into the pose ("GPU skinning", what Source itself does). Same picture as SkyCraft's
+   result, far less data: a Source ragdoll is 5,000-10,000 triangles.
+2. *Where the triangles come from.* Minecraft's renderer can be pointed at a collector; Source's
+   can't from Lua. We read the model files through Garry's Mod's own `util.GetModelMeshes`
+   (triangles, texture coordinates, normals, bone weights, rest pose) and the textures through
+   `file.Read(<texture>.vtf, "GAME")` (Garry's Mod's file system, so Workshop and mounted content
+   work too). Read at run time from the game; nothing is written into the repo (AGENTS.md rule 1).
+3. *Effects.* SkyCraft's collector also catches particles. Source's tracers, explosions, AR2 balls
+   and the physgun beam are drawn by the engine in C++, which Lua can't capture this way. They are a
+   separate, later step (G7) with its own options. **Not solved by this plan.**
+
+**Steps (one at a time, each with an in-game test):**
+
+- **G1. Skyrim draws a test object in its own frame.** Skyrim only. Port SkyCraft's in-frame pass:
+  the hook after `Main::RenderWorld`, its checks of the targets (HDR scene, depth size), its saving
+  and restoring of Skyrim's graphics state, its camera re-basing. Draw one plain cube (1 m, white,
+  lit by a fixed light), placed once 300 units in front of the player on the first frame after a
+  save loads, then fixed in the world (a constant in the plugin, on for G1, off afterwards; the plugin has no
+  settings file). Logs: hook installed (bytes checked),
+  targets and formats, frames drawn, ms per frame, the cube's screen position when the player
+  looks at it. **Test:** the user walks around the cube and behind a wall: it stays put, no
+  jitter, the wall hides it. This proves the hook, the depth and the camera on our setup before
+  any Garry's Mod data.
+- **G2. The render block.** New shared memory `Local\GmodSkyrim_render_v1` (the main block's
+  layout doesn't change): a byte ring Garry's Mod -> Skyrim like SkyCraft's render ring, with
+  messages `Texture` (once per texture), `Model` (once per model + skin + body groups: vertices with
+  position, normal, texture coordinate, up to 3 bones and weights; triangles; which texture per
+  part; material flags), `Frame` (every Garry's Mod frame: anchor epoch, time stamp, a list of
+  objects: model id, colour, and each bone's matrix relative to the anchor), `Forget` (a model
+  Skyrim may free). Rust writer in the module, C++ reader in the plugin, unit tests (round trip,
+  ring wrap-around, a reader joining late), a fake writer tool. No game needed.
+- **G3. Props.** Garry's Mod (client Lua): every frame, the objects with a model within range
+  (not the local player, its view model, our hitbox stand-ins, `gmsky_field`, brush models
+  `*N`, `GetNoDraw()` objects). New models are read once with `util.GetModelMeshes` and their
+  textures with `file.Read`; the module decodes the VTF header and sends the biggest picture
+  (DXT1 / DXT5 straight as BC1 / BC3, which Direct3D 11 reads natively; other formats turned into
+  RGBA8). Skyrim draws them with their textures, Skyrim's camera, depth, scaled by the §5
+  conversion. The world layer picture is switched off by default (`gmsky_overlay_world 0`).
+  Logs: models / textures sent (bytes, formats, any it couldn't read and why), objects per frame,
+  Lua ms, Skyrim draw ms. **Test:** spawn props; they stand in Skyrim's world, hidden by walls.
+- **G4. Moving and bending things.** Bone matrices every frame (`ent:SetupBones()`,
+  `GetBoneMatrix`), skinning in Skyrim's vertex shader: ragdolls, Garry's Mod NPCs, rockets,
+  grenades. **Test:** ragdolls flop, rockets fly, all in Skyrim's world.
+- **G5. Light like Skyrim's, and see-through materials.** SkyCraft's lighting (sun, ambient,
+  shadows, fog, its exposure curve) with the models' normals; motion vectors and normals targets
+  (so TAA doesn't smear them); `$translucent` / `$additive` / `$alphatest` / `$selfillum` drawn in
+  a second pass, as SkyCraft's blended pass. **Test:** props look lit like the rocks next to them,
+  day and night.
+- **G6. Smoothness check.** Logs per Skyrim frame: the age of Garry's Mod's newest frame and how far
+  each moving object jumped. A still prop can't jitter (it's in the world). A **moving** object
+  updates at Garry's Mod's frame rate (85-180/s in test 74); if the logs show uneven steps, Skyrim
+  interpolates between Garry's Mod's last two frames on its own clock (what SkyCraft does for the
+  player, `McState` tick stamps). Known risk, said now: **a prop held by the physgun** follows
+  Garry's Mod's view, which reaches Skyrim 10-20 ms after Skyrim's mouse look, so it may wobble
+  against the screen while turning. Measured here; fixed only if the numbers show it.
+- **G7. Effects (later, needs its own plan and your choice).** Options: (a) for effects drawn from
+  Lua (`render.DrawBeam`, `DrawSprite`, `DrawQuadEasy`), a collector like SkyCraft's that wraps
+  those calls; (b) for engine effects, send events (explosion at X, tracer from A to B) and draw
+  their sprites in Skyrim; (c) Skyrim's own explosion and magic effects. Unknown which engine
+  effects Lua can see at all; the first step is a log of what happens when you shoot.
+- **G8. Clean-up.** When G3-G5 cover the world objects, the world layer and depth picture (W1-W4
+  code in `liveoverlay.lua`, `capture.rs`, `Draw.cpp`) are removed. The hands / HUD picture stays.
+
+**Not sure (checked by logs, not guessed):** whether `util.GetModelMeshes` gives normals and the
+model's real skin materials for every model (the wiki lists a `skin` argument); whether
+`file.Read` returns `.vtf` files from VPKs and Workshop addons intact (binary); how much Lua time
+`GetModelMeshes` costs on a big model (it is cached per model, so once); whether the hook point
+SkyCraft uses behaves the same with our plugin's other hooks.
 
 ## 13. Repo layout
 

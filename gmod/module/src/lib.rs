@@ -181,7 +181,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 43] = [
+    let funcs: [(&str, lua::CFn); 47] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -209,6 +209,10 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("OverlayPrepared", l_overlay_prepared),
         ("OverlayShot", l_overlay_shot),
         ("OverlayBlur", l_overlay_blur),
+        ("OverlayGrabWorld", l_overlay_grab_world),
+        ("OverlayGrabDepth", l_overlay_grab_depth),
+        ("OverlayDepthCentre", l_overlay_depth_centre),
+        ("OverlayView", l_overlay_view),
         ("OverlayWindow", l_overlay_window),
         ("SetClientInput", l_set_client_input),
         ("ClientInput", l_client_input),
@@ -1140,6 +1144,57 @@ unsafe extern "C" fn l_overlay_blur(l: *mut State) -> c_int {
     guarded(l, |a, _| {
         capture::set_blur((a.toboolean)(l, 1) != 0);
         0
+    })
+}
+
+/// gmsky.OverlayGrabWorld(): step W2, the picture Source is drawing into now (the frame, once the
+/// world objects are drawn) becomes this frame's world layer (capture.rs).
+unsafe extern "C" fn l_overlay_grab_world(l: *mut State) -> c_int {
+    guarded(l, |_, _| {
+        capture::grab_world();
+        0
+    })
+}
+
+/// gmsky.OverlayGrabDepth(d1, d2): step W2, the render target Source is drawing into now (Lua's
+/// RGBA16F depth picture, drawn with fog since test 73) becomes this frame's depth picture; its
+/// calibration squares are d1 and d2 away (capture.rs).
+unsafe extern "C" fn l_overlay_grab_depth(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        capture::grab_depth((a.tonumber)(l, 1) as f32, (a.tonumber)(l, 2) as f32);
+        0
+    })
+}
+
+/// gmsky.OverlayView(x, y, z, pitch, yaw, roll, fov, aspect): step W4, the camera this frame's world
+/// layer is drawn with (eye in Garry's Mod world units; made relative to the anchor here, with its
+/// origin epoch, so Skyrim can place it). Nothing before the first anchor.
+unsafe extern "C" fn l_overlay_view(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let n = |i: c_int| (a.tonumber)(l, i);
+        let (epoch, anchor) = {
+            let link = LINK.lock().unwrap_or_else(|e| e.into_inner());
+            (link.epoch, link.anchor)
+        };
+        if epoch != 0 {
+            capture::set_view(capture::View {
+                eye: [(n(1) - anchor[0]) as f32, (n(2) - anchor[1]) as f32, (n(3) - anchor[2]) as f32],
+                angles: [n(4) as f32, n(5) as f32, n(6) as f32],
+                fov: n(7) as f32,
+                aspect: n(8) as f32,
+                epoch,
+            });
+        }
+        0
+    })
+}
+
+/// gmsky.OverlayDepthCentre() -> number or nil: step W2, the nearest Garry's Mod depth at the
+/// screen centre in the newest depth picture (Garry's Mod units), for the calibration log line.
+unsafe extern "C" fn l_overlay_depth_centre(l: *mut State) -> c_int {
+    guarded(l, |a, _| match capture::depth_centre() {
+        Some(d) => { (a.pushnumber)(l, d); 1 }
+        None => 0,
     })
 }
 

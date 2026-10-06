@@ -1,48 +1,65 @@
-# Handoff (2026-10-05)
+# Handoff (2026-10-05, after test 74)
 
-Where things stand, for the next chat. Details: `STATUS.md` ("The current problem" is a running
-log of every step), `MODLOG.md` (every change and test), `docs/DESIGN.md` §12 (the phases).
+Where things stand, for the next chat. Details: `STATUS.md` ("The current problem" starts with
+this problem), `MODLOG.md` (every change and test, newest at the end), `docs/DESIGN.md` §12,
+section "Garry's Mod's world objects and effects in Skyrim" (W1-W5).
 
 ## Done
 
-- **Phases 0-3 are done:** link, walking Skyrim with Garry's Mod movement, the overlay (Garry's
-  Mod's hands, weapon and HUD in Skyrim's window, on at start-up), and combat. Combat covers
-  hitting NPCs through Skyrim's hit function, NPCs hurting you, respawning at the last calm spot,
-  and corpses pushed with Garry's Mod's force × 3.
-- **Phase 4:**
-  - **4a world audit (test 66) passed:** cities, interiors, fast travel, sleeping and a dungeon.
-  - **Skyrim's menu keys:** T, Tab, I, P and F5 now reach Skyrim.
-  - **4b swimming works (test 67):** this includes drowning damage reaching Garry's Mod.
-- Protocol is **v15**. Last commit: see `git log -1`.
+- **Phases 0-4 are done:** link, walking Skyrim with Garry's Mod movement, the overlay (Garry's
+  Mod's hands, weapon and HUD in Skyrim's window, on at start-up), combat (hits through Skyrim's
+  hit function, NPCs hurting you, respawn, corpses pushed with Garry's Mod's force x 3), the world
+  audit (test 66), Skyrim's menu keys, swimming (tests 67-68).
+- Protocol is **v15**. Overlay block is **version 2** (128-byte slot header with the picture's
+  camera; world layer + depth after the HUD picture). Last commit: `070c50a` (Phase 4).
+- **Everything for the world layer (tests 70-74) is uncommitted** in the working tree: Lua
+  `gmod/lua/gmsky/liveoverlay.lua`, module `gmod/module/src/capture.rs` + `lib.rs`, protocol
+  `gmsky_protocol.h` + `overlay.rs`, Skyrim `skse/src/Draw.cpp`, harness, `tools/overlay_read.py`,
+  docs. Commit only when the user asks.
 
-## Not tested yet: test 68
+## Current work: Garry's Mod's world objects and effects in Skyrim
 
-- **W + Space while swimming:** should swim forward and up together (`water.lua` now scales the
-  keys like Source's `CheckParameters`).
-- **`gmsky_overlay` on by default:** the overlay should appear without typing anything.
-- **The new Skyrim menu keys:** Tab, I, P and F5 are untested. The user said T "worked just fine".
+Goal: props, rockets, grenades, AR2 balls, explosions, tracers and the physgun beam from Garry's
+Mod show in Skyrim, **hidden behind Skyrim's geometry the way SkyCraft does it** (a depth test
+against Skyrim's own depth buffer). The user rejected any cheaper approximation.
 
-## Next steps (suggested order; ask the user)
+What works (tests 72-74): the world layer reaches Skyrim and is drawn; black boxes around effects
+fixed (alpha writes off in the see-through pass); see-through props, RPG body and toolgun screen
+fixed (alpha "stamp"); frame rate fine again (stamp recursion fixed); Skyrim re-projects the layer
+to its own camera (matrix check correct) and its depth probe works.
 
-1. **Run test 68**, then close Phase 4. Phase 4's §12 list (real shapes, interiors, load doors,
-   floating origin) is otherwise met.
-2. **"Found in test 60"** (DESIGN.md, in the 3d section). Garry's Mod's **world objects and
-   effects are invisible** in Skyrim: grenades, rockets, AR2 balls, explosions, tracers and the
-   physgun beam. Drawing them into the overlay hidden behind Skyrim's walls needs both games'
-   depth; this is the hard part.
-3. **Garry's Mod physics with Skyrim's world.** Today props, grenades and AR2 balls fall through,
-   and the physgun can't grab corpses. This is also what real Garry's Mod ragdolls would need,
-   which the user wants. Watch out: physics ground near the player crashed `vphysics.dll` in tests
-   12-17.
-4. **Phase 5 polish:**
-   - auto-launch Garry's Mod from Skyrim;
-   - save/load consistency;
-   - Garry's Mod's window size matched to Skyrim's;
-   - Skyrim potions don't heal Garry's Mod's player;
-   - user's wishes: stamina / magicka bars, quest markers, locations and enemies in HOLOHUD.
-5. Small known issues:
-   - a bow hit (probably a bow bash) arrives as melee;
-   - ending noclip more than ~2,100 units under the ground holds you.
+**What does not work:**
+1. **Depth is always empty, so objects always show on top.** Three Lua-drawn methods failed
+   (STATUS.md lists them). **Do not try a fourth home-made one.**
+2. **RPG: a pulsing black patch** at the barrel. It is the laser glow sprite the RPG's own code
+   draws whenever its model is drawn; the stamp's extra `DrawModel` draws it as solid.
+3. A little jitter around props when moving (Skyrim re-projects, but without depth it can't).
+4. Effects without a model (tracers, explosions) will have no depth even after the fix (known limit).
+
+## Next steps (in this order; one step at a time, ask the user before anything large)
+
+1. **W5: the engine's depth pass** (plan in DESIGN.md, from the user's references):
+   - Lua: `hook.Add("NeedsDepthPass", ..., function() return true end)` and, once at start, recreate
+     `_rt_resolvedfullframedepth` as R32F (`IMAGE_FORMAT_R32F = 27`; exact call on the Garry's Mod
+     wiki page `render.GetResolvedFullFrameDepth`). After the main view, grab
+     `render.GetResolvedFullFrameDepth()` instead of our own target; send `render.GetViewSetup()`'s
+     `zfar` along.
+   - Module (`capture.rs`): accept D3DFMT_R32F (114) for depth, full size; distance = red x
+     constant. **Not sure** whether the constant is the far plane (my disassembly) or 4000 (Valve
+     wiki, TF2 branch): log the raw centre value next to the crosshair trace distance and decide
+     from the numbers. Remove the fog path, the squares and the Lua depth target.
+   - Check the user's references again first: meetric1/gmod_shader_guide (example 9),
+     developer.valvesoftware.com/wiki/Depth_buffer ("Resolved Full Frame Depth"), GShader Library
+     (Workshop 3542644649), EGSM wiki ("WorldPosDepthBuffer"), GM:NeedsDepthPass.
+2. **RPG patch:** stamp the view model through a bone-merged `ClientsideModel` of the same model
+   (no weapon code runs when it draws). Separate step.
+3. Then: Garry's Mod physics with Skyrim's world (props, grenades, AR2 balls fall through; physgun
+   can't grab corpses). Careful: physics ground near the player crashed `vphysics.dll` in tests 12-17.
+4. Phase 5 polish: auto-launch Garry's Mod from Skyrim; save/load consistency; window size
+   matched; Skyrim potions healing Garry's Mod's player; stamina / magicka bars, quest markers,
+   locations and enemies in HOLOHUD.
+5. Small known issues: a bow hit (probably a bow bash) arrives as melee; ending noclip more than
+   ~2,100 units under the ground holds you.
 
 ## How to work here (read `AGENTS.md` first)
 
@@ -53,12 +70,11 @@ log of every step), `MODLOG.md` (every change and test), `docs/DESIGN.md` §12 (
   - build the plugin: `cmake --build --preset release` in `skse/` (it copies `gmsky.dll` into
     Skyrim);
   - build the module: `cargo build --release` in `gmod/`;
-  - run the harness: `cargo run --release -p gmsky-harness` in `gmod/`;
+  - run the harness: `cargo run --release -p gmsky-harness` in `gmod/` (186 checks today);
   - run the unit tests (`cargo test`).
-  - Re-run the harness after *any* Lua default change (missed once, see MODLOG).
-- **After each in-game test, save the logs yourself:** `tools\save_logs.ps1` writes
-  `build\logs-ingame-test-N\`. `launch_gmod.ps1` also auto-saves before a launch, so the folder
-  numbers can run ahead. Name the test after the folder that holds it.
+  - Re-run the harness after *any* Lua change.
+- **After each in-game test, save the logs yourself:** `tools\save_logs.ps1 -Test N` writes
+  `build\logs-ingame-test-N\`. Next test is **75**.
 - **Credits:** check `reference/SkyCraft` (MIT) before each step and credit what is adapted.
 - **Bash quoting:** heredocs with quotes in them break in Bash here. Write Python edit scripts to
   the scratchpad with the Write tool instead.

@@ -24,7 +24,7 @@ from PIL import Image
 
 NAME = "Local\\GmodSkyrim_overlay_v1"
 MAGIC = 0x564F534D
-VERSION = 1
+VERSION = 2
 MAX_W, MAX_H = 3840, 2160
 PIXELS_OFF = 0x1000
 MASK_OFF = MAX_W * MAX_H * 4
@@ -32,8 +32,8 @@ SLOT_BYTES = (MASK_OFF + (MAX_W // 4) * (MAX_H // 4) + 0xFFFF) & ~0xFFFF
 MAP_SIZE = PIXELS_OFF + 3 * SLOT_BYTES
 SLOT_HDR_OFF = 0x40
 CTL = struct.Struct("<IIQIIQQIIq")         # GmskyOverlayCtl, 56 bytes
-SLOT = struct.Struct("<IIIIQqIIII16x")     # GmskyOverlaySlotHdr, 64 bytes
-assert CTL.size == 56 and SLOT.size == 64 and MAP_SIZE == 101257216
+SLOT = struct.Struct("<IIIIQqIIII8fI44x")  # GmskyOverlaySlotHdr, 128 bytes (version 2)
+assert CTL.size == 56 and SLOT.size == 128 and MAP_SIZE == 101257216
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -53,7 +53,8 @@ def ctl(m):
 
 def slot_hdr(m, i):
     keys = ("width", "height", "format", "flags", "frame", "capture_qpc", "row_bytes",
-            "mask_w", "mask_h", "reserved0")
+            "mask_w", "mask_h", "depth_wh",  # depth_wh: depth_width | depth_height << 16
+            "eye_x", "eye_y", "eye_z", "pitch", "yaw", "roll", "fov", "aspect", "view_epoch")
     return dict(zip(keys, SLOT.unpack_from(m, SLOT_HDR_OFF + i * SLOT.size)))
 
 
