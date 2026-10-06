@@ -4,7 +4,10 @@
 Skyrim's ground, plan `docs/DESIGN.md` "One collision system", step S1c). See "The current
 problem". **Ghidra (2026-10-06) found the cause:** a per-object list of collision pair records
 overflows at 65,533 entries, and gm_flatmap's world adds ~6 records per mesh triangle. Idea 2c
-(switch off the map world's physics collisions) crashed the same way in test 114; waiting for the user's choice.
+(switch off the map world's physics collisions) crashed the same way in test 114. Idea 2 (count the
+lists directly) **found the list (test 116):** it is the *new* mesh's, and it overflows inside
+`SetMass` because the old mesh, "destroyed" with `PhysicsDestroy`, is still alive inside the engine
+in exactly the same place (it was touching the awake player). Waiting for the user's choice of fix.
 
 **2026-10-06: the indoor shadow problem below is solved (test 93: Community Shaders' formula agrees
 with Skyrim's own shadow mask on 99.86% of points). Kept below as a record.**
@@ -194,7 +197,16 @@ after a new mesh object is set up: the last log line was `SetSolid` (tests 109, 
    **not** ask the Lua hook about world pairs: the engine's filter decides them before Lua is asked
    (not seen in the code yet; that's an assumption from the count). Another way to say "never with the world"
    would be needed (see 2b).
-2. **Count the lists directly.** Our Rust module reads (never writes) the list sizes of the mesh, the
+2. **Count the lists directly. Built; test 115 ran it** (MODLOG). Result: the world's list never
+   grew (1-2 entries), so the world is **not** the source. Standing still, nothing grows; on
+   the first walking build the player had 193 records with an object no entity owns (likely the
+   just-destroyed mesh) and the crash came inside `SetMass` with no visible list near the limit.
+   **Test 116 named it:** the dump's `rdi` (the overflowing object) was the mesh being built
+   (b11), with 220 entries just before `SetMass`. The previous mesh b10, whose physics had been
+   destroyed at the start of the build, was **still alive in the engine** (intact, 194 records
+   with the player, its own list 196/287) and lay exactly where b11 went. b11 x b10 = up to
+   7,442 x 7,442 pieces: the only thing in reach that can add 65,000+ records in one call (not
+   seen directly; the crash is inside the call). Original idea: our Rust module reads (never writes) the list sizes of the mesh, the
    world and the player's physics object through the offsets Ghidra showed, and logs them before and
    after every setup call. Tells exactly which list fills and from what, including the unexplained
    ~20,000-45,000. More work, and depends on Garry's Mod's internal layout (not sure of the first
@@ -212,6 +224,12 @@ after a new mesh object is set up: the last log line was `SetSolid` (tests 109, 
    physics), and props should land on our meshes, not gm_flatmap's floor 16,300 units down. **Not
    sure** the engine honours it for the world object, or what props do if a mesh is missing (fall
    forever instead of stopping on the map's floor). Log: crash or not; props' fall.
+2d. **(New, after test 116; my recommendation) Never build over a mesh the engine still holds.**
+   Remember the old mesh's engine address; before building in the same place, check (read-only)
+   whether that object still exists. If it does, wait (logged: how long until it goes) or move
+   it out of the way first (e.g. `SetPos` far away / disable its collisions before destroying).
+   One variable: `rebuild grid`, alt-tab and walk. If it survives, the cause is confirmed and S2's
+   chunks need the same rule (never overlap a mesh, dead or alive).
 3. **Build only far from the player.** The opposite of 110's start-up problem: build a chunk only when
    the player's body is at least ~1,000 units from it (needs Skyrim to collect further out, S1d), and
    log the real distance. Test 16 is the only pattern that never crashed.

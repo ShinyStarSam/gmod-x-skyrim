@@ -85,14 +85,14 @@ static FOUND: Mutex<Option<Found>> = Mutex::new(None);
 static FAILED: Mutex<Option<(Instant, String)>> = Mutex::new(None);
 
 /// Reads `n` bytes at `addr` from our own process; None instead of a crash if it isn't readable.
-fn read(addr: usize, n: usize) -> Option<Vec<u8>> {
+pub(crate) fn read(addr: usize, n: usize) -> Option<Vec<u8>> {
     let mut buf = vec![0u8; n];
     let mut got = 0usize;
     let ok = unsafe { ReadProcessMemory(GetCurrentProcess(), addr as *const c_void, buf.as_mut_ptr() as *mut c_void, n, &mut got) };
     (ok != 0 && got == n).then_some(buf)
 }
 
-fn read_u64(addr: usize) -> Option<usize> {
+pub(crate) fn read_u64(addr: usize) -> Option<usize> {
     read(addr, 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()) as usize)
 }
 
@@ -101,13 +101,13 @@ fn le32(b: &[u8], at: usize) -> u32 {
 }
 
 /// A loaded DLL's address range and its writable sections (start, size), from its PE header.
-struct Image {
-    base: usize,
+pub(crate) struct Image {
+    pub(crate) base: usize,
     size: usize,
     writable: Vec<(usize, usize)>,
 }
 
-fn image(name: &str) -> Option<Image> {
+pub(crate) fn image(name: &str) -> Option<Image> {
     let w: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
     let base = unsafe { GetModuleHandleW(w.as_ptr()) } as usize;
     if base == 0 {
@@ -132,7 +132,7 @@ fn image(name: &str) -> Option<Image> {
 }
 
 impl Image {
-    fn contains(&self, p: usize) -> bool {
+    pub(crate) fn contains(&self, p: usize) -> bool {
         p >= self.base && p < self.base + self.size
     }
 }

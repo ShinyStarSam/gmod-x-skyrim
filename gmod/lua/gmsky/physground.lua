@@ -21,7 +21,10 @@
 -- setup is described in DESIGN.md and written here from that description; no code is copied.
 -- Every test mesh and the map's world never collide (the ShouldCollide hook below; after Ghidra).
 -- Idea 2c (after tests 112-113, which showed the hook is never asked about the world): while
--- test meshes exist, the map's world has its physics collisions switched off (G.WorldCollisions).
+-- test meshes exist, the map's world has its physics collisions switched off (G.WorldCollisions),
+-- unless gmsky_physground_world is 1.
+-- Idea 2 (after test 114): the engine's per-object pair-record lists are read by the module and
+-- logged: sizes on every step line, who the records are with before and after every build.
 -- The client builds its copy too, from the same store (one module per process). A log line goes
 -- out before every setup call (lines are flushed one by one), so a crash names the call.
 
@@ -197,12 +200,16 @@ function ENT:BuildMesh()
 		name, n, #verts, hi.x - lo.x, hi.y - lo.y, hi.z - lo.z, mhi.x - mlo.x, mhi.y - mlo.y, mhi.z - mlo.z, gap, shape,
 		(SysTime() - t0) * 1000, s.builds, s.tris, destroyed, MeshesWithPhysics(), PlayerLine(self, lo, hi)))
 	local function Step(what, fn)
-		gmsky.Log(string.format("physground: %s step: %s (ShouldCollide asked about this mesh with: %s; mesh: %s)",
-			name, what, G.AskedLine(self), G.CollisionFacts(self)))
+		gmsky.Log(string.format("physground: %s step: %s (ShouldCollide asked about this mesh with: %s; mesh: %s)%s",
+			name, what, G.AskedLine(self), G.CollisionFacts(self), G.ListsLine(self)))
+		G.PartnersStep(name .. " before " .. what, self)
 		return fn()
 	end
-	G.WorldCollisions(false, name)
+	-- gmsky_physground_world 1: the world keeps its collisions (tests 111-113); 0: off (test 114).
+	if SERVER and G.worldOn:GetBool() then G.WorldCollisions(true, name .. ", gmsky_physground_world 1")
+	else G.WorldCollisions(false, name) end
 	gmsky.Log(string.format("physground: %s world: %s", name, G.CollisionFacts(game.GetWorld())))
+	G.PartnersAll("before " .. name)
 	t0 = SysTime()
 	-- The custom collision check goes on first, before the physics object exists, so the
 	-- ShouldCollide hook's "never with the world" counts when the engine makes its pair records
@@ -211,6 +218,7 @@ function ENT:BuildMesh()
 	-- InfMap2's chunk setup, in its order.
 	Step("PhysicsDestroy", function() self:PhysicsDestroy() end)
 	self.gmskyOk = Step("PhysicsFromMesh", function() return self:PhysicsFromMesh(verts) end)
+	G.Remember(string.format("mesh b%d", self:GetBuild()), self:GetPhysicsObject())
 	Step("SetSolid(SOLID_VPHYSICS)", function() self:SetSolid(SOLID_VPHYSICS) end)
 	Step("SetMoveType(MOVETYPE_NONE)", function() self:SetMoveType(MOVETYPE_NONE) end)
 	Step("EnableCustomCollisions", function() self:EnableCustomCollisions(true) end)
@@ -232,7 +240,8 @@ function ENT:BuildMesh()
 		name, ms, n, G.AskedLine(self), G.CollisionFacts(self), MeshesWithPhysics(), tostring(self.gmskyOk), tostring(IsValid(phys)), self:GetSolid(), self:GetSolidFlags(),
 		IsValid(phys) and string.format(" mass %.0f, constraint-static flag %s, no-self-collisions flag %s, moving %s", phys:GetMass(),
 			tostring(phys:HasGameFlag(FVPHYSICS_CONSTRAINT_STATIC)), tostring(phys:HasGameFlag(FVPHYSICS_NO_SELF_COLLISIONS)),
-			tostring(phys:IsMotionEnabled())) or ""))
+			tostring(phys:IsMotionEnabled())) or "") .. G.ListsLine(self))
+	G.PartnersAll("after " .. name)
 end
 
 function ENT:Initialize()
@@ -336,6 +345,120 @@ function G.WorldCollisions(on, why)
 		on and "ON" or "OFF", tostring(phys:IsCollisionEnabled()), G.CollisionFacts(game.GetWorld())))
 end
 
+-- Idea 2 (DESIGN.md "count the lists directly"): the engine keeps, per physics object, a list
+-- with one entry per pair record the object is in; vphysics.dll crashes when one reaches 65,532.
+-- The module reads those lists (read only, gmod/module/src/physlist.rs). Server only: the crash
+-- is on the server.
+
+-- Every physics object of every entity, the world first: { { name, phys }, ... }.
+function G.AllPhys()
+	local out, world = {}, game.GetWorld()
+	if IsValid(world:GetPhysicsObject()) then out[1] = { "world", world:GetPhysicsObject() } end
+	for _, ent in ipairs(ents.GetAll()) do
+		if IsValid(ent) and not ent:IsWorld() then
+			local name = ent:IsPlayer() and "player"
+				or ent:GetClass() == "gmsky_physground_test" and string.format("mesh b%d", ent:GetBuild())
+				or string.format("%s %d", ent:GetClass(), ent:EntIndex())
+			local n = ent:GetPhysicsObjectCount()
+			if n == 0 and IsValid(ent:GetPhysicsObject()) then
+				out[#out + 1] = { name, ent:GetPhysicsObject() }
+			end
+			for i = 0, n - 1 do
+				local p = ent:GetPhysicsObjectNum(i)
+				if IsValid(p) then out[#out + 1] = { n > 1 and string.format("%s:%d", name, i) or name, p } end
+			end
+		end
+	end
+	return out
+end
+
+local function SizeText(phys)
+	if not IsValid(phys) then return "none" end
+	local live, slots = gmsky.PhysList(phys)
+	if not live then return "? (" .. tostring(slots) .. ")" end
+	return string.format("%d/%d", live, slots)
+end
+
+-- "lists (live/slots, limit 65532): mesh 44650/65532, world 3/7, player 2/3; biggest: ..."
+function G.ListsLine(mesh)
+	if not SERVER or not gmsky.PhysList then return "" end
+	local ply = ThePlayer()
+	local sizes = {}
+	for _, np in ipairs(G.AllPhys()) do
+		local live = gmsky.PhysList(np[2])
+		if live then sizes[#sizes + 1] = { np[1], live } end
+	end
+	table.sort(sizes, function(x, y) return x[2] > y[2] end)
+	local top = {}
+	for i = 1, math.min(3, #sizes) do top[i] = string.format("%s %d", sizes[i][1], sizes[i][2]) end
+	return string.format("; lists (live/slots, limit 65532): mesh %s, world %s, player %s; biggest: %s",
+		IsValid(mesh) and SizeText(mesh:GetPhysicsObject()) or "none", SizeText(game.GetWorld():GetPhysicsObject()),
+		IsValid(ply) and SizeText(ply:GetPhysicsObject()) or "no player", #top > 0 and table.concat(top, ", ") or "-")
+end
+
+-- One line per object: who the other side of each of its list's pair records is.
+function G.PartnersLog(what, label, phys, all)
+	if not SERVER or not gmsky.PhysListPartners then return end
+	if not IsValid(phys) then
+		gmsky.Log(string.format("physground: %s partners of %s: no physics object", what, label))
+		return
+	end
+	local physs = {}
+	for i, np in ipairs(all) do physs[i] = np[2] end
+	local t, why = gmsky.PhysListPartners(phys, physs)
+	if not t then
+		gmsky.Log(string.format("physground: %s partners of %s: unreadable (%s)", what, label, tostring(why)))
+		return
+	end
+	local parts = {}
+	for i, np in ipairs(all) do
+		if (t[i] or 0) > 0 then parts[#parts + 1] = { np[1], t[i] } end
+	end
+	table.sort(parts, function(x, y) return x[2] > y[2] end)
+	for i, p in ipairs(parts) do parts[i] = string.format("%s %d", p[1], p[2]) end
+	-- Objects not in the entity list: named by the addresses remembered at build time.
+	local gone = {}
+	for _, u in ipairs(t.unlisted_list or {}) do
+		gone[#gone + 1] = string.format("%s = %s: %d records, its list %d/%d, looks alive %s%s", u.addr, G.addrs[u.addr] or "unknown",
+			u.records, u.live, u.slots, tostring(u.alive), u.same > 0 and all[u.same] and (", same entity as " .. all[u.same][1]) or "")
+	end
+	gmsky.Log(string.format("physground: %s partners of %s (%s): %d live (%d by the free chain) of %d slots; records with: %s; with objects not in the entity list %d (%d different objects%s); not a pair record %d; ambiguous %d; read in %.1f ms",
+		what, label, tostring(gmsky.PhysAddress(phys)), t.live, t.chained_live, t.slots, #parts > 0 and table.concat(parts, ", ") or "nothing", t.unlisted,
+		t.unlisted_objects, #gone > 0 and (": " .. table.concat(gone, "; ")) or "", t.not_records, t.ambiguous, t.ms))
+end
+
+-- IVP address ("0x...") -> name, for every object we have seen (meshes when built, the world and
+-- the player at start): names objects that are no longer in the entity list, and lets a crash
+-- dump's RDI (the object whose list overflowed) be matched to a name.
+G.addrs = G.addrs or {}
+function G.Remember(name, phys)
+	if not SERVER or not gmsky.PhysAddress or not IsValid(phys) then return end
+	local addr = gmsky.PhysAddress(phys)
+	if not addr then return end
+	if G.addrs[addr] ~= name then
+		gmsky.Log(string.format("physground: address %s is %s%s", addr, name, G.addrs[addr] and (" (was " .. G.addrs[addr] .. ")") or ""))
+	end
+	G.addrs[addr] = name
+end
+
+-- Partners of the player and of one mesh (small lists): for every setup step.
+function G.PartnersStep(what, mesh)
+	if not SERVER or not gmsky.PhysListPartners then return end
+	local all = G.AllPhys()
+	local ply = ThePlayer()
+	if IsValid(ply) then G.PartnersLog(what, "player", ply:GetPhysicsObject(), all) end
+	if IsValid(mesh) and IsValid(mesh:GetPhysicsObject()) then G.PartnersLog(what, "this mesh", mesh:GetPhysicsObject(), all) end
+end
+
+-- The world, the player and every test mesh with physics.
+function G.PartnersAll(what)
+	if not SERVER or not gmsky.PhysListPartners then return end
+	local all = G.AllPhys()
+	for _, np in ipairs(all) do
+		if np[1] == "world" or np[1] == "player" or np[1]:sub(1, 6) == "mesh b" then G.PartnersLog(what, np[1], np[2], all) end
+	end
+end
+
 -- Partners the hook was asked about for this mesh so far, e.g. "player 12, the world 0".
 local function AskedLine(ent)
 	local parts = {}
@@ -353,6 +476,8 @@ if SERVER then
 		"gmsky_test_physground chunks: chunk width in Skyrim regions (4 = the most today's collection window allows)")
 	G.gridTris = CreateConVar("gmsky_physground_grid", "7400", 0,
 		"gmsky_test_physground ... grid: about this many triangles per mesh (test 109's crashing chunk had 7,413)")
+	G.worldOn = CreateConVar("gmsky_physground_world", "0", 0,
+		"gmsky_test_physground: 1 = the map's world keeps its physics collisions (tests 111-113), 0 = off while test meshes exist (test 114)")
 
 	local function Flag(ent)
 		if not G.test or not IsValid(ent) then return end
@@ -513,9 +638,9 @@ if SERVER then
 			chunks = string.format("; chunks alive (triangles) %d [%s], removed %d, waiting [%s]", #alive, table.concat(alive, ", "),
 				t.removed, #waiting > 0 and table.concat(waiting, "; ") or "-")
 		end
-		gmsky.Log(string.format("physground: %s %s running %.0f s: %d builds (server side %d, %d triangles in all, slowest setup %.2f ms); ShouldCollide asked %d times (%d of them a test mesh and the world: answered no); player's ground in the last 5 s (ticks): %s%s",
+		gmsky.Log(string.format("physground: %s %s running %.0f s: %d builds (server side %d, %d triangles in all, slowest setup %.2f ms); ShouldCollide asked %d times (%d of them a test mesh and the world: answered no); player's ground in the last 5 s (ticks): %s%s%s",
 			MODES[t.mode], SOURCES[t.source], CurTime() - t.started, t.serial, s.builds, s.tris, s.worst, G.shouldCollide, G.worldAsked,
-			#parts > 0 and table.concat(parts, ", ") or "-", chunks))
+			#parts > 0 and table.concat(parts, ", ") or "-", chunks, G.ListsLine(nil)))
 		t.ground = {}
 		G.shouldCollide, G.worldAsked = 0, 0
 	end)
@@ -545,5 +670,11 @@ if SERVER then
 				or string.format("chunks %d x %d regions wide, %d regions tall, built once when the player is within %d region of one, removed beyond %d chunks; cap %d triangles per mesh",
 					G.test.size, G.test.size, BELOW + ABOVE + 1, LEAD, REMOVE_AT, MAX_TRIS),
 			G.test.flatZ, source == GRID and string.format("; grid %d x %d squares = %d triangles per mesh", G.test.gridN, G.test.gridN, G.test.gridN * G.test.gridN * 2) or ""))
+		gmsky.Log(string.format("physground: gmsky_physground_world %d (%s)%s", G.worldOn:GetInt(),
+			G.worldOn:GetBool() and "the world keeps its collisions" or "the world's collisions go off while test meshes exist",
+			G.ListsLine(nil)))
+		G.Remember("world", game.GetWorld():GetPhysicsObject())
+		G.Remember("player", ply:GetPhysicsObject())
+		G.PartnersAll("at start")
 	end)
 end

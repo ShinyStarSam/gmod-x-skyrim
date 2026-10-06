@@ -2291,6 +2291,53 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
     filter never sees. Back on when the experiment stops (server) or the last test mesh goes
     (client). Nothing of ours uses the world through physics: the player, bullets and our ground
     trace against the map. Props away from our meshes would fall through gm_flatmap's floor.
+  - *Then (test 114 crashed with the world's collisions off; user's choice, STATUS.md idea 2):
+    count the lists directly.* Open question: **whose** list fills, and **with what**. Our Rust
+    module reads (never writes) the engine's lists and the Lua code logs them. Plain words: each
+    physics object in the engine (an "IVP object") keeps one list with an entry per pair record
+    it is in; we read how long each list is and, for a few objects, who the other side of every
+    record is.
+    - **Layout used (from Ghidra on `vphysics.dll`, 2026-10-06, read-only):** a pair record
+      ("mindist") holds two halves ("synapses") at record `+0x28` and `+0x60`; each half points
+      at its object at half `+0x20` (`+0x99380`, `+0x97c40`). The object's list is at object
+      `+0xa0`: `+0x00` slots allocated (16 bits, at most 65,532), `+0x02` first free slot, `+0x08`
+      the slots (24 bytes each; slot `+0x10` = the half), `+0x1c` live entries (raised on every
+      add, `+0xaaed0`, lowered on every remove, `+0xab1b0`). Free slots are chained through slot
+      `+0x04`, so live entries = slots minus the free chain (a cross-check of `+0x1c`).
+    - **From Lua to the engine object (not sure, so checked at run time):** a Lua `PhysObj` is a
+      Garry's Mod userdata whose first 8 bytes should point at Valve's physics object
+      (`CPhysicsObject`, its function table inside `vphysics.dll`), which should point at the IVP
+      object (the Source SDK has it at `+0x10`); the IVP object points back at it. The module
+      accepts a pointer only if the function tables lie inside `vphysics.dll` **and** the back
+      pointer is found; it logs once which offsets it found, or why it gave up. All reads go
+      through `ReadProcessMemory` on our own process (as in `d3d.rs`), so a wrong guess gives
+      "unreadable", not a crash.
+    - **New in Rust (`gmod/module/src/physlist.rs`):** `gmsky.PhysList(phys)` -> live, slots, or
+      nil + why. `gmsky.PhysListPartners(phys, others)` -> a table: for each record, the object on
+      the other side, counted per entry of `others` (a Lua array of `PhysObj`s), plus "not in
+      `others`" (and how many different objects that is), "not a pair record" (entries that
+      don't look like a record half) and the read time in ms.
+    - **Logged (server, `physground.lua`):** on every `step:` line and the `built` line: list
+      sizes of the mesh, the world and the player, and the 3 biggest lists of any physics object
+      of any entity. Before every build (and on the 5-second line): who the world's, the
+      player's and the previous mesh's records are with (the world, the player, each test mesh,
+      other entities, unknown). The crash comes inside a step, so its "before" numbers plus the
+      growth per step show which list was heading for 65,532.
+    - **The world switch becomes a setting:** `gmsky_physground_world 0` (default, test 114:
+      the world's collisions off while test meshes exist) or `1` (left on, as in tests 111-113),
+      so the count can be read with and without the world. No other behaviour change.
+    - *Tests:* (1) `gmsky_physground_world 1`, `gmsky_test_physground rebuild grid` (test 111's
+      setup): expect the world's list to grow by ~6 x 7,442 per live mesh if Ghidra's reading is
+      right. (2) `gmsky_physground_world 0`, same command (test 114): shows where the records go
+      when the world is off. Crash or not, the last lines name the list and its size.
+    - *After test 115* (the world's list stayed at 1-2; the crash came on the first walking
+      build, with 193 player records pointing at an object no entity owns): every object's
+      address is logged (`gmsky.PhysAddress`), objects outside the entity list are named by
+      them and reported with their own list size, and the player's and mesh's partners are
+      logged before every step. At the crash instruction, register `rdi` is the overflowing
+      object, so the dump names it.
+    - **Differs from SkyCraft / InfMap2:** neither reads engine memory; this is a diagnostic only,
+      removed or switched off once the cause is known.
 - **S1d (only if S1c's chunks work and the user wants them bigger): Skyrim collects further out.**
   `kRadius` 5 → e.g. 12 regions, and the store keeps regions longer (`EVICT_REGIONS`, `kForget`),
   so a chunk can be one Skyrim cell (8 regions, 4,096 Skyrim units ≈ 2,176 Garry's Mod units) or

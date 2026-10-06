@@ -32,6 +32,8 @@ pub struct Api {
     pub pcall: unsafe extern "C" fn(*mut State, c_int, c_int, c_int) -> c_int,
     pub rawgeti: unsafe extern "C" fn(*mut State, c_int, c_int),
     pub objlen: unsafe extern "C" fn(*mut State, c_int) -> usize,
+    pub touserdata: unsafe extern "C" fn(*mut State, c_int) -> *mut c_void,
+    pub pushnil: unsafe extern "C" fn(*mut State),
 }
 
 #[link(name = "kernel32")]
@@ -80,6 +82,8 @@ fn load() -> Result<Api, String> {
         pcall: sym!("lua_pcall"),
         rawgeti: sym!("lua_rawgeti"),
         objlen: sym!("lua_objlen"),
+        touserdata: sym!("lua_touserdata"),
+        pushnil: sym!("lua_pushnil"),
     })
 }
 

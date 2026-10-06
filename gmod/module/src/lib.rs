@@ -8,6 +8,7 @@ mod capture;
 mod d3d;
 mod hitboxes;
 mod lua;
+mod physlist;
 mod present;
 mod window;
 mod shapes;
@@ -183,7 +184,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 50] = [
+    let funcs: [(&str, lua::CFn); 53] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -234,6 +235,9 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("RenderModel", l_render_model),
         ("RenderFrame", l_render_frame),
         ("RenderStatus", l_render_status),
+        ("PhysList", physlist::l_phys_list),
+        ("PhysListPartners", physlist::l_phys_list_partners),
+        ("PhysAddress", physlist::l_phys_address),
     ];
     for (name, f) in funcs {
         (a.pushnumber)(l, side as f64); // upvalue 1 = side
