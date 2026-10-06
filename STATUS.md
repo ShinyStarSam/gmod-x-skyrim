@@ -1,5 +1,12 @@
 # STATUS
 
+**2026-10-06, tests 120-121: test 119's crash is FIXED (S2b, committed `20a983f`).** With the
+"static" flag added first, 1,515 chunk builds under a stress test, running and props: no crash. The
+old order crashed in `SetSolid` after 55 builds. New problem found in test 121: the player got held
+"in the air" for seconds. The cause: server and client share one memory pool in single-player, so
+our "old mesh still in the engine?" check mistook the other side's new mesh for the old one. Fix S2c
+(the check also requires the mesh's entity link to be empty) is built and **not tested in game**: test 122.
+
 **2026-10-06, after Ghidra on how the engine deletes objects: S2 (physics chunks, `gmsky_ground
 physics`) is still BLOCKED by test 119's crash, but now with a planned fix (step S2b in
 `docs/DESIGN.md`), waiting for the user's go-ahead.** The deletion code shows a destroyed mesh

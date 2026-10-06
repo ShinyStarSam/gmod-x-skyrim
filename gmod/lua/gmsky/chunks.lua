@@ -79,7 +79,8 @@ end
 
 -- nil if no old mesh of `key`, and none overlapping the world box `lo`-`hi` (if given), is still in
 -- the engine (each departure logged once); otherwise a line naming those still there. Gone = no
--- longer looks alive, or its address now belongs to another physics object (freed and reused).
+-- longer looks alive, or its address now belongs to another physics object (freed and reused, by
+-- this side or, test 121, by the other side: one heap in single-player; gmsky.PhysAlive tells).
 function C.StillInEngine(key, lo, hi)
 	local mine = {}
 	for addr, d in pairs(C.dead) do
@@ -91,17 +92,18 @@ function C.StillInEngine(key, lo, hi)
 	for _, addr in ipairs(mine) do
 		local d = C.dead[addr]
 		local ms, ticks = (SysTime() - d.t0) * 1000, engine.TickCount() - d.tick0
-		local alive, live, slots = false, 0, 0
+		local alive, live, slots, reused = false, 0, 0, false
 		if d.noaddr or not gmsky.PhysAlive then
 			alive = ticks < FALLBACK_TICKS
 		elseif not owners[addr] then
-			alive, live, slots = gmsky.PhysAlive(addr)
+			alive, live, slots, reused = gmsky.PhysAlive(addr)
 		end
 		if alive then
 			still[#still + 1] = string.format("%s (%s, its list %d/%d, %.0f ms / %d ticks ago)", d.name, addr, live, slots, ms, ticks)
 		else
 			gmsky.Log(string.format("chunks: %s (%s) gone from the engine %.0f ms, %d ticks after it was destroyed (%s)", d.name, addr, ms, ticks,
-				owners[addr] and ("its memory now belongs to " .. owners[addr]) or (d.noaddr or not gmsky.PhysAlive) and string.format("no address: waited %d ticks", FALLBACK_TICKS) or "no longer looks alive"))
+				owners[addr] and ("its memory now belongs to " .. owners[addr]) or (d.noaddr or not gmsky.PhysAlive) and string.format("no address: waited %d ticks", FALLBACK_TICKS)
+				or reused and "its memory now holds a new object with an entity, not on this side: the other side's" or "no longer looks alive"))
 			C.dead[addr] = nil
 		end
 	end

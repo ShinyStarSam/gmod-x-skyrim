@@ -105,8 +105,8 @@ fn looks_alive(vp: &Image, ivp: usize) -> bool {
     engine_object(vp, ivp) && engine_object(vp, c) && read_u64(c + to_ivp) == Some(ivp)
 }
 
-/// Valve's "game data" of a CPhysicsObject (Source SDK: the first field, +0x08, the entity).
-/// Not checked against Ghidra: only used to say two objects share it.
+/// Valve's "game data" of a CPhysicsObject (+0x08, the entity). Checked with Ghidra (2026-10-06):
+/// CPhysicsObject's SetGameData (slot +0x80) writes +0x08, GetGameData (slot +0x88) reads it.
 fn game_data(ivp: usize) -> usize {
     match cphys_of(ivp) {
         0 => 0,
@@ -168,20 +168,27 @@ pub unsafe extern "C" fn l_phys_address(l: *mut State) -> c_int {
     })
 }
 
-/// gmsky.PhysAlive("0x...") -> looks alive, live entries, slots of its list. For an object whose
-/// physics was destroyed: does the engine still hold it? "Looks alive" = function tables in
-/// vphysics.dll and the CPhysicsObject <-> IVP object pointers still agree. Freed memory that
-/// nothing reused yet can still look alive, so the Lua side also checks for reuse by a new object.
+/// gmsky.PhysAlive("0x...") -> still held, live entries, slots of its list, reused. For an object
+/// whose physics was destroyed: does the engine still hold it? "Still held" = function tables in
+/// vphysics.dll and the CPhysicsObject <-> IVP object pointers still agree, **and** its game data
+/// is empty: `PhysDestroyObject` clears it before the engine's delete (Ghidra: CPhysicsObject slot
+/// +0x80 writes +0x08), while every new object gets its entity as game data when made. `reused` =
+/// the pointers agree but the game data is set: the memory now holds a new, live object. In
+/// single-player the server and the client share one heap, so that can be the other side's (test
+/// 121: half of the slow "gone"s), which the Lua side's own entity list can't see.
 pub unsafe extern "C" fn l_phys_alive(l: *mut State) -> c_int {
     crate::guarded(l, |a, _| {
         let text = lua::to_string(a, l, 1).unwrap_or_default();
         let addr = usize::from_str_radix(text.trim_start_matches("0x"), 16).unwrap_or(0);
-        let alive = addr != 0 && vphysics().is_some_and(|vp| looks_alive(vp, addr));
+        let looks = addr != 0 && vphysics().is_some_and(|vp| looks_alive(vp, addr));
+        let reused = looks && game_data(addr) != 0;
+        let alive = looks && !reused;
         let (live, slots) = if alive { header(addr).map(|h| (h.3, h.0)).unwrap_or((0, 0)) } else { (0, 0) };
         (a.pushboolean)(l, alive as c_int);
         (a.pushnumber)(l, live as f64);
         (a.pushnumber)(l, slots as f64);
-        3
+        (a.pushboolean)(l, reused as c_int);
+        4
     })
 }
 
