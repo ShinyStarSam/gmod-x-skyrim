@@ -64,8 +64,10 @@ reconstructed by Community Shaders. Thank you to its authors.
   `package/Shaders/Utility.hlsl` (`RENDER_SHADOWMAP_PB` and `RENDER_SHADOWMASKDPB`)
 - License of the shader files used: MIT (`package/Shaders/LICENSE`, full text below). The rest of
   that repository is under other terms; nothing else from it is used.
-- Adapted in this project: `skse/src/World.cpp` `ParabolicLookup` (the dual-paraboloid lookup:
-  light-local position, hemisphere choice, uv, depth = length / radius).
+- Adapted in this project: `skse/src/World.cpp`: `ParabolicLookup` / `ParaboloidLight` (the
+  dual-paraboloid lookup: light-local position, hemisphere choice, uv, depth = length / radius, and
+  its soft 8-sample filter), `IndoorShadowVS` (drawing a dual-paraboloid map), and the 8 spiral
+  sample offsets from `package/Shaders/Common/Random.hlsli` (Jimenez's, as Community Shaders lists them).
 
 ```
 MIT License

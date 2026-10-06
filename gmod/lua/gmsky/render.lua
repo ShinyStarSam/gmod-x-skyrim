@@ -315,8 +315,8 @@ function R.Frame()
 				local held = heldOn and e:GetNW2Bool("gmsky_held", false)
 				flat[n + 1], flat[n + 2], flat[n + 3] = entry.id, c.r + c.g * 256 + c.b * 65536 + c.a * 16777216, entry.bones
 				flat[n + 4], flat[n + 5] = R.EntityNumber(e), held and 1 or 0
-				-- Step N1: NPCs, nextbots and players get a soft contact shadow under their feet in
-				-- Skyrim (SkyCraft's, for its players and mobs): feet and collision box size; width 0 = none.
+				-- Step N1: NPCs, nextbots and players: feet and collision box size (Skyrim probes their sun
+				-- shadow; the contact shadow it once drew from these was removed 2026-10-06); width 0 = none.
 				local feet, width, height = e:GetPos(), 0, 0
 				if e:IsNPC() or e:IsNextBot() or e:IsPlayer() then
 					local lo, hi = e:OBBMins(), e:OBBMaxs()
@@ -373,7 +373,7 @@ function R.Status()
 	end
 	local textures = 0
 	for _, id in pairs(R.textures) do if id > 0 then textures = textures + 1 end end
-	local line = string.format("render: %s; %d frames, %.1f objects a frame, %.1f held (gmsky_render_held %s), %.1f with contact shadows, %d skipped (model not ready / can't be drawn); "
+	local line = string.format("render: %s; %d frames, %.1f objects a frame, %.1f held (gmsky_render_held %s), %.1f characters, %d skipped (model not ready / can't be drawn); "
 		.. "models %d ok, %d can't be drawn (%d new, %.1f ms avg, %.1f max); textures %d (%d new, %d failed); Lua %.2f ms a frame avg, %.2f max",
 		R.cvar:GetBool() and "on" or "off (gmsky_render 0)", s.frames, s.frames > 0 and s.objects / s.frames or 0,
 		s.frames > 0 and s.held / s.frames or 0, R.held:GetString(), s.frames > 0 and s.contact / s.frames or 0, s.skipped,

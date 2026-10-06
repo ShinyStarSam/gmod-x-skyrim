@@ -1968,7 +1968,9 @@ they hide what's behind them.
   "Perfect"). New report: NPCs "don't seem to be affected by shadows", "pop out a ton and look very
   flat"; lights do reach them. NPCs and props go through the same shader and the same shadow
   lookups, so the reason is not certain. Two parts:
-  - *Contact shadows (SkyCraft's BlobAO, MIT), which we had left out.* SkyCraft darkens the ground
+  - *Contact shadows (SkyCraft's BlobAO, MIT), which we had left out.* **Removed again 2026-10-06 at
+    the user's request** ("remove that fake contact shadow"); the feet data stays for the NPC probe.
+    SkyCraft darkens the ground
     softly under every player's and mob's feet, because its bodies are drawn after Skyrim's own
     ambient occlusion and "would otherwise look pasted onto the ground". Garry's Mod now marks NPCs,
     nextbots and players (`GMSKY_RND_OBJ_CONTACT`) and sends their feet (`GetPos`) and size
@@ -2045,6 +2047,13 @@ they hide what's behind them.
     (least recently drawn light gives up its slot); our point lights with a slot get Skyrim's lookup
     (bias 0.005, 3 x 3 texels) on their diffuse and shine. Lights listed both as lights and as shadow
     lights are used once. Details and test: MODLOG.md.
+  - *I2 works (test 94).* *I3 built (2026-10-06):* our objects drawn into our own dual-paraboloid
+    map per slot (1024 x 1024, Skyrim's layout and formula); the darkening pass removes the blocked
+    lights' share from Skyrim's pixels, and our objects shadow each other with the same maps.
+  - *I3 works (test 95, user: "Flawless").* *Softer edges (built 2026-10-06):* both kinds of indoor
+    lookup use Skyrim's own filter (8 filtered samples on a spiral, turned per pixel and per frame,
+    smoothed by Skyrim's TAA) instead of 3 x 3 hard samples; radius 0.006 of the map (chosen by eye;
+    Skyrim's own radius, fPoissonRadiusScale, not known).
   - **I2. Skyrim's indoor shadows on our objects.** Copy each active shadow light's slice after
     it renders (kept with its transforms, as `CaptureSunShadows` does for the sun). In our pixel
     shader, each point light that is a shadow light gets a visibility from its map (the formula

@@ -64,7 +64,6 @@ namespace gmsky::World
 		constexpr float kCubeDistance = 300.0f;  // in front of the camera, level
 		constexpr float kCubeDrop = 60.0f;       // centre this far below the camera
 		constexpr int kMaxLights = 16;           // SkyCraft's number
-		constexpr int kMaxBlobs = 24;            // contact shadows (SkyCraft's number)
 		constexpr int kProbeCharacters = 5;      // step N1: characters whose sun shadow is probed (3 points each)
 		constexpr int kProbePoints = 16;
 		constexpr float kPi = 3.14159265f;
@@ -125,18 +124,19 @@ cbuffer Frame : register(b0)
 	float4 depthParams;                   // near, far, reversed
 	float4 screen;                        // 1 / width, 1 / height
 	float4 switches;                      // x: normal maps' green the other way, y: normal maps on, z: phong on, w: colour textures to linear
-	float4 aoParams;                      // x: contact shadow count; y: shadow debug colours (gmsky_render_shadow_debug 1)
-	float4 aoBlobs[24];                   // Garry's Mod's NPCs' and players' feet, camera-relative; w: radius (step N1)
+	float4 aoParams;                      // x: unused (was the contact shadow count); y: shadow debug colours (gmsky_render_shadow_debug 1)
 	float4 probePts[16];                  // the NPC shadow probe's points, camera-relative
 	row_major float4x4 indoorProj[4];     // step I2: Skyrim's indoor shadow lights' transforms, camera-relative -> light-local
 	float4 indoorParams;                  // x: bias (units of the radius), y: slots in use, z, w: map width, height
+	float4 indoorOurs;                    // step I3: x: our objects' indoor maps on, y: their size, z: bias, w: normal offset (units)
+	float4 indoorSoft;                    // softer indoor shadow edges: x: sample radius (map uv), y: frame number (0-63)
 };
 cbuffer Object : register(b1)
 {
 	float4 objOffset;  // xyz: the anchor (Skyrim's origin) relative to the camera, Skyrim units; w: Skyrim units per Garry's Mod unit
 	uint4  objInfo;    // x: the object's first matrix in boneRows (x 3 rows); y: GMSKY_RND_MAT_* of this part; z: held; w: has a normal map
 	float4 objColor;   // the object's tint
-	float4 objAlpha;   // x: alpha reference (alpha-tested parts); y: phong exponent; z: phong boost; w: a character (has a contact shadow)
+	float4 objAlpha;   // x: alpha reference (alpha-tested parts); y: phong exponent; z: phong boost; w: a character (unused since contact shadows were removed)
 	float4 held[3];    // held objects: camera-relative position then -> now (rows of [rotation | translation])
 	float4 objFresnel; // xyz: $phongfresnelranges (head-on, middle, grazing); w: $phongalbedotint
 	float4 objTint;    // rgb: $phongtint; w: has a $phongexponenttexture
@@ -153,6 +153,7 @@ Texture2D skyrimMask : register(t7);                   // Skyrim's screen-space 
 Texture2D phongExponent : register(t8);                // the part's $phongexponenttexture (linear)
 Texture2D selfIllumMask : register(t9);                // the part's $selfillummask (linear)
 Texture2DArray<float> indoorShadowMaps : register(t11); // step I2: Skyrim's indoor shadow maps, copied (one slot per light)
+Texture2DArray<float> ourIndoorMaps : register(t12);    // step I3: our objects seen from the same lights (same slots)
 SamplerState albedoSampler : register(s0);
 SamplerState pointSampler : register(s1);
 SamplerComparisonState shadowSampler : register(s2);
@@ -376,53 +377,95 @@ float SkyrimSunShadow(float3 rel, float3 n, float viewZ)
 	return lerp(lit / 9.0, 1.0, saturate((viewZ - end * 0.85) / (end * 0.15)));  // fade out at the far end
 }
 
-// Soft contact shadows under Garry's Mod's NPCs and players (SkyCraft's BlobAO, MIT: their bodies
-// are drawn after Skyrim's own ambient occlusion, so they'd otherwise look pasted onto the ground):
-// the ground darkens most right under the feet and fades out over about a body's width.
-// Ground-facing surfaces only.
-float BlobAO(float3 rel, float3 n)
-{
-	float up = saturate(n.z * 1.25);
-	float ao = 1.0;
-	if (up <= 0.0) {
-		return ao;
-	}
-	for (int k = 0; k < (int)aoParams.x; ++k) {
-		float3 dv = rel - aoBlobs[k].xyz;
-		float  r = aoBlobs[k].w;
-		float  h = length(dv.xy) / r;
-		if (h < 1.0 && dv.z > -0.45 * r && dv.z < 0.4 * r) {
-			float fall = 1.0 - h;
-			float vert = 1.0 - saturate(abs(dv.z) / (0.45 * r));
-			ao *= 1.0 - 0.6 * fall * fall * vert * up;
-		}
-	}
-	return ao;
-}
 
 )"  // MSVC caps one string literal at 16 KB
-			R"(// Step I2: how much of an indoor shadow light reaches a point (1 = all), from Skyrim's own copied
+			R"(// Steps I2 / I3: how much of an indoor shadow light reaches a point (1 = all) in a dual-paraboloid
 // map: Skyrim's lookup as Community Shaders reconstructs it (Utility.hlsl, RENDER_SHADOWMASKDPB, MIT;
 // checked against Skyrim's own shadow mask in test 93: 99.86%), 3 x 3 texels kept inside the half.
-float IndoorShadow(float3 rel, uint slot, float invRadius)
+// Used on Skyrim's copied maps (I2) and on our objects' own maps, drawn the same way (I3).
+// Softer edges, Skyrim's way (Community Shaders' Utility.hlsl SampleDualParaboloidShadowPCF, MIT):
+// 8 filtered samples on a spiral (Jimenez's SpiralSampleOffsets8, from Community Shaders'
+// Random.hlsli), turned by a per-pixel angle that changes every frame (interleaved gradient noise);
+// Skyrim's TAA blends the frames into a smooth edge.
+static const float2 kSpiral8[8] = { float2(-0.7071, 0.7071), float2(0.0, -0.875), float2(0.5303, 0.5303), float2(-0.625, 0.0),
+	float2(0.3536, -0.3536), float2(0.0, 0.375), float2(-0.1768, -0.1768), float2(0.125, 0.0) };
+float InterleavedGradientNoise(float2 pix, float frame)
+{
+	pix += 5.588238 * frame;
+	return frac(52.9829189 * frac(dot(pix, float2(0.06711056, 0.00583715))));
+}
+float ParaboloidLight(Texture2DArray<float> maps, float2 size, float bias, float3 rel, uint slot, float invRadius, float2 pix)
 {
 	float3 p = mul(float4(rel, 1.0), indoorProj[slot]).xyz;
 	bool   lower = p.z * 0.5 + 0.5 < 0.0;
 	float3 dir = normalize(normalize(p) + float3(0.0, 0.0, lower ? -1.0 : 1.0));
 	float2 uv = dir.xy / dir.z * 0.5 + 0.5;
 	uv.y = lower ? 1.0 - 0.5 * uv.y : 0.5 * uv.y;
-	float  cmp = saturate(length(p) * invRadius) - indoorParams.x;
-	int2   size = int2(indoorParams.zw);
-	int2   base = int2(uv * indoorParams.zw);
-	int    ylo = lower ? size.y / 2 : 0, yhi = lower ? size.y - 1 : size.y / 2 - 1;
+	float  cmp = saturate(length(p) * invRadius) - bias;
+	float2 cs;
+	sincos(6.2831853 * InterleavedGradientNoise(pix, indoorSoft.y), cs.y, cs.x);
+	float2x2 rot = float2x2(cs.x, cs.y, -cs.y, cs.x);
+	float  edge = 0.5 / size.y;  // keep every sample inside its own half
+	float  ylo = lower ? 0.5 + edge : edge, yhi = lower ? 1.0 - edge : 0.5 - edge;
 	float  vis = 0.0;
-	[unroll] for (int dy = -1; dy <= 1; ++dy) {
-		[unroll] for (int dx = -1; dx <= 1; ++dx) {
-			int2 t = int2(clamp(base.x + dx, 0, size.x - 1), clamp(base.y + dy, ylo, yhi));
-			vis += indoorShadowMaps.Load(int4(t, slot, 0)) >= cmp ? 1.0 : 0.0;
-		}
+	[unroll] for (int k = 0; k < 8; ++k) {
+		float2 o = mul(kSpiral8[k], rot) * indoorSoft.x;
+		o.y *= 0.5;  // a half is half as tall as it is wide: the same angle either way
+		vis += maps.SampleCmpLevelZero(shadowSampler, float3(uv.x + o.x, clamp(uv.y + o.y, ylo, yhi), slot), cmp);
 	}
-	return vis / 9.0;
+	return vis / 8.0;
+}
+
+// Skyrim's own geometry between the light and the point (step I2).
+float IndoorShadow(float3 rel, uint slot, float invRadius, float2 pix)
+{
+	return ParaboloidLight(indoorShadowMaps, indoorParams.zw, indoorParams.x, rel, slot, invRadius, pix);
+}
+
+// Our objects between the light and the point (step I3); n pushes the lookup off the surface so our
+// own faces don't shadow themselves.
+float OurIndoorShadow(float3 rel, float3 n, uint slot, float invRadius, float2 pix)
+{
+	return indoorOurs.x > 0.5 ? ParaboloidLight(ourIndoorMaps, indoorOurs.yy, indoorOurs.z, rel + n * indoorOurs.w, slot, invRadius, pix) : 1.0;
+}
+
+// Step I3: our objects into our own dual-paraboloid map of one indoor shadow light, one half at a
+// time (Skyrim's RENDER_SHADOWMAP_PB as Community Shaders reconstructs it, MIT): uv from the
+// direction, depth = distance / radius; the other half's side is clipped away.
+cbuffer IndoorPass : register(b3)
+{
+	float4 indoorPass;  // x: slot, y: +1 upper half / -1 lower half, z: 1 / radius
+};
+struct IndoorShadowOut
+{
+	float4 pos : SV_Position;
+	float2 uv : TEXCOORD0;
+	float  clip : SV_ClipDistance0;
+};
+IndoorShadowOut IndoorShadowVS(ModelIn i)
+{
+	float3 p, q, n, t;
+	Skin(i, p, q, n, t);
+	float3 rel = objOffset.xyz + p * objOffset.w;
+	if (objInfo.z != 0) {
+		rel = Held(rel);
+	}
+	float3 lp = mul(float4(rel, 1.0), indoorProj[(uint)indoorPass.x]).xyz;
+	float  len = max(length(lp), 1e-4);
+	float  side = indoorPass.y;
+	float3 dir = normalize(lp / len + float3(0.0, 0.0, side));
+	float2 xy = dir.xy / dir.z;
+	IndoorShadowOut o;
+	o.pos = float4(xy.x, side > 0.0 ? -xy.y : xy.y, len * indoorPass.z, 1.0);  // upper half: v down = +y
+	o.uv = i.uv;
+	o.clip = side * (lp.z + 1.0);  // the lookup's split: lower half where lp.z < -1
+	return o;
+}
+void IndoorShadowPS(IndoorShadowOut i)
+{
+	if ((objInfo.y & 0x4u) && albedo.SampleLevel(albedoSampler, i.uv, 0).a * objColor.a < objAlpha.x) {
+		discard;
+	}
 }
 
 PSOut ModelPS(ModelOut i)
@@ -484,7 +527,7 @@ PSOut ModelPS(ModelOut i)
 			spec += sunColor.rgb * sunVisible * pow(saturate(dot(reflect(-L, n), V)), expo) * saturate(dot(n, L));
 		}
 		uint  count = (uint)sunColor.w;
-		float indoorAll = 0.0, indoorLit = 0.0;  // light from Skyrim's indoor shadow lights (debug colours)
+		float indoorAll = 0.0, indoorLit = 0.0, indoorOursLit = 0.0;  // light from Skyrim's indoor shadow lights (debug colours)
 		for (uint k = 0; k < count; ++k) {
 			float3 d = lightPos[k].xyz - i.rel;
 			float  f = saturate(length(d) * lightPos[k].w);
@@ -492,11 +535,13 @@ PSOut ModelPS(ModelOut i)
 			float3 power = lightColor[k].rgb * (1.0 - f * f);
 			uint   slot = (uint)lightColor[k].w;  // step I2: 1 + its copied shadow map, 0 = none
 			if (slot > 0) {
-				float v = IndoorShadow(i.rel, slot - 1, lightPos[k].w);
+				float v = IndoorShadow(i.rel, slot - 1, lightPos[k].w, i.pos.xy);
+				float vo = OurIndoorShadow(i.rel, geo, slot - 1, lightPos[k].w, i.pos.xy);  // step I3: our objects in the way
 				float e = dot(power, float3(0.2125, 0.7154, 0.0721)) * saturate(dot(geo, l));
 				indoorAll += e;
 				indoorLit += e * v;
-				power *= v;
+				indoorOursLit += e * vo;
+				power *= v * vo;
 			}
 			lit += power * saturate(dot(n, l));
 			if (phong && dot(geo, l) > 0.0) {
@@ -512,17 +557,16 @@ PSOut ModelPS(ModelOut i)
 			c = lerp(c, t.rgb * objSelfIllum.rgb, glowMask);
 		}
 		c += spec * (objAlpha.z * mask * fresnel) * ptint;
-		if (objAlpha.w < 0.5) {
-			c *= BlobAO(i.rel, geo);  // a prop next to a character's feet (SkyCraft darkens its blocks so)
-		}
 		if (aoParams.y > 0.5) {
 			// gmsky_render_shadow_debug 1 (step N1): red = in Skyrim's sun shadow, green = Skyrim's sun
 			// reaches it, blue = in our objects' shadow; yellow = sun shadows off here. Indoors (step I2):
-			// red = Skyrim's indoor shadow lights blocked, green = they reach it, by their share of light.
+			// red = Skyrim's indoor shadow lights blocked, green = they reach it, by their share of light;
+			// blue added = our objects block them (step I3).
 			float sky = SkyrimSunShadow(i.rel, geo, i.viewZ);
 			float ours = SunShadow(i.rel, geo);
 			float inside = indoorAll > 1e-4 ? indoorLit / indoorAll : -1.0;
-			c = shadowParams.x > 0.5 ? float3(1.0 - sky, sky, 1.0 - ours) * 0.5 : inside >= 0.0 ? float3(1.0 - inside, inside, 0.0) * 0.5 : float3(0.5, 0.5, 0.0);
+			float insideOurs = indoorAll > 1e-4 ? indoorOursLit / indoorAll : 1.0;
+			c = shadowParams.x > 0.5 ? float3(1.0 - sky, sky, 1.0 - ours) * 0.5 : inside >= 0.0 ? float3(1.0 - inside, inside, 1.0 - insideOurs) * 0.5 : float3(0.5, 0.5, 0.0);
 		}
 	}
 	if (fogNear.w > 0.5) {
@@ -540,7 +584,8 @@ PSOut ModelPS(ModelOut i)
 	return po;
 }
 
-// ---- Full-screen passes ----
+)"  // MSVC caps one string literal at 16 KB
+			R"(// ---- Full-screen passes ----
 float4 FullVS(uint id : SV_VertexID) : SV_Position
 {
 	float2 uv = float2((id << 1) & 2, id & 2);
@@ -563,16 +608,38 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
 	float3 n = normalize(cross(ddy(rel), ddx(rel)));
 	n = dot(n, rel) > 0 ? -n : n;
 	float shadow = dot(rel, rel) > shadowExtra.y ? 1.0 : SunShadow(rel, n);
-	float ao = BlobAO(rel, n);  // under NPCs and players (step N1, SkyCraft's)
-	if (shadow > 0.999 && ao > 0.999) {
+	float3 lumW = float3(0.2125, 0.7154, 0.0721);
+	float  ambL = dot(Ambient(n), lumW);
+	// Step I3: our objects' shadows from Skyrim's indoor shadow lights. The light Skyrim lit this pixel
+	// with (ambient + each light x what its own map lets through), less the share of the lights our
+	// objects block here: the indoor form of the sun's keep below.
+	float indoorKeep = 1.0;
+	if (indoorOurs.x > 0.5) {
+		float total = ambL + 0.02, removed = 0.0;
+		uint  count = (uint)sunColor.w;
+		for (uint k = 0; k < count; ++k) {
+			float3 d = lightPos[k].xyz - rel;
+			float  f = saturate(length(d) * lightPos[k].w);
+			if (f >= 1.0) {
+				continue;
+			}
+			float e = dot(lightColor[k].rgb, lumW) * (1.0 - f * f) * saturate(dot(n, normalize(d)));
+			uint  slot = (uint)lightColor[k].w;
+			if (slot > 0 && e > 0.0) {
+				e *= IndoorShadow(rel, slot - 1, lightPos[k].w, pos.xy);  // Skyrim already shadowed it there: nothing to take
+				removed += e * (1.0 - OurIndoorShadow(rel, n, slot - 1, lightPos[k].w, pos.xy));
+			}
+			total += e;
+		}
+		indoorKeep = 1.0 - removed / total;
+	}
+	if (shadow > 0.999 && indoorKeep > 0.999) {
 		discard;
 	}
 	float  skyrimLit = shadowExtra.x > 0.5 ? saturate(skyrimMask.SampleLevel(pointSampler, uv, 0).r) : 1.0;
-	float3 lumW = float3(0.2125, 0.7154, 0.0721);
-	float  ambL = dot(Ambient(n), lumW);
 	float  sunL = dot(sunColor.rgb, lumW) * saturate(dot(n, sunDir.xyz));
 	float  keep = (ambL + 0.02) / (ambL + sunL + 0.02);
-	return float4(lerp(1.0, keep, (1.0 - shadow) * skyrimLit).xxx * ao, 1.0);
+	return float4(lerp(1.0, keep, (1.0 - shadow) * skyrimLit).xxx * indoorKeep, 1.0);
 }
 
 // 16 samples of Skyrim's shadow mask across the screen (SkyCraft's probe points), to see whether it
@@ -688,10 +755,11 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 			float screen[4];
 			float switches[4];
 			float aoParams[4];
-			float aoBlobs[kMaxBlobs][4];
 			float probePts[kProbePoints][4];
 			float indoorProj[4][4][4];  // step I2
 			float indoorParams[4];
+			float indoorOurs[4];  // step I3
+			float indoorSoft[4];
 		};
 		static_assert(sizeof(FrameConstants) % 16 == 0);
 
@@ -807,6 +875,21 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 			int64_t qpc = 0;
 		};
 		IndoorSlot g_indoorSlot[kIndoorSlots]{};
+		// Step I3: our objects seen from the same lights, one 1024 x 1024 dual-paraboloid map per slot
+		// (two 1024 x 512 halves, Skyrim's layout); bias and normal offset keep our faces from shadowing
+		// themselves (a texel covers ~2 units at 300 units from the light).
+		constexpr UINT kOurIndoorSize = 1024;
+		constexpr float kOurIndoorBias = 0.003f, kOurIndoorOffset = 3.0f;
+		// Softer indoor edges: the spiral's radius in map uv (same angle on Skyrim's 4096 maps and our
+		// 1024 ones; ~7 units of penumbra at 300 units from the light). Chosen by eye, not Skyrim's own number.
+		constexpr float kIndoorSoftUv = 0.006f;
+		uint32_t g_frameNumber = 0;
+		ID3D11Texture2D* g_ourIndoorTex = nullptr;
+		ID3D11DepthStencilView* g_ourIndoorDsv[kIndoorSlots]{};
+		ID3D11ShaderResourceView* g_ourIndoorSrv = nullptr;
+		ID3D11VertexShader* g_indoorShadowVs = nullptr;
+		ID3D11PixelShader* g_indoorShadowPs = nullptr;
+		ID3D11Buffer* g_indoorPassCb = nullptr;
 		uint32_t g_indoorW = 0, g_indoorH = 0;
 		std::atomic<uint32_t> g_indoorCopies{ 0 }, g_indoorEvictions{ 0 };
 
@@ -914,10 +997,10 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 			bool maskUsable = false;
 			const char* shadowWhy = "";
 			// Step N1
-			uint64_t contactBlobs = 0, contactFrames = 0;
 			uint64_t selfIllumCalls = 0;  // test 88
 			// Step I2
 			uint64_t indoorShadowed = 0, indoorMoved = 0, duplicateLights = 0, lightFrames = 0;
+			uint64_t indoorMaps = 0, indoorCasters = 0, indoorOverlayFrames = 0;  // step I3
 			double indoorAgeMsMax = 0;
 		};
 		std::mutex g_seenLock;
@@ -1148,6 +1231,53 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 				a_device->CreateBuffer(&pcb, nullptr, &g_plCb);
 			}
 			logger::info("indoor shadow probe I1b: {}", g_plProbePs && g_plProbeRtv && g_plProbeStaging && g_plCb ? "ready" : "couldn't be set up (off)");
+			// Step I3: our objects' indoor shadow maps (optional: without them, Skyrim's indoor shadows still fall on our objects).
+			{
+				ID3DBlob *vsBlob = nullptr, *psBlob = nullptr;
+				if (Compile("IndoorShadowVS", "vs_5_0", &vsBlob) && Compile("IndoorShadowPS", "ps_5_0", &psBlob)) {
+					a_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_indoorShadowVs);
+					a_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_indoorShadowPs);
+				}
+				Release(vsBlob);
+				Release(psBlob);
+				D3D11_TEXTURE2D_DESC td{};
+				td.Width = td.Height = kOurIndoorSize;
+				td.MipLevels = 1;
+				td.ArraySize = kIndoorSlots;
+				td.Format = DXGI_FORMAT_R32_TYPELESS;
+				td.SampleDesc.Count = 1;
+				td.Usage = D3D11_USAGE_DEFAULT;
+				td.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+				a_device->CreateTexture2D(&td, nullptr, &g_ourIndoorTex);
+				if (g_ourIndoorTex) {
+					for (UINT s = 0; s < kIndoorSlots; ++s) {
+						D3D11_DEPTH_STENCIL_VIEW_DESC dv{};
+						dv.Format = DXGI_FORMAT_D32_FLOAT;
+						dv.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+						dv.Texture2DArray.FirstArraySlice = s;
+						dv.Texture2DArray.ArraySize = 1;
+						a_device->CreateDepthStencilView(g_ourIndoorTex, &dv, &g_ourIndoorDsv[s]);
+					}
+					D3D11_SHADER_RESOURCE_VIEW_DESC sv{};
+					sv.Format = DXGI_FORMAT_R32_FLOAT;
+					sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+					sv.Texture2DArray.MipLevels = 1;
+					sv.Texture2DArray.ArraySize = kIndoorSlots;
+					a_device->CreateShaderResourceView(g_ourIndoorTex, &sv, &g_ourIndoorSrv);
+				}
+				D3D11_BUFFER_DESC icb{};
+				icb.ByteWidth = 16;
+				icb.Usage = D3D11_USAGE_DYNAMIC;
+				icb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+				icb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+				a_device->CreateBuffer(&icb, nullptr, &g_indoorPassCb);
+				const bool dsvs = std::ranges::all_of(g_ourIndoorDsv, [](auto* d) { return d != nullptr; });
+				const bool ok = g_indoorShadowVs && g_indoorShadowPs && g_ourIndoorSrv && g_indoorPassCb && dsvs;
+				if (!ok) {
+					Release(g_ourIndoorSrv);  // the shaders check this one
+				}
+				logger::info("indoor shadows: our objects' maps ({} x {} x {}) {}", kOurIndoorSize, kOurIndoorSize, kIndoorSlots, ok ? "ready" : "couldn't be set up (our objects cast no indoor shadows)");
+			}
 
 			// A 1x1 white texture for parts without one.
 			const uint32_t white = 0xFFFFFFFFu;
@@ -1175,7 +1305,7 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 			}
 			g_device = a_device;
 			g_device->AddRef();
-			logger::info("in-frame drawing: ready (test cube {}, model drawing on, Skyrim's light, held objects follow the camera, shadows, normal maps, phong, contact shadows)", kTestCube ? "on" : "off");
+			logger::info("in-frame drawing: ready (test cube {}, model drawing on, Skyrim's light, held objects follow the camera, shadows, normal maps, phong, indoor shadows)", kTestCube ? "on" : "off");
 			return true;
 		}
 
@@ -1820,12 +1950,12 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 			g_maskProbePending = true;
 		}
 
-		// ---- Step N1: contact shadows under Garry's Mod's NPCs and players, and their sun shadow probe ----
+		// ---- Step N1: the sun shadow probe on Garry's Mod's NPCs and players ----
+		// (Their contact shadows, SkyCraft's BlobAO, were removed on 2026-10-06 at the user's request.)
 
-		// The feet of Garry's Mod's NPCs, nextbots and players near the camera, nearest first, for their
-		// contact shadows (SkyCraft's GatherContactShadows: radius 1.25 x max(width, half a block));
-		// the nearest few also get the probe's points (feet, middle, top).
-		void GatherContactShadows(FrameConstants& a_fc, const RE::NiPoint3& a_cam, Seen& a_seen)
+		// The feet of Garry's Mod's NPCs, nextbots and players near the camera, nearest first; the
+		// nearest few get the probe's points (feet, middle, top).
+		void GatherProbeCharacters(FrameConstants& a_fc, const RE::NiPoint3& a_cam)
 		{
 			g_probeNextCount = 0;
 			const auto& frame = Render::NewestFrame();
@@ -1851,18 +1981,10 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 				const float rx = float(origin.skyrim_origin[0] + o.feet[0] * per - double(a_cam.x));
 				const float ry = float(origin.skyrim_origin[1] + o.feet[1] * per - double(a_cam.y));
 				const float rz = float(origin.skyrim_origin[2] + o.feet[2] * per - double(a_cam.z));
-				const float radius = std::max(float(o.width * per), 35.0f) * 1.25f;
-				blobs.push_back({ rx * rx + ry * ry + rz * rz, { rx, ry, rz, radius }, float(o.height * per), o.entity });
+				blobs.push_back({ rx * rx + ry * ry + rz * rz, { rx, ry, rz, 0.0f }, float(o.height * per), o.entity });
 			}
 			std::ranges::sort(blobs, {}, &Blob::d2);
-			const auto count = std::min<std::size_t>(blobs.size(), kMaxBlobs);
-			for (std::size_t k = 0; k < count; ++k) {
-				std::memcpy(a_fc.aoBlobs[k], blobs[k].v, sizeof(blobs[k].v));
-			}
-			a_fc.aoParams[0] = float(count);
-			a_seen.contactBlobs += count;
-			++a_seen.contactFrames;
-			const auto probed = std::min<std::size_t>(count, kProbeCharacters);
+			const auto probed = std::min<std::size_t>(blobs.size(), kProbeCharacters);
 			for (std::size_t k = 0; k < probed; ++k) {
 				const auto& b = blobs[k];
 				const float up[3] = { 10.0f, 0.5f * b.height, 0.9f * b.height };
@@ -2537,10 +2659,10 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 		struct PassInputs
 		{
 			bool shadows = false;                             // our shadow map pass + Skyrim's darkening pass
-			bool contact = false;                             // contact shadows (Skyrim's darkening pass even without sun shadows)
 			ID3D11ShaderResourceView* skyrimShadows = nullptr;  // Skyrim's sun cascades (copied)
 			ID3D11ShaderResourceView* sceneDepth = nullptr;   // Skyrim's depth
 			ID3D11ShaderResourceView* mask = nullptr;         // Skyrim's shadow mask
+			bool indoor = false;                              // step I3: our objects' indoor shadow maps + the darkening pass
 			D3D11_VIEWPORT viewport{};
 		};
 
@@ -2670,8 +2792,66 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 				}
 				++a_seen.shadowFrames;
 			}
-			if ((a_in.shadows || a_in.contact) && a_in.sceneDepth) {
-				// Their shadows and the characters' contact shadows on Skyrim: a full-screen multiply pass
+			if (a_in.indoor) {
+				// Step I3: our objects into our own map of each indoor shadow light with a slot, one half at a
+				// time (solid and alpha-tested parts cast; see-through ones don't).
+				a_context->PSSetShaderResources(0, 8, noSrvs);
+				a_context->RSSetState(g_shadowRaster);
+				a_context->OMSetDepthStencilState(g_depthWrite, 0);
+				a_context->VSSetShader(g_indoorShadowVs, nullptr, 0);
+				a_context->PSSetShader(g_indoorShadowPs, nullptr, 0);
+				ID3D11Buffer* oldVsCb3 = nullptr;  // slot 3 isn't in StateBackup
+				a_context->VSGetConstantBuffers(3, 1, &oldVsCb3);
+				a_context->VSSetConstantBuffers(3, 1, &g_indoorPassCb);
+				bool done[kIndoorSlots]{};
+				for (int k = 0; k < kMaxLights; ++k) {
+					const int slot = int(a_fc.lightColor[k][3] + 0.5f) - 1;
+					if (k >= int(a_fc.sunColor[3]) || slot < 0 || slot >= kIndoorSlots || done[slot]) {
+						continue;
+					}
+					done[slot] = true;
+					a_context->OMSetRenderTargets(0, nullptr, g_ourIndoorDsv[slot]);
+					a_context->ClearDepthStencilView(g_ourIndoorDsv[slot], D3D11_CLEAR_DEPTH, 1.0f, 0);
+					for (int half = 0; half < 2; ++half) {
+						const float pass[4] = { float(slot), half == 0 ? 1.0f : -1.0f, a_fc.lightPos[k][3], 0.0f };
+						D3D11_MAPPED_SUBRESOURCE mapped{};
+						if (FAILED(a_context->Map(g_indoorPassCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+							continue;
+						}
+						std::memcpy(mapped.pData, pass, sizeof(pass));
+						a_context->Unmap(g_indoorPassCb, 0);
+						const float h = float(kOurIndoorSize) * 0.5f;
+						D3D11_VIEWPORT hvp{ 0, half == 0 ? 0.0f : h, float(kOurIndoorSize), h, 0, 1 };  // upper half on top (Skyrim's layout)
+						a_context->RSSetViewports(1, &hvp);
+						for (const auto& o : frame.objects) {
+							const auto it = g_gpuModels.find(o.model_id);
+							if (it == g_gpuModels.end() || !it->second.vb || o.matrix_count != it->second.bones) {
+								continue;
+							}
+							const auto& m = it->second;
+							const bool isHeld = (o.flags & GMSKY_RND_OBJ_HELD) && canHold;
+							a_context->IASetVertexBuffers(0, 1, &m.vb, &stride, &zero);
+							a_context->IASetIndexBuffer(m.ib, DXGI_FORMAT_R32_UINT, 0);
+							for (const auto& part : m.parts) {
+								if (part.flags & (GMSKY_RND_MAT_TRANSLUCENT | GMSKY_RND_MAT_ADDITIVE) || !setObject(o, part, isHeld, false)) {
+									continue;
+								}
+								ID3D11ShaderResourceView* srv = textureOf(part.texture_id);
+								srv = srv ? srv : g_whiteSrv;
+								a_context->PSSetShaderResources(1, 1, &srv);
+								a_context->DrawIndexed(part.index_count, part.first_index, 0);
+							}
+							a_seen.indoorCasters += half == 0 ? 1 : 0;
+						}
+					}
+					++a_seen.indoorMaps;
+				}
+				a_context->VSSetConstantBuffers(3, 1, &oldVsCb3);
+				Release(oldVsCb3);
+				a_context->OMSetRenderTargets(0, nullptr, nullptr);  // our maps are read next
+			}
+			if ((a_in.shadows || a_in.indoor) && a_in.sceneDepth) {
+				// Their shadows on Skyrim (sun and indoor lights): a full-screen multiply pass
 				// over Skyrim's colour (no depth bound, so Skyrim's depth can be read).
 				{
 					a_context->PSSetShaderResources(0, 8, noSrvs);
@@ -2685,9 +2865,13 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 					a_context->PSSetShader(g_overlayPs, nullptr, 0);
 					ID3D11ShaderResourceView* overlaySrvs[4] = { g_shadowSrv, nullptr, a_in.sceneDepth, a_in.mask };
 					a_context->PSSetShaderResources(4, 4, overlaySrvs);
+					ID3D11ShaderResourceView* indoorSrvs[2] = { g_indoorSrv, a_in.indoor ? g_ourIndoorSrv : nullptr };  // step I3
+					a_context->PSSetShaderResources(11, 2, indoorSrvs);
 					a_context->Draw(3, 0);
 					++a_seen.overlayFrames;
+					a_seen.indoorOverlayFrames += a_in.indoor ? 1 : 0;
 					a_context->PSSetShaderResources(0, 8, noSrvs);
+					a_context->PSSetShaderResources(11, 2, noSrvs);
 				}
 			}
 			if (a_in.shadows) {
@@ -2716,7 +2900,8 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 					a_context->OMSetRenderTargets(a_solidCount, a_solidTargets, a_dsv);
 					ID3D11ShaderResourceView* shadowSrvs[2] = { a_in.shadows ? g_shadowSrv : nullptr, a_in.skyrimShadows };
 					a_context->PSSetShaderResources(4, 2, shadowSrvs);
-					a_context->PSSetShaderResources(11, 1, &g_indoorSrv);  // step I2 (read only by lights marked with a slot)
+					ID3D11ShaderResourceView* indoorSrvs[2] = { g_indoorSrv, a_in.indoor ? g_ourIndoorSrv : nullptr };
+					a_context->PSSetShaderResources(11, 2, indoorSrvs);  // steps I2 / I3 (read only by lights marked with a slot)
 				}
 				for (const auto& o : frame.objects) {
 					const auto it = g_gpuModels.find(o.model_id);
@@ -2968,8 +3153,11 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 			}
 			const bool canUnproject = Invert(fc.viewProj, fc.invViewProj);
 			in.shadows = wantShadows && EnsureShadowMap() && canUnproject;
-			GatherContactShadows(fc, cam, seen);
-			in.contact = fc.aoParams[0] > 0.0f && canUnproject;
+			GatherProbeCharacters(fc, cam);
+			// Step I3: our objects cast indoor shadows when one of our lights has a copied Skyrim map.
+			in.indoor = g_ourIndoorSrv && canUnproject && std::ranges::any_of(fc.lightColor, [](const float(&a_c)[4]) { return a_c[3] > 0.5f; });
+			Set4(fc.indoorOurs, in.indoor ? 1.0f : 0.0f, float(kOurIndoorSize), kOurIndoorBias, kOurIndoorOffset);
+			Set4(fc.indoorSoft, kIndoorSoftUv, float(g_frameNumber++ % 64), 0.0f, 0.0f);
 			if (in.shadows) {
 				SetSunShadowMatrix(fc, cam);
 				in.skyrimShadows = SetSkyrimShadows(fc, cam);
@@ -3226,8 +3414,9 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 			g_seen.heldDrawn = g_seen.heldNoView = g_seen.heldFrames = 0;
 			g_seen.heldDegSum = g_seen.heldDegMax = g_seen.heldUnitsSum = g_seen.heldUnitsMax = g_seen.heldAgeSum = 0;
 			g_seen.shadowFrames = g_seen.shadowCasters = g_seen.overlayFrames = g_seen.skyrimCascadeFrames = g_seen.normalMapCalls = g_seen.phongCalls = 0;
-			g_seen.contactBlobs = g_seen.contactFrames = g_seen.selfIllumCalls = 0;
+			g_seen.selfIllumCalls = 0;
 			g_seen.indoorShadowed = g_seen.indoorMoved = g_seen.duplicateLights = g_seen.lightFrames = 0;
+			g_seen.indoorMaps = g_seen.indoorCasters = g_seen.indoorOverlayFrames = 0;
 			g_seen.indoorAgeMsMax = 0;
 		}
 		{
@@ -3237,6 +3426,8 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 				logger::info("indoor shadows: {} maps copied this second ({} took another light's slot); {:.2f} of our point lights a frame shadowed by them ({} slots), oldest map {:.0f} ms; "
 							 "{} light-frames skipped because the light moved; {:.2f} duplicate lights a frame dropped",
 					copies, evictions, double(seen.indoorShadowed) / frames, kIndoorSlots, seen.indoorAgeMsMax, seen.indoorMoved, double(seen.duplicateLights) / frames);
+				logger::info("indoor shadows: our objects: {:.2f} maps drawn a frame, {:.1f} objects in each, darkening pass on Skyrim {} frames",
+					double(seen.indoorMaps) / frames, seen.indoorMaps ? double(seen.indoorCasters) / double(seen.indoorMaps) : 0.0, seen.indoorOverlayFrames);
 			}
 		}
 		const auto captures = g_cascadeCaptures.exchange(0);
@@ -3269,10 +3460,10 @@ float4 ParabolicProbePS(float4 pos : SV_Position) : SV_Target
 			if (seen.switches & GMSKY_RND_FRAME_NO_SHADOWS) sw += " no_shadows";
 			if (seen.switches & GMSKY_RND_FRAME_LINEAR_ALBEDO) sw += " linear_albedo";
 			if (seen.switches & GMSKY_RND_FRAME_SHADOW_DEBUG) sw += " shadow_debug";
-			logger::info("in-frame drawing: shadows {} frames ({} casters, {} darkening passes on Skyrim){}; Skyrim's sun cascades used {} frames ({} captured); Skyrim's shadow mask {}; parts with a normal map {}, with phong {}, self-illuminated {}; contact shadows under {:.1f} characters a frame; switches:{}",
+			logger::info("in-frame drawing: shadows {} frames ({} casters, {} darkening passes on Skyrim){}; Skyrim's sun cascades used {} frames ({} captured); Skyrim's shadow mask {}; parts with a normal map {}, with phong {}, self-illuminated {}; switches:{}",
 				seen.shadowFrames, seen.shadowCasters, seen.overlayFrames, seen.shadowFrames ? "" : std::format(" (off: {})", seen.shadowWhy), seen.skyrimCascadeFrames,
 				captures, seen.maskUsable ? "used" : "not used", seen.normalMapCalls, seen.phongCalls, seen.selfIllumCalls,
-				seen.contactFrames ? double(seen.contactBlobs) / double(seen.contactFrames) : 0.0, sw.empty() ? " none" : sw);
+				sw.empty() ? " none" : sw);
 		}
 		{
 			uint32_t frustum = 0, parabolic = 0;

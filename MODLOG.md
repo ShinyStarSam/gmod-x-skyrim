@@ -1478,3 +1478,32 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 **Tested how:** user indoors with props / NPCs near torches. User: "Perfect".
 **Result (logs):** maps copied into our slots (4096x4096, format 53); about 60 copies a second (Skyrim redraws one light's map a frame; the others stay valid, oldest used 45 s old); 3.00 of our point lights a frame shadowed by them; 0 slot changes, 0 lights moved, 0 duplicate lights; 52-60 frames drawn a second, our drawing 0.045 ms CPU.
 **Next:** I3, our objects' shadows onto Skyrim indoors.
+## 2026-10-06 Step I3: Garry's Mod's objects cast shadows indoors (built, not tested in game)
+
+**Committed before this:** `d18d5a5` (I1b + I2, tests 91-94), user: "Perfect. Commit and continue".
+**Changed:** `skse/src/World.cpp`:
+- For each indoor shadow light with a copied Skyrim map (I2's slots), our objects are drawn into our own dual-paraboloid depth map (1024 x 1024 per slot, two 1024 x 512 halves in Skyrim's layout): `IndoorShadowVS` / `IndoorShadowPS`, Skyrim's shadow-map vertex shader as Community Shaders reconstructs it (`RENDER_SHADOWMAP_PB`, MIT): uv from the direction, depth = distance / radius, the other half clipped at the same split the lookup uses. Alpha-tested parts cut out; see-through parts don't cast.
+- The lookup is now one routine (`ParaboloidLight`) for Skyrim's maps and ours.
+- Our objects shadow each other and themselves from these lights (model shader; bias 0.003, pushed 3 units off the surface).
+- Skyrim's darkening pass: per pixel, the light Skyrim lit it with (ambient + each light x what its own map lets through) less the share of the lights our objects block there; the indoor form of the sun's "keep". It now also runs indoors when only this is on.
+- `gmsky_render_shadow_debug 1` indoors: blue added where our objects block the indoor lights. `gmsky_render_shadows 0` turns this off too.
+- Log: maps drawn a frame, objects in each, darkening-pass frames. Shader text split into 3 literals (MSVC's 16 KB limit; piece 2 had reached 15 KB).
+**Differs from SkyCraft:** SkyCraft has no indoor shadows. **Known limit (dual paraboloid):** a big triangle crossing the split between the two halves can be cut or bent in our map; props are small, so probably rare.
+**Tested how:** plugin built, no warnings, copied into Skyrim; all eight shader entry points compile offline (`fxc`). **Not tested in game.**
+**Next:** in-game test 95.
+## 2026-10-06 In-game test 95 (logs `build/logs-ingame-test-95/`): I3 works. Bundle: softer indoor shadow edges; contact shadows removed
+
+**Tested how:** user indoors, props near torches. User: "Flawless, can we get the edges smoother? ... Also remove that fake contact shadow we added earlier for NPCs, just get rid of it".
+**Result (logs):** 3.00 of our maps drawn a frame, ~4 objects in each, darkening pass on Skyrim every frame (59-60 a second).
+**Changed:**
+- *Softer edges (indoor lights only):* `ParaboloidLight` now filters the way Skyrim does (Community Shaders' `SampleDualParaboloidShadowPCF`, MIT): 8 filtered comparison samples on Jimenez's spiral, turned by a per-pixel angle (interleaved gradient noise) that changes every frame, so Skyrim's TAA blends them into a smooth edge; samples stay inside their half. Radius 0.006 of the map's width on both Skyrim's maps and ours (same angle), chosen by eye: Skyrim's own `fPoissonRadiusScale` isn't known. New frame constant `indoorSoft` (radius, frame number 0-63). Outdoor sun shadows unchanged.
+- *Contact shadows removed:* `BlobAO` (shader), the blob list (`aoBlobs`), `in.contact` and its log; the darkening pass now runs only for sun or indoor shadows. Garry's Mod still sends each character's feet and size: Skyrim's NPC sun-shadow probe uses them. `render.lua`'s status line says "characters" instead of "with contact shadows" (harness check updated).
+- README: indoor shadows both ways listed as working; the contact-shadow claim removed. THIRD-PARTY-NOTICES: what's adapted from Community Shaders.
+**Tested how:** `cargo build --release`, harness PASSED; plugin built, no warnings, copied into Skyrim; all 12 shader entry points compile offline. **Not tested in game.**
+**Not sure:** the right softness (one constant, `kIndoorSoftUv`); with Skyrim's TAA off the edges would look grainy instead of smooth.
+**Next:** in-game test 96.
+## 2026-10-06 In-game test 96 (logs `build/logs-ingame-test-96/`): softer indoor edges and no contact shadows confirmed
+
+**Tested how:** user indoors with props near torches, NPCs outdoors and indoors. User: "Good. Commit and continue".
+**Result (logs):** 56-60 indoor maps copied a second, 3.00 of our point lights shadowed a frame, 3.00 of our maps drawn a frame, darkening pass every frame; 0 lights moved, 0 duplicates; no contact-shadow log lines; status line reports "characters". The softness constant (`kIndoorSoftUv` 0.006) stays.
+**Next:** commit I3 + the bundle; then G8 (clean-up of the old picture route) is planned.

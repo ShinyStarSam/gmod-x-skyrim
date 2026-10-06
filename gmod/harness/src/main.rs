@@ -1273,7 +1273,7 @@ fn main() {
                 return HARNESS_MESHES_ASKED .. " " .. HARNESS_READ_PATH .. " | " .. line
             "#);
             let r = lua.run(lc, &setup);
-            let ok = matches!(&r, Ok(Some(s)) if s.starts_with("1 GAME | render: on; 2 frames, 2.0 objects a frame, 1.0 held (gmsky_render_held 1), 1.0 with contact shadows, 0 skipped") && s.contains("models 1 ok, 0 can't be drawn") && s.contains("textures 3 (3 new, 0 failed)"));
+            let ok = matches!(&r, Ok(Some(s)) if s.starts_with("1 GAME | render: on; 2 frames, 2.0 objects a frame, 1.0 held (gmsky_render_held 1), 1.0 characters, 0 skipped") && s.contains("models 1 ok, 0 can't be drawn") && s.contains("textures 3 (3 new, 0 failed)"));
             check(ok, &format!("render.lua: one prop and one NPC wanted, the model read once, its texture from GAME: {r:?}"));
             let mut kinds = Vec::new();
             let mut frames = Vec::new();
@@ -1318,10 +1318,10 @@ fn main() {
             // Bone at anchor + (10, 20, 30), poseToBone moves by -1 in x: (9, 20, 30) from the anchor.
             check(first == Some((100, 1, 2, Some((1, 0xFFFF_FFFF, 42, OBJ_HELD)), Some([9.0, 20.0, 30.0]))),
                   &format!("render.lua: the frame has the held prop (entity 42) at bone x poseToBone minus the anchor, origin epoch 1: {first:?}"));
-            // Step N1: the NPC (entity 43) carries a contact shadow: feet relative to the anchor, 32 wide, 72 tall; the prop none.
+            // Step N1: the NPC (entity 43) carries its feet (for Skyrim's NPC shadow probe): feet relative to the anchor, 32 wide, 72 tall; the prop none.
             let npc = frames.first().and_then(|(_, o, _)| o.get(1).map(|o| (o.entity, o.flags, o.feet, o.width, o.height, o.matrix_count)));
             check(npc == Some((43, OBJ_CONTACT, [40.0, 20.0, 30.0], 32.0, 72.0, 1)) && frames.first().is_some_and(|(_, o, _)| o[0].width == 0.0),
-                  &format!("render.lua: the NPC is sent with its feet and size for its contact shadow, the prop without: {npc:?}"));
+                  &format!("render.lua: the NPC is sent with its feet and size for Skyrim's NPC shadow probe, the prop without: {npc:?}"));
             let view = frames.first().map(|(f, _, _)| (f.flags, f.view_eye, f.view_angles));
             check(view == Some((FRAME_VIEW, [5.0, 20.0, 30.0], [5.0, 90.0, 0.0])), &format!("render.lua: the frame carries Garry's Mod's view, relative to the anchor: {view:?}"));
             // The server marks what the physgun picks up, and unmarks it on drop.
