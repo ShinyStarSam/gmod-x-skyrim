@@ -3,8 +3,8 @@
 **2026-10-06, after in-game tests 101-111: BLOCKED on Garry's Mod's physics crash** (physics props on
 Skyrim's ground, plan `docs/DESIGN.md` "One collision system", step S1c). See "The current
 problem". **Ghidra (2026-10-06) found the cause:** a per-object list of collision pair records
-overflows at 65,533 entries, and gm_flatmap's world adds ~6 records per mesh triangle. Waiting for
-the user's choice of the next experiment.
+overflows at 65,533 entries, and gm_flatmap's world adds ~6 records per mesh triangle. Idea 2c
+(switch off the map world's physics collisions) crashed the same way in test 114; waiting for the user's choice.
 
 **2026-10-06: the indoor shadow problem below is solved (test 93: Community Shaders' formula agrees
 with Skyrim's own shadow mask on 99.86% of points). Kept below as a record.**
@@ -205,7 +205,7 @@ after a new mesh object is set up: the last log line was `SetSolid` (tests 109, 
    **player** only, never the world (175 builds). So `vphysics.dll` decides the world pair without
    asking the game (a bypass on two engine bits, or "no game data"; not known which). A Lua "no" or
    `constraint.NoCollide` can't reach it. Test 113's grid crashed on build 2, standing still.
-2c. **Turn off the world's physics collisions** (my next pick, one line of Lua):
+2c. ~~**Turn off the world's physics collisions.**~~ **Tried in test 114: same crash** (build 17, standing still, just after an alt-tab; the server's world really had `collisions false`; the client's world has no physics object). So the world's records are not the whole story. Original idea:
    `game.GetWorld():GetPhysicsObject():EnableCollisions(false)` while the experiment runs. This works
    on the engine object itself, not through the game's filter, so the world shouldn't make pair records with
    anything. Costs nothing in our design: the player, bullets and our ground use traces (not

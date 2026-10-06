@@ -2285,6 +2285,12 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
     switched on **before** `PhysicsFromMesh` (until now it came last, after `SetSolid`). Logged:
     how often the hook was asked about (mesh, world), per mesh and per setup call. Not sure
     Garry's Mod asks the hook about the world at all; the counts will show it.
+  - *Then (tests 112-113: the hook is never asked about the world; user's choice): remove the
+    world's collision.* While test meshes exist, the map's world (entity 0) has its physics
+    collisions switched off on the engine's object (`EnableCollisions(false)`), which the game's
+    filter never sees. Back on when the experiment stops (server) or the last test mesh goes
+    (client). Nothing of ours uses the world through physics: the player, bullets and our ground
+    trace against the map. Props away from our meshes would fall through gm_flatmap's floor.
 - **S1d (only if S1c's chunks work and the user wants them bigger): Skyrim collects further out.**
   `kRadius` 5 → e.g. 12 regions, and the store keeps regions longer (`EVICT_REGIONS`, `kForget`),
   so a chunk can be one Skyrim cell (8 regions, 4,096 Skyrim units ≈ 2,176 Garry's Mod units) or

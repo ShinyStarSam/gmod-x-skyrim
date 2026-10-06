@@ -20,6 +20,8 @@
 -- lua/entities/inf_chunk.lua and lua/infmap2/ish/physics.lua). InfMap2 has no licence file: its
 -- setup is described in DESIGN.md and written here from that description; no code is copied.
 -- Every test mesh and the map's world never collide (the ShouldCollide hook below; after Ghidra).
+-- Idea 2c (after tests 112-113, which showed the hook is never asked about the world): while
+-- test meshes exist, the map's world has its physics collisions switched off (G.WorldCollisions).
 -- The client builds its copy too, from the same store (one module per process). A log line goes
 -- out before every setup call (lines are flushed one by one), so a crash names the call.
 
@@ -199,6 +201,7 @@ function ENT:BuildMesh()
 			name, what, G.AskedLine(self), G.CollisionFacts(self)))
 		return fn()
 	end
+	G.WorldCollisions(false, name)
 	gmsky.Log(string.format("physground: %s world: %s", name, G.CollisionFacts(game.GetWorld())))
 	t0 = SysTime()
 	-- The custom collision check goes on first, before the physics object exists, so the
@@ -235,6 +238,16 @@ end
 function ENT:Initialize()
 	self.gmskyMesh = true -- the ShouldCollide hook below: never collides with the world
 	if SERVER then self:BuildMesh() end
+end
+
+function ENT:OnRemove()
+	-- The client's copy: the last test mesh gone, the world collides again (the server does
+	-- this in Stop).
+	if SERVER then return end
+	for _, e in ipairs(ents.FindByClass("gmsky_physground_test")) do
+		if e ~= self and IsValid(e) then return end
+	end
+	G.WorldCollisions(true, "the last test mesh on this side was removed")
 end
 
 function ENT:Think()
@@ -296,8 +309,31 @@ function G.CollisionFacts(ent)
 	for _, name in ipairs(FLAGS) do
 		if _G[name] and phys:HasGameFlag(_G[name]) then on[#on + 1] = name:sub(12) end
 	end
-	return s .. string.format(", physics: game flags [%s], moveable %s, motion %s, contents 0x%x", table.concat(on, " "),
-		tostring(phys:IsMoveable()), tostring(phys:IsMotionEnabled()), phys:GetContents())
+	return s .. string.format(", physics: game flags [%s], moveable %s, motion %s, contents 0x%x, collisions %s", table.concat(on, " "),
+		tostring(phys:IsMoveable()), tostring(phys:IsMotionEnabled()), phys:GetContents(), tostring(phys:IsCollisionEnabled()))
+end
+
+-- Idea 2c: the map's world (gm_flatmap: 6 giant pieces, ~6 pair records per mesh triangle)
+-- gets its physics collisions switched off on the engine object itself, which the game's
+-- collision filter (and so the ShouldCollide hook) never sees. The player, bullets and our ground
+-- use traces against the map, not physics, so they shouldn't notice. Not sure the engine
+-- honours this for the world. Logged before (so a crash here is named) and after, only on a change.
+function G.WorldCollisions(on, why)
+	local phys = game.GetWorld():GetPhysicsObject()
+	if not IsValid(phys) then
+		if not G.noWorldPhysLogged then
+			G.noWorldPhysLogged = true
+			gmsky.Log(string.format("physground: world collisions: the world has NO physics object on this side (%s)", why))
+		end
+		return
+	end
+	local was = phys:IsCollisionEnabled()
+	if was == on then return end
+	gmsky.Log(string.format("physground: world collisions: switching %s (%s); collisions now %s",
+		on and "ON" or "OFF", why, tostring(was)))
+	phys:EnableCollisions(on)
+	gmsky.Log(string.format("physground: world collisions: switched %s; collisions now %s; world: %s",
+		on and "ON" or "OFF", tostring(phys:IsCollisionEnabled()), G.CollisionFacts(game.GetWorld())))
 end
 
 -- Partners the hook was asked about for this mesh so far, e.g. "player 12, the world 0".
@@ -339,6 +375,7 @@ if SERVER then
 			gmsky.Log(string.format("physground: experiment stopped (%s) after %d builds, %.0f s", why, G.test.serial, CurTime() - G.test.started))
 		end
 		G.test = nil
+		G.WorldCollisions(true, "experiment stopped")
 	end
 
 	local function NewMesh(t, lo, hi, cx, cy)
