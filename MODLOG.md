@@ -1886,3 +1886,24 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 **Changed:** `gmod/lua/gmsky/chunks.lua`: `C.StillInEngine` grows the new chunk's box by 1 unit (`TOUCH`), so a dead mesh sharing a face, edge or corner blocks the build too (before: only overlapping ones). At most one tick on the server.
 **Why:** test 122's crash (see above). Plan: `docs/DESIGN.md` S2d.
 **Tested how:** `gmod_harness.exe`: HARNESS PASSED (chunks not exercised). **Not tested in game.**
+
+## 2026-10-06 S2e: stuck detector (logging only; not tested in game)
+
+**Changed:**
+- `gmod/module/src/shapes.rs`: every stored triangle keeps its stair-ramp flag (Skyrim's `kStairHelper` layer, already sent); `tris_info(lo, hi, max)`. Unit test `tris_info_keeps_the_stair_ramp_flag`. `lib.rs`: `gmsky.TrisInfo(lx, ly, lz, hx, hy, hz, max)` -> 6 numbers per triangle (lowest z, highest z, normal, ramp 1/0), count.
+- `gmod/lua/gmsky/chunks.lua` (server, physics mode): `C.StuckCheck` every tick. A movement key held, no noclip, no ground hold, under 0.5 units of horizontal movement a tick for 20 ticks: `chunks: STUCK #N` with position, ground, speed, wish direction, a zero-length hull trace and three hull traces 24 units ahead (feet, step height, 36 up), and Skyrim's triangles within 24 units by kind (stair ramps, walls reaching above step height, floors between 0.5 and step height, higher floors, ceilings) with heights relative to the feet. `chunks: unstuck #N after T ticks: <why>` when it ends. Status line: "stuck so far N".
+**Why:** user after test 122: stuck in geometry often, "in source things are more 'sloped' for example stairs turn into ramps". SkyCraft treats Skyrim's stair ramps as floor only (never wall or ceiling, skipped by rays); ours are solid from every side. Not proven to be the cause, so numbers first (`docs/DESIGN.md` S2e).
+**Tested how:** `cargo test --release -p gmsky-module`: 28 passed; `cargo build --release` (no warnings); `gmod_harness.exe`: HARNESS PASSED (the detector only runs in physics mode, which the harness has no physics for: **not exercised**).
+**Next:** in-game test 123.
+## 2026-10-06 In-game test 123 (S2d + S2e): no crash; 20 STUCK readings; stair ramps have never arrived
+
+**Logs:** `build/logs-ingame-test-123/`. No new crash dump.
+**Tested how:** user played with `gmsky_ground physics` and held the key a second when stuck: "1 rock, 2 general ground, 3 walking through supposedly solid cage, the rest are all STAIRS".
+**Result:**
+- **No crash** (S2d holds so far; one session).
+- **20 STUCK readings.** In every one: **stair ramps 0** nearby. And in all 14,775 shapes status lines of every saved test, the stored stair-ramp count is **0**: Skyrim's invisible stair ramps have never reached Garry's Mod.
+- Stairs (about #7-#20, one place, at ~(2,000-2,350, 7,150-7,400)): the hull is blocked at the feet ("ahead from 0 up: hit at 0%", normals z 0.12-0.26: steep, slanted risers), **clear at step height 18** in most, yet no step-up; 8 of 14 report **on ground false** with a small downward speed (Source only steps up when on ground, and counts as ground only under a normal z >= 0.7). 5-17 floor triangles between 0.5 and 18 units above the feet (the treads).
+- #1, #2, #4, #5 (general ground): **the player's box starts inside the chunk** (`here: starts inside gmsky_chunk`): stuck inside the ground; #1 right at the new origin (0, 0, 15.9), #4/#5 with 17 floor triangles 0.5-18 units above the feet.
+- #3, #16: in the air, no triangle within 24 units, falling slowly; not explained.
+- The cage: nothing logged (walking through isn't "stuck").
+**Why no stair ramps arrive (read in `skse/src/Collision.cpp`):** (1) a ramp body made of boxes or convex shapes is turned into triangles by `Triangulate` with flags 0, so the ramp mark is lost; only triangle shapes keep it. **SkyCraft** collects ramp bodies into a separate job and marks all their triangles (`helperTris`); ours differs, by mistake. (2) Both SkyCraft and we check the layer of the whole body only; Havok can also give each child of a container its own layer (`hkpShapeContainer::GetCollisionFilterInfo(key)`), where ramps inside a building's mesh would be. Not verified which of the two is the case.

@@ -184,7 +184,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 55] = [
+    let funcs: [(&str, lua::CFn); 56] = [
         ("Log", l_log),
         ("Heartbeat", l_heartbeat),
         ("ReadInput", l_read_input),
@@ -229,6 +229,7 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("SendHit", l_send_hit),
         ("ReadHurts", l_read_hurts),
         ("SkyrimFlags", l_skyrim_flags),
+        ("TrisInfo", l_tris_info),
         ("ConsoleWindow", l_console_window),
         ("ConsoleKey", l_console_key),
         ("WaterZ", l_water_z),
@@ -992,6 +993,34 @@ unsafe extern "C" fn l_tris_in_box(l: *mut State) -> c_int {
             (a.pushnumber)(l, v);
         }
         6
+    })
+}
+
+/// gmsky.TrisInfo(lx, ly, lz, hx, hy, hz, max) -> list, count: Skyrim's triangles touching the box
+/// (relative to the anchor), 6 numbers each: lowest z, highest z, normal x, y, z, stair ramp (1/0).
+/// Empty when not anchored to the store's epoch. For the stuck detector (S2e).
+unsafe extern "C" fn l_tris_info(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let n = |i: c_int| (a.tonumber)(l, i);
+        let max = n(7).max(0.0) as usize;
+        let epoch = anchored_epoch();
+        let tris = with_shapes(|st| {
+            if epoch == 0 || st.origin_epoch != epoch {
+                return Vec::new();
+            }
+            st.tris_info([n(1), n(2), n(3)], [n(4), n(5), n(6)], max)
+        });
+        (a.createtable)(l, (tris.len() * 6) as c_int, 0);
+        let mut i = 1;
+        for (lo, hi, nv, helper) in &tris {
+            for v in [*lo, *hi, nv[0], nv[1], nv[2], *helper as u8 as f64] {
+                (a.pushnumber)(l, v);
+                (a.rawseti)(l, -2, i);
+                i += 1;
+            }
+        }
+        (a.pushnumber)(l, tris.len() as f64);
+        2
     })
 }
 

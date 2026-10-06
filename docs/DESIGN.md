@@ -2510,6 +2510,23 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
   The test-118 box rule ignored face-sharing neighbours on purpose; now a new chunk also waits for a
   dead mesh touching its box (face, edge or corner). Costs at most one tick (the server deletes at the
   next physics step).
+- **S2e. Find out why the player gets stuck (planned 2026-10-06; only logging, no behaviour change).**
+  User after test 122: "stuck in the geometry quite often, normally in source things are more
+  'sloped', stairs turn into ramps". **SkyCraft** treats Skyrim's invisible stair ramps (collision
+  layer `kStairHelper`, which we already collect and mark `GMSKY_TRI_STAIR_HELPER`) as **floor only**:
+  never a wall, never a ceiling, skipped by rays (`TriCollider.java`, `SkyRay.java`). Our chunks put
+  every triangle into one solid mesh, so a ramp's edges and underside block like walls, and bullets
+  hit the invisible ramps. That is the likely cause but **not proven**; Source's step-up (18 units),
+  chunk seams and small clutter are others. So first a detector (server, physics mode): when a
+  movement key is held, the player is not in noclip or held, and moves less than 0.5 units a tick for
+  20 ticks, one `STUCK` line: position, ground, speed, wish direction; zero-length hull trace (inside
+  something?); hull traces 24 units along the wish direction at feet, step height and 36 above
+  (fraction, normal, what was hit); and Skyrim's triangles in a box around the player: how many, how
+  many are stair ramps, walls, floors, ceilings, and the stair ramps' and walls' heights relative to
+  the feet. An "unstuck after N ticks (how)" line when it ends. The module's triangles keep their
+  stair-ramp flag for this (`gmsky.TrisInfo`). **Then**, from the numbers, the fix; if it is the
+  ramps, SkyCraft's rule in Source terms (one way: ramps in their own mesh that only the player
+  collides with, from above).
 - **S3. Props, ragdolls and grenades on it.** Mostly free once S2 works. Added: a prop moving into
   a chunk that isn't built yet is frozen for that moment and released with its speed (like the
   player's hold; InfMap2 doesn't need this because it makes its terrain itself, instantly; we

@@ -432,8 +432,99 @@ if SERVER then
 			n, anchor.x, anchor.y, anchor.z, worst))
 	end
 
+	-- ---- S2e: the stuck detector (logging only) ----
+	-- A movement key held, not noclip, not held by terrain.lua, and less than STUCK_MOVE units of
+	-- horizontal movement a tick for STUCK_TICKS ticks: one STUCK line with what is around the
+	-- player, and one "unstuck" line when it ends.
+	local STUCK_MOVE, STUCK_TICKS = 0.5, 20
+	C.stuck = C.stuck or { ticks = 0, episodes = 0 }
+
+	local function TraceText(tr)
+		if tr.StartSolid then return string.format("starts inside %s", IsValid(tr.Entity) and tr.Entity:GetClass() or tr.HitWorld and "the world" or "?") end
+		if not tr.Hit then return "clear" end
+		return string.format("hit %s at %.0f%%, normal z %.2f", IsValid(tr.Entity) and tr.Entity:GetClass() or tr.HitWorld and "the world" or "?", tr.Fraction * 100, tr.HitNormal.z)
+	end
+
+	-- Skyrim's triangles around the player, sorted into kinds, heights relative to the feet.
+	local function TrisText(ply, a)
+		if not gmsky.TrisInfo then return "no gmsky.TrisInfo" end
+		local p, mins, maxs = ply:GetPos() - a, ply:OBBMins(), ply:OBBMaxs()
+		local lo, hi = p + mins - Vector(24, 24, 8), p + maxs + Vector(24, 24, 8)
+		local list, n = gmsky.TrisInfo(lo.x, lo.y, lo.z, hi.x, hi.y, hi.z, 4000)
+		local step, head = ply:GetStepSize(), maxs.z
+		local k = { ramps = 0, rampLo = math.huge, rampHi = -math.huge, walls = 0, highWalls = 0, floors = 0, steps = 0, ledges = 0, ceil = 0, ceilLo = math.huge }
+		for i = 1, n * 6, 6 do
+			local zlo, zhi, nz, ramp = list[i] - p.z, list[i + 1] - p.z, list[i + 4], list[i + 5] == 1
+			if ramp then
+				k.ramps = k.ramps + 1
+				k.rampLo, k.rampHi = math.min(k.rampLo, zlo), math.max(k.rampHi, zhi)
+			elseif nz >= 0.7 then
+				k.floors = k.floors + 1
+				if zhi > 0.5 and zhi <= step then k.steps = k.steps + 1 elseif zhi > step and zlo < head then k.ledges = k.ledges + 1 end
+			elseif nz <= -0.7 then
+				k.ceil = k.ceil + 1
+				k.ceilLo = math.min(k.ceilLo, zlo)
+			else
+				k.walls = k.walls + 1
+				if zhi > step and zlo < head then k.highWalls = k.highWalls + 1 end
+			end
+		end
+		return string.format("Skyrim triangles within 24 units: %d; stair ramps %d%s; walls %d (%d from above step height %.0f to head height %.0f); floors %d (%d between 0.5 and step height above the feet, %d higher but below the head); ceilings %d%s",
+			n, k.ramps, k.ramps > 0 and string.format(" (z %.0f to %.0f above the feet)", k.rampLo, k.rampHi) or "", k.walls, k.highWalls, step, head,
+			k.floors, k.steps, k.ledges, k.ceil, k.ceil > 0 and string.format(" (lowest %.0f above the feet)", k.ceilLo) or "")
+	end
+
+	local function StuckReport(ply, a, wish)
+		local pos, mins, maxs = ply:GetPos(), ply:OBBMins(), ply:OBBMaxs()
+		local function Hull(from, to)
+			return util.TraceHull({ start = from, endpos = to, mins = mins, maxs = maxs, filter = ply, mask = MASK_PLAYERSOLID })
+		end
+		local parts = { "here: " .. TraceText(Hull(pos, pos)) }
+		for _, up in ipairs({ 0, ply:GetStepSize(), 36 }) do
+			local from = pos + Vector(0, 0, up)
+			parts[#parts + 1] = string.format("ahead from %.0f up: %s", up, TraceText(Hull(from, from + wish * 24)))
+		end
+		local g = ply:GetGroundEntity()
+		gmsky.Log(string.format("chunks: STUCK #%d for %d ticks at (%.1f, %.1f, %.1f), relative to the anchor (%.1f, %.1f, %.1f): on ground %s (%s), speed (%.0f, %.0f, %.0f), wish direction (%.2f, %.2f); %s; %s",
+			C.stuck.episodes, C.stuck.ticks, pos.x, pos.y, pos.z, pos.x - a.x, pos.y - a.y, pos.z - a.z, tostring(ply:IsOnGround()),
+			IsValid(g) and g:GetClass() or g == game.GetWorld() and "the world" or "nothing", ply:GetVelocity().x, ply:GetVelocity().y, ply:GetVelocity().z,
+			wish.x, wish.y, table.concat(parts, "; "), TrisText(ply, a)))
+	end
+
+	function C.StuckCheck(ply, a)
+		local st = C.stuck
+		local f = (ply:KeyDown(IN_FORWARD) and 1 or 0) - (ply:KeyDown(IN_BACK) and 1 or 0)
+		local r = (ply:KeyDown(IN_MOVERIGHT) and 1 or 0) - (ply:KeyDown(IN_MOVELEFT) and 1 or 0)
+		local noclip = ply:GetMoveType() == MOVETYPE_NOCLIP
+		local held = gmsky.terrain and gmsky.terrain.holding
+		local pos = ply:GetPos()
+		local moved = st.last and Vector(pos.x - st.last.x, pos.y - st.last.y, 0):Length() or math.huge
+		st.last = pos
+		local why
+		if f == 0 and r == 0 then why = "keys released"
+		elseif noclip then why = "noclip"
+		elseif held then why = "held by the ground hold"
+		elseif moved >= STUCK_MOVE then why = string.format("moving again (%.1f units this tick)", moved) end
+		if why then
+			if st.ticks >= STUCK_TICKS then
+				gmsky.Log(string.format("chunks: unstuck #%d after %d ticks: %s; now at (%.1f, %.1f, %.1f)", st.episodes, st.ticks, why, pos.x, pos.y, pos.z))
+			end
+			st.ticks = 0
+			return
+		end
+		st.ticks = st.ticks + 1
+		if st.ticks == STUCK_TICKS then
+			st.episodes = st.episodes + 1
+			local ang = Angle(0, ply:EyeAngles().y, 0)
+			local wish = ang:Forward() * f + ang:Right() * r
+			wish:Normalize()
+			StuckReport(ply, a, wish)
+		end
+	end
+
 	-- Every tick in physics mode (terrain.lua). a = the anchor.
 	function C.Update(ply, a)
+		C.StuckCheck(ply, a)
 		local bx, by, bz, size = gmsky.ShapesLattice()
 		if not bx then return end
 		local p = ply:GetPos() - a
@@ -524,8 +615,8 @@ if SERVER then
 			if rec.empty then empty = empty + 1 elseif rec.big then big = big + 1 end
 		end
 		local s = C.stats
-		local line = string.format("%s; empty chunks %d, too big %d, chunks waiting for regions %d; this second: %d rebuilds, %d removed, %d empties found",
-			C.StatusLine(), empty, big, C.waitingRegions, s.rebuilds, s.removed, s.empties)
+		local line = string.format("%s; empty chunks %d, too big %d, chunks waiting for regions %d; this second: %d rebuilds, %d removed, %d empties found; stuck so far %d",
+			C.StatusLine(), empty, big, C.waitingRegions, s.rebuilds, s.removed, s.empties, C.stuck.episodes)
 		s.rebuilds, s.removed, s.empties = 0, 0, 0
 		return line
 	end

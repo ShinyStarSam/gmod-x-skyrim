@@ -29,6 +29,8 @@ struct Tri {
     n: [f64; 3],
     lo: [f64; 3],
     hi: [f64; 3],
+    /// One of Skyrim's invisible stair ramps (collision layer kStairHelper).
+    helper: bool,
 }
 
 impl Tri {
@@ -46,7 +48,7 @@ impl Tri {
             lo[k] = v[k].min(v[3 + k]).min(v[6 + k]);
             hi[k] = v[k].max(v[3 + k]).max(v[6 + k]);
         }
-        Some(Tri { v, n: [n[0] / len, n[1] / len, n[2] / len], lo, hi })
+        Some(Tri { v, n: [n[0] / len, n[1] / len, n[2] / len], lo, hi, helper: false })
     }
 }
 
@@ -165,7 +167,8 @@ impl Store {
                     for k in 0..9 {
                         v[k] = t.v[k] as f64;
                     }
-                    if let Some(tri) = Tri::new(v) {
+                    if let Some(mut tri) = Tri::new(v) {
+                        tri.helper = t.flags & gmsky_protocol::TRI_STAIR_HELPER != 0;
                         let idx = r.tris.len() as u32;
                         let (x0, y0) = r.cell_index(tri.lo[0], tri.lo[1]);
                         let (x1, y1) = r.cell_index(tri.hi[0], tri.hi[1]);
@@ -174,7 +177,7 @@ impl Store {
                                 r.cells[(cx * cn + cy) as usize].push(idx);
                             }
                         }
-                        r.stair_helpers += (t.flags & gmsky_protocol::TRI_STAIR_HELPER != 0) as u32;
+                        r.stair_helpers += tri.helper as u32;
                         r.tris.push(tri);
                     }
                 }
@@ -282,6 +285,32 @@ impl Store {
             }
         }
         (out, cut)
+    }
+
+    /// Skyrim's triangles touching the box (each once), at most `max`: (lowest z, highest z,
+    /// unit normal, stair ramp). For the stuck detector (S2e).
+    pub fn tris_info(&self, lo: [f64; 3], hi: [f64; 3], max: usize) -> Vec<(f64, f64, [f64; 3], bool)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for r in self.regions.values() {
+            if (0..3).any(|k| r.lo[k] > hi[k] || r.lo[k] + r.size < lo[k]) {
+                continue;
+            }
+            for t in &r.tris {
+                if (0..3).any(|k| t.lo[k] > hi[k] || t.hi[k] < lo[k]) {
+                    continue;
+                }
+                let key: [i64; 9] = std::array::from_fn(|i| (t.v[i] * 16.0).round() as i64);
+                if !seen.insert(key) {
+                    continue;
+                }
+                if out.len() >= max {
+                    return out;
+                }
+                out.push((t.lo[2], t.hi[2], t.n, t.helper));
+            }
+        }
+        out
     }
 
     /// Where region (0, 0, 0) starts and the region size (Garry's Mod units, relative to the
@@ -694,6 +723,26 @@ mod tests {
         let (a, t, after) = s.chunk_version([0, 0, -1], [1, 0, 0]);
         assert_eq!((a, t), (3, 4));
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn tris_info_keeps_the_stair_ramp_flag() {
+        let mut s = Store::default();
+        clear(&mut s, 1, 1);
+        // A floor triangle and a 45-degree ramp; the ramp is marked as a stair helper (the flags
+        // word after a triangle's 9 floats).
+        let tris = [[-100.0, -100.0, 0.0, 100.0, -100.0, 0.0, 100.0, 100.0, 0.0], [0.0, -50.0, 0.0, 0.0, 50.0, 0.0, 50.0, 0.0, 50.0]];
+        let mut msg = region_payload(0, 0, 0, 1, [-136.0; 3], 272.0, &tris);
+        msg[40 + 40 + 36..40 + 40 + 40].copy_from_slice(&gmsky_protocol::TRI_STAIR_HELPER.to_le_bytes());
+        s.apply(COL_REGION, &msg);
+        assert_eq!(s.stair_helpers(), 1);
+        let info = s.tris_info([-10.0, -10.0, -10.0], [10.0, 10.0, 10.0], 10);
+        assert_eq!(info.len(), 2);
+        let ramp = info.iter().find(|t| t.3).expect("the ramp comes back marked");
+        assert_eq!((ramp.0, ramp.1), (0.0, 50.0));
+        assert!((ramp.2[2].abs() - 0.5f64.sqrt()).abs() < 1e-9);
+        assert!(info.iter().any(|t| !t.3 && t.2[2].abs() > 0.999));
+        assert_eq!(s.tris_info([-10.0, -10.0, -10.0], [10.0, 10.0, 10.0], 1).len(), 1);
     }
 
     #[test]
