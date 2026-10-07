@@ -1446,9 +1446,14 @@ mod tests {
             Some((z, c))
         };
         let mut queue = std::collections::VecDeque::new();
-        if let Some(t) = top(at[0], at[1], at[2] - 60.0, at[2] + 2.0) {
-            e.insert((0, 0), t);
-            queue.push_back((0i64, 0i64));
+        // Start from the highest surface under the player's 32-unit box: a player standing on an
+        // edge can have nothing under its centre.
+        let start = [-16.0, 0.0, 16.0].iter().flat_map(|dx| [-16.0, 0.0, 16.0].map(|dy| (*dx, dy)))
+            .filter_map(|(dx, dy)| top(at[0] + dx, at[1] + dy, at[2] - 60.0, at[2] + 2.0).map(|t| ((dx / c).round() as i64, (dy / c).round() as i64, t)))
+            .max_by(|a, b| a.2 .0.total_cmp(&b.2 .0));
+        if let Some((i, j, t)) = start {
+            e.insert((i, j), t);
+            queue.push_back((i, j));
         }
         while let Some((i, j)) = queue.pop_front() {
             let z0 = e[&(i, j)].0;

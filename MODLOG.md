@@ -2068,3 +2068,18 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 **Failures on the way:** (1) spreading "has a step below" over a whole joined step edge reached 90 units past the flight below and removed real bottom strips (stuck_8 got worse); limited to pieces with the lower nose side by side. (2) Giving every too-steep step a lip strip made a twisted strip with a 5-unit lip on a fan-shaped bottom step (stuck_1 7 -> 124 bumps); lips limited to 3 units. (3) Counting a too-steep partner as "a step below" without a strip uncovered the real step and its walls (worse than before); replaced by (2) with the limit.
 **Still broken / not tested:** ramps still hit props, grenades and bullets; bottom ends in the air (most in the dumps are a test artifact: the floor is below the dump box); 1 client/server fingerprint mismatch in test 133 not looked at.
 
+
+## 2026-10-06 In-game test 134: S2i-3 works ("good"); offline walk map starts under the whole player box
+
+**Logs:** `build/logs-ingame-test-134/` with `tris/stuck_1`-`stuck_6`. The run used the module built at 20:50 (S2i-3).
+**Tested how:** user walked the stairs from test 133's rough spots and others, fought bandits. User: the latest changes "WERE tested and they were good".
+**Result:**
+- 6 STUCK readings (test 133: 10); "standing on gmsky_ramp" in 31 status seconds of a shorter run (about 100 s with input; test 133: 73).
+- STUCK 1-3: right after loading, the player sat inside the ground at the anchor spot (no stair triangles within reach). Not a stair problem.
+- STUCK 4-5: at an L-turn staircase, while crouch-jumping in a fight. The bumps there are one straight line: the side of the upper flight rising 466 -> 484 beside the landing. That is the real shape (a flight's side, left alone on purpose).
+- STUCK 6: against a non-stair ledge 6-9 units high, next to a flat stair landing. Not a ramp problem.
+- 1 client/server ramp fingerprint mismatch (chunk -11 -10 -6): a timing race, not a real difference. The server built the ramp with 40 triangles; 47 ms later a neighbouring chunk's regions arrived and it rebuilt with 31. The client built once, after those regions, so it compared its 31 with the server's old 40; after the server's rebuild both had 31. Harmless.
+- Bottom ends in the air: up to 16 in one chunk (-15 -10 -6). No dumps there and the user noticed nothing. Not looked at further.
+- Ramps still not player-only: the self-test FAILED again (a bullet-style trace hits the ramp). Real bullets: 10 fired, 0 hit a ramp (too few to tell).
+**Changed (test tool only):** `shapes.rs` test helper `walk` starts from the highest surface under the player's 32-unit box, not only under its centre. At stuck_4 the centre was over a gap, so the map came out empty and "0 cells walked".
+**Next:** S2i-4, ramps for the player only (DESIGN.md S2i).

@@ -1,7 +1,7 @@
 # STATUS
 
 **Resolved (test 133, 2026-10-06):** the stone stairs work in game ("much, much, much better").
-The rough spots found in test 133 are fixed offline (S2i-3, MODLOG); not tested in game yet.
+The rough spots found in test 133 are fixed (S2i-3, MODLOG); test 134 confirmed it in game ("good").
 Ramps not being player-only is still open (parked by the user). Kept below as the record.
 
 ## Goal
