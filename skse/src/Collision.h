@@ -20,5 +20,8 @@ namespace gmsky::Collision
 	// Once a second: regions, triangles, timings, ring use.
 	void LogSecond();
 
+	// S2k-K0: bodies on this layer are sent as part of the static ground.
+	bool SentAsGround(RE::COL_LAYER a_layer);
+
 	inline constexpr float kRegionSize = 512.0f;  // Skyrim units per region edge
 }

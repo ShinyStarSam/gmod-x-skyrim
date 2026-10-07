@@ -16,6 +16,7 @@
 #include "Hud.h"
 #include "Input.h"
 #include "Link.h"
+#include "Loose.h"
 #include "Overlay.h"
 #include "Puppet.h"
 #include "Terrain.h"
@@ -366,6 +367,7 @@ namespace gmsky::Probe
 			Camera::LogSecond();
 			Terrain::LogSecond(a_player);
 			Collision::LogSecond();
+			Loose::LogSecond(a_player);
 			Body::LogSecond();
 			Overlay::LogSecond();
 			Draw::LogSecond();

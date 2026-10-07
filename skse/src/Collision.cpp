@@ -1030,6 +1030,8 @@ namespace gmsky::Collision
 		Stop("game loaded");
 	}
 
+	bool SentAsGround(RE::COL_LAYER a_layer) { return Included(a_layer); }
+
 	void LogSecond()
 	{
 		if (!g_streaming) {

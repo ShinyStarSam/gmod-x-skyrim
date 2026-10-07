@@ -2883,6 +2883,29 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
       clutter (Breezehome, the Riverwood Trader), knock a plate off a table with Skyrim's own
       means if possible. *Pass:* the lines list the clutter with sensible masses and shapes, so
       K1's shape conversion is built from real data, not guesses.
+      *Built 2026-10-06:* `skse/src/Loose.cpp` (`LOOSE:` line each second, `LOOSE  [i]` lines for
+      the 40 nearest every 5 s; actors' own bodies only counted), `Collision::SentAsGround`.
+      *Test 141 (Riverwood, the Bannered Mare, a house; 197 seconds):* up to **297** moving
+      bodies within 1,500 units that aren't actors (a tavern), 0 shape reads faulted, 0.03-0.12 ms
+      per second. What they are:
+      - **Every loose object is made of convex pieces**: one hull (food, ingots, bottles, baskets;
+        up to 121 planes), one box (books, venison), one capsule, a list of boxes (plates,
+        goblets, cups, jugs, swords), or a MOPP tree whose children are hulls and boxes (buckets,
+        kettles, pots). **No loose object used triangle meshes**, so each maps directly onto
+        Garry's Mod's multi-convex physics (`PhysicsInitMultiConvex`); no splitting needed.
+      - Motion: dynamic ones are "box-inertia" or "sphere-inertia" (Havok's two kinds of dynamic
+        body). Masses 1-84 (Havok's units; Skyrim's numbers, not kilograms).
+      - **Clutter that is keyframed, mass 0**: goblets, necklaces and books in shops and on
+        displays. Skyrim holds these still on purpose. Not sure whether Skyrim lets them be
+        knocked loose.
+      - **Objects made of several bodies joined together**: a hanging pot (11 bodies), hanging
+        salmon (9), braids of leeks (9), hanging moveable statics (`MSTT`, on layer `Props`).
+        Their bodies are tied with Havok constraints (hinges, ropes).
+      - **Found a hidden problem:** moveable statics on the **`Props`** layer are dynamic, but
+        `Collision.cpp` bakes `Props` into the static ground (1-29 of them per second). If one
+        swings, its chunk is rebuilt. Fixed in K1 (they become loose copies instead).
+      - Doors, chests, cupboards, wardrobes and gates: `AnimStatic`, keyframed, baked into the
+        ground (4-29 per second). Left for the doors step.
     - **K1. Solid, but frozen.** Skyrim sends each loose object in range (new protocol block,
       v17): an id (reference handle + FormID), pose, speed, mass, Havok material and its convex
       pieces (vertex lists; a box or capsule becomes one piece). Garry's Mod builds `gmsky_loose`

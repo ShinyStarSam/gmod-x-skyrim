@@ -2203,3 +2203,25 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 **Tested how:** nothing to test; no code changed. Checked `reference/SkyCraft`: it never makes Skyrim's loose objects solid for Minecraft; it only throws them with a Havok impulse on a Minecraft explosion (`Combat.cpp` `ApplyExplosion`).
 **Still broken / not tested:** everything in S2k. The user chose option A (Garry's Mod owns the loose objects near the player).
 **Next:** K0 (measure the loose bodies near the player, logs only) once the owner is chosen.
+
+## 2026-10-06 S2k-K0: log Skyrim's loose objects near the player (not tested in game)
+
+**Changed:** new `skse/src/Loose.cpp` / `Loose.h`: once a second a `LOOSE:` line counts every Havok body within 1,500 Skyrim units of the player that isn't fixed, by collision layer and motion type (dynamic, keyframed, ...), and separately those on layers we send as static ground (`Collision::SentAsGround`, new in `Collision.cpp`/`.h`). Every 5 s, `LOOSE  [i]` lines list the 40 nearest (actors' own bodies only counted): distance, position, reference and base FormIDs, base type, name, layer, motion type, awake / asleep, mass, speed, and the shape's pieces (hulls with their plane counts, boxes, capsules, meshes, lists). Shape reads are fault-guarded. `skse/src/Probe.cpp` calls it with the other status lines. `docs/DESIGN.md` S2k K0 marked built.
+**Why:** S2k step K0: see what Skyrim's loose objects really are (layers, masses, shapes) before building their Garry's Mod copies, and check whether any moving body is baked into the static ground.
+**Tested how:** `cmake --build --preset release` in `skse/` (no errors; copied to Skyrim's SKSE plugins as always). **Not tested in game.**
+**Still broken / not tested:** everything; no behaviour change intended.
+**Next:** in-game test 141, then K1 from its numbers.
+
+## 2026-10-06 In-game test 141: K0 measures Skyrim's loose objects
+
+**Logs:** `build/logs-ingame-test-141/`.
+**Tested how:** user played with the K0 build (Riverwood, the Bannered Mare, a house; 197 `LOOSE:` lines, 1,404 detail lines).
+**Result:**
+- Up to 297 moving bodies within 1,500 Skyrim units that aren't actors (a tavern); the walk takes 0.03-0.12 ms a second; 0 shape reads faulted.
+- All loose objects are convex pieces: single hulls (up to 121 planes), boxes, capsules, lists of boxes (plates, goblets, swords), MOPP trees of hulls and boxes (buckets, kettles, pots). No triangle meshes among them.
+- Keyframed clutter with mass 0: goblets, necklaces, books on displays.
+- Objects of several joined bodies: hanging pot (11), hanging salmon (9), leek braids (9), moveable statics.
+- Moveable statics on the `Props` layer are dynamic but baked into the static ground by `Collision.cpp` (1-29 per second).
+- Doors, chests, cupboards, gates: `AnimStatic` keyframed, baked into the ground (doors step).
+**Changed:** nothing; docs (`docs/DESIGN.md` S2k K0 results). K0 committed as one step.
+**Next:** K1, adjusted by these numbers (waiting for the user's go-ahead).
