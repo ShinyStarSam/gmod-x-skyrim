@@ -2239,3 +2239,17 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 **Tested how:** `cmake --build --preset release` in `skse/` (no errors, copied as always); `cargo build --release`; `cargo test --release` (all pass, 2 new); `target\release\gmod_harness.exe` PASSED (loads `loose.lua` on both sides). **Not tested in game.**
 **Still broken / not tested:** everything in game. Not sure: the entity limit (8,192 per the wiki); that `PhysicsInitMultiConvex` accepts every piece; build cost of 2,000 copies.
 **Next:** in-game test 142.
+
+## 2026-10-06 In-game test 142: K1 works (loose objects solid); Skyrim's player body pushes them
+
+**Logs:** `build/logs-ingame-test-142/`.
+**Tested how:** user walked around the Bannered Mare and another place with the K1 build. User: "I was able to collide AND PUSH some objects."
+**Result:**
+- Skyrim: 235-268 loose bodies in range in the tavern, 74 in the other place; 635 sent with shapes, 1,107 moves in 50 of 181 seconds, 40 gone; 0 faulted, 0 without convex pieces, 0 dropped messages; scans 0.7-1.6 ms per second.
+- Garry's Mod server: a copy of every object (e.g. `235 objects known, 235 copies`), 0 failed, 0 refused at the entity limit; builds at most 2.7 ms; 235 built in 2 ticks; up to 325 entities in the game. Client: the same copies, all with physics, 0 failed tries.
+- The push: the copies are frozen, so the moves came from Skyrim. Skyrim's player body follows Garry's Mod's player and shoves the real objects in Havok; the copies follow Skyrim (likely, from the move counts; not proven per object).
+- 18 STUCK lines while standing on a `gmsky_loose` copy under a chunk ceiling.
+- `props:` lines: 0 FELL THROUGH; a barrel rested 26 units above Skyrim's ground (maybe on a copy; not checked).
+**Changed:** nothing; docs (`README.md` works / doesn't work; `docs/DESIGN.md` S2k K1 result: K2 must stop Skyrim's player body pushing them).
+**Not tested:** bullets and props against the copies (the user didn't mention them).
+**Next:** K2.

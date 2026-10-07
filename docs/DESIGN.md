@@ -2958,6 +2958,16 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
       *Built 2026-10-06 (not tested in game):* `skse/src/Loose.cpp` (`PerFrame`, `LOOSE K1:` line;
       K0's detail lines now every 30 s), `Collision.cpp` (`Post`, `StreamEpoch`, moving `Props`
       out of the ground), protocol v17, `gmod/module/src/loose.rs`, `gmod/lua/gmsky/loose.lua`.
+      *Test 142 (the Bannered Mare, then another place; 181 s):* works. 235-268 objects in the
+      tavern, 74 elsewhere; Garry's Mod built a copy of every one (0 failed, 0 at the entity limit;
+      at most 2.7 ms per build, 235 built in 2 ticks); the client built the same ones; 0 dropped
+      messages; Skyrim's scans 0.7-1.6 ms a second. User: "I was able to collide AND PUSH some
+      objects". **Why they moved although the copies are frozen:** Skyrim's own player body
+      follows Garry's Mod's player and shoves the real objects in Havok, and the copies followed
+      (1,107 moves sent in 50 of 181 seconds). So Skyrim pushes them today, not Garry's Mod. **K2
+      must stop that** (the keyframed body isn't pushed by Skyrim's player), or both games push.
+      Also seen: 18 STUCK lines while standing on top of a copy with a ceiling above (the copy is
+      solid, as intended; not looked into further).
     - **K2. Garry's Mod takes over.** The copy is unfrozen with Skyrim's speed; Skyrim sets its
       body keyframed and moves the object to Garry's Mod's pose every frame (new slot Garry's Mod
       -> Skyrim, blended between ticks like the player, `Smooth.cpp`). Hand-back on range exit,

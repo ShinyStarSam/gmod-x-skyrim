@@ -127,12 +127,17 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   places; the camera no longer cuts into walls up close, and far shadows are steady
   (`gmsky_size_from_skyrim 0` goes back to Garry's Mod's own size). After a load, the player is
   pushed sideways out of walls (test 136).
+- **Skyrim's loose objects are solid** (S2k-K1, test 142): plates, food, baskets, dropped weapons
+  and hanging objects near the player (up to 2,000 within 1,500 Skyrim units) get invisible copies
+  with their real shapes in Garry's Mod's physics. You bump into them and can stand on them.
+  Walking into one pushes it, but that push is Skyrim's own: Skyrim's player body shoves the real
+  object and the copy follows. Bullets, explosions and props don't move them yet (step K2).
 
 ## What doesn't work yet
 
-- **Doors and Skyrim's movable objects:** a door can leave an invisible wall where it was (test
-  136), and Skyrim's loose objects (clutter that physics moves) aren't solid for Garry's Mod's
-  player yet. Next step.
+- **Doors:** a door can leave an invisible wall where it was (test 136). Planned after S2k.
+- **Skyrim's loose objects can't be moved by Garry's Mod yet:** bullets, explosions, props, the
+  physgun and the gravity gun don't move them (S2k step K2, next).
 
 - Garry's Mod's **effects** are invisible in Skyrim (tracers, explosions, the physgun beam, sprites); planned as step G7.
 - A prop dragged with the physgun lags a little behind the view; phong values not fine-tuned (polish list).
