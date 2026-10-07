@@ -352,6 +352,7 @@ namespace gmsky::Probe
 		Camera::AfterPlayerUpdate();
 		Terrain::PerFrame(a_player, g_origin, g_frame);
 		Collision::PerFrame(a_player, g_origin);
+		Loose::PerFrame(a_player, g_origin, a_delta);
 		Overlay::PerFrame();
 		Arms::PerFrame(a_player);
 		Hud::PerFrame(a_player, Arms::Live());
@@ -368,6 +369,7 @@ namespace gmsky::Probe
 			Terrain::LogSecond(a_player);
 			Collision::LogSecond();
 			Loose::LogSecond(a_player);
+			Loose::LogSending();
 			Body::LogSecond();
 			Overlay::LogSecond();
 			Draw::LogSecond();

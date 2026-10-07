@@ -2225,3 +2225,17 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 - Doors, chests, cupboards, gates: `AnimStatic` keyframed, baked into the ground (doors step).
 **Changed:** nothing; docs (`docs/DESIGN.md` S2k K0 results). K0 committed as one step.
 **Next:** K1, adjusted by these numbers (waiting for the user's go-ahead).
+
+## 2026-10-06 S2k-K1: Skyrim's loose objects become frozen physics copies in Garry's Mod (not tested in game)
+
+**Changed:**
+- `protocol/gmsky_protocol.h`, `protocol/src/lib.rs`: **protocol v17**, ring messages `GMSKY_COL_LOOSE` (`GmskyColLoose`: id, FormID, flags keyframed / joined / asleep / has shape, layer, motion, position relative to the anchor, axes, speed, mass; then the convex pieces' points in the body's frame) and `GMSKY_COL_LOOSE_GONE`.
+- `skse/src/Loose.cpp`/`.h`: `PerFrame` (10 times a second): bodies not fixed on layers Clutter, Weapon, Props within 1,500 Skyrim units (kept to 1,700), the 2,000 nearest; new ones sent with their pieces (hull corner points pushed out by the convex radius, box corners, capsules and spheres as 26 points per end, unknown convex shapes as their box; fault-guarded), moved ones (0.25 units or a turn) without, missing ones as gone; new shapes read for at most 2 ms a scan. `LOOSE K1:` line each second. K0's detail lines every 30 s.
+- `skse/src/Collision.cpp`/`.h`: `Post` (ready messages queued behind the worker's "clear"), `StreamEpoch`, `RawText`; `SentAsGround(layer, motion)`: moving `Props` bodies are no longer baked into the ground.
+- `gmod/module/src/loose.rs` (new, 2 tests), `shapes.rs` (the store holds it, cleared with the regions), `lib.rs`: `gmsky.LooseChanges`, `gmsky.LooseShape`, `gmsky.LooseStatus`.
+- `gmod/lua/gmsky/loose.lua` (new, both sides): `gmsky_loose` entities (`PhysicsInitMultiConvex`, motion off first, `SOLID_VPHYSICS`, custom collisions, invisible), nearest first, 3 ms a tick (at least 5), none while more than 7,600 entities exist; moved to Skyrim's pose; the client builds its own physics and follows moves; physgun, gravity gun, tool gun and unfreeze refused (K2). `server.lua`, `client.lua` include it; `terrain.lua` moves them on a re-centre and removes them on a new origin.
+- `docs/DESIGN.md`: S2k K1 in detail (cap 2,000, the user's number).
+**Why:** S2k step K1: Skyrim's loose objects solid for the player, bullets and props, before Garry's Mod takes them over (K2).
+**Tested how:** `cmake --build --preset release` in `skse/` (no errors, copied as always); `cargo build --release`; `cargo test --release` (all pass, 2 new); `target\release\gmod_harness.exe` PASSED (loads `loose.lua` on both sides). **Not tested in game.**
+**Still broken / not tested:** everything in game. Not sure: the entity limit (8,192 per the wiki); that `PhysicsInitMultiConvex` accepts every piece; build cost of 2,000 copies.
+**Next:** in-game test 142.

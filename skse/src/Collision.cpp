@@ -73,6 +73,8 @@ namespace gmsky::Collision
 		struct Job
 		{
 			bool clear{ false };
+			uint32_t rawType{ 0 };      // S2k-K1: a ready message (Loose.cpp), sent as it is
+			std::vector<uint8_t> raw;
 			int rx{ 0 }, ry{ 0 }, rz{ 0 };
 			uint32_t colEpoch{ 0 }, originEpoch{ 0 };
 			double origin[3]{};
@@ -223,6 +225,7 @@ namespace gmsky::Collision
 		bool g_streaming = false;
 		uint32_t g_originEpoch = 0;
 		std::atomic<uint32_t> g_colEpoch{ 0 };  // also read by the worker
+		std::atomic<uint64_t> g_wRawBytes{ 0 }, g_wRawDropped{ 0 };  // S2k-K1: Loose.cpp's messages
 		std::unordered_map<uint64_t, Clock::time_point> g_harvested;
 		std::vector<Body> g_bodies;
 		std::unordered_set<int> g_loggedTypes;
@@ -594,7 +597,7 @@ namespace gmsky::Collision
 					}
 					const auto& collidable = entity->collidable;
 					const auto layer = collidable.GetCollisionLayer();
-					if (!Included(layer)) {
+					if (!SentAsGround(layer, entity->motion.type.get())) {
 						continue;
 					}
 					const auto* shape = collidable.shape;
@@ -865,7 +868,15 @@ namespace gmsky::Collision
 						if (!Send(GMSKY_COL_CLEAR, payload)) {
 							logger::warn("COLLISION ring stayed full; the clear message was dropped");
 						}
-					} else if (job.colEpoch == g_colEpoch.load()) {
+					} else if (job.colEpoch != g_colEpoch.load()) {
+						// an older stream's job
+					} else if (job.rawType != 0) {
+						if (Send(job.rawType, job.raw)) {
+							g_wRawBytes += job.raw.size();
+						} else {
+							++g_wRawDropped;
+						}
+					} else {
 						SendRegion(job);
 					}
 				} catch (const std::exception& e) {
@@ -1030,7 +1041,42 @@ namespace gmsky::Collision
 		Stop("game loaded");
 	}
 
-	bool SentAsGround(RE::COL_LAYER a_layer) { return Included(a_layer); }
+	bool SentAsGround(RE::COL_LAYER a_layer, RE::hkpMotion::MotionType a_motion)
+	{
+		// S2k-K1: moving bodies on the Props layer (moveable statics) are loose objects (Loose.cpp).
+		if (a_layer == RE::COL_LAYER::kProps && a_motion != RE::hkpMotion::MotionType::kFixed) {
+			return false;
+		}
+		return Included(a_layer);
+	}
+
+	uint32_t StreamEpoch() { return g_streaming ? g_colEpoch.load() : 0u; }
+
+	void Post(uint32_t a_epoch, uint32_t a_type, std::vector<uint8_t> a_payload)
+	{
+		if (!g_streaming || a_epoch != g_colEpoch.load()) {
+			return;
+		}
+		Job job{};
+		job.colEpoch = a_epoch;
+		job.rawType = a_type;
+		job.raw = std::move(a_payload);
+		std::scoped_lock lock(g_mutex);
+		g_queue.push_back(std::move(job));
+		g_cv.notify_one();
+	}
+
+	std::string RawText()
+	{
+		std::size_t queued = 0;
+		{
+			std::scoped_lock lock(g_mutex);
+			for (const auto& j : g_queue) {
+				queued += j.rawType != 0;
+			}
+		}
+		return fmt::format("{:.0f} KB written, {} dropped (ring full), {} waiting in the queue", g_wRawBytes.exchange(0) / 1024.0, g_wRawDropped.exchange(0), queued);
+	}
 
 	void LogSecond()
 	{

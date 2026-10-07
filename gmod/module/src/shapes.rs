@@ -13,7 +13,7 @@
 //!
 //! All coordinates are Garry's Mod units relative to the anchor (like the ground grids).
 
-use gmsky_protocol::{ColClear, ColRegion, ColTri, COL_CLEAR, COL_REGION};
+use gmsky_protocol::{ColClear, ColRegion, ColTri, COL_CLEAR, COL_LOOSE, COL_LOOSE_GONE, COL_REGION};
 use std::collections::HashMap;
 
 const CELL: f64 = 64.0; // lookup cell inside a region (x, y), Garry's Mod units
@@ -385,6 +385,8 @@ pub struct Store {
     tris: usize,
     stamp: u32,
     pub stats: Stats,
+    /// S2k-K1: Skyrim's loose objects (cleared with the regions).
+    pub loose: crate::loose::Store,
 }
 
 fn read<T: Copy>(p: &[u8], off: usize) -> Option<T> {
@@ -416,6 +418,7 @@ impl Store {
                 self.tris = 0;
                 self.col_epoch = c.col_epoch;
                 self.origin_epoch = c.origin_epoch;
+                self.loose.clear();
                 Some(format!("shapes: clear (collision epoch {}, origin epoch {}): {} regions dropped",
                              c.col_epoch, c.origin_epoch, dropped))
             }
@@ -467,6 +470,12 @@ impl Store {
                 if let Some(old) = self.regions.insert((h.rx, h.ry, h.rz), r) {
                     self.tris -= old.tris.len();
                 }
+                None
+            }
+            COL_LOOSE if self.origin_epoch != 0 => self.loose.apply_loose(p, self.col_epoch),
+            COL_LOOSE_GONE if self.origin_epoch != 0 => self.loose.apply_gone(p, self.col_epoch),
+            COL_LOOSE | COL_LOOSE_GONE => {
+                self.stats.ignored += 1;
                 None
             }
             _ => Some(format!("shapes: unknown message type {kind} ({} bytes)", p.len())),

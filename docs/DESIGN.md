@@ -2914,6 +2914,50 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
       not exported by `render.lua`. *Test:* walk into a basket (blocked), shoot a plate (bullet
       stops, impact effect), drop a prop on a barrel (it rests on it). *Logs:* objects in range,
       built, removed, pieces, build ms, largest pair-record list (the crash guard from S2b).
+    - **K1 in detail (the user's go-ahead 2026-10-06 after test 141; cap 2,000, the user's
+      number).**
+      - **Which bodies:** not fixed, on layers `Clutter`, `Weapon` or `Props`, within 1,500
+        Skyrim units of the player (kept until 1,700, so one at the edge doesn't flicker), the
+        2,000 nearest. One Garry's Mod copy per Havok **body** (a hanging pot's 11 bodies are 11
+        copies). `Collision.cpp` stops baking moving `Props` bodies into the ground (fixed ones
+        stay).
+      - **Skyrim (`Loose.cpp`), 10 times a second:** a new body is sent once with its shape; a
+        body that moved (more than 0.25 Skyrim units, or turned) is sent again without the shape;
+        a body gone or out of range is sent as gone. Each body's id is its Havok address (stable
+        while its 3D is loaded; a re-made body is a new object). Shapes are read in the body's own
+        frame: a hull's own corner points (`hkpConvexVerticesShape` `rotatedVertices`,
+        CommonLib's layout), pushed out by its convex radius; a box's 8 corners; a capsule or
+        sphere as points on its surface (a hull around them). Fault-guarded. The messages go
+        through the collision worker's queue (after its "clear", so the order is kept), as two new
+        ring messages, **protocol v17**: `GMSKY_COL_LOOSE` (id, FormID, flags keyframed / joined /
+        has shape, position relative to the anchor and rotation, speed, mass, then the pieces'
+        points) and `GMSKY_COL_LOOSE_GONE`. A new collision epoch (restart, new origin) sends
+        everything again.
+      - **Rust (`gmod/module/src/loose.rs`):** the store of loose objects, each given a small
+        number (Lua can't hold a 64-bit id exactly). `gmsky.LooseChanges(since)`: what was added,
+        moved or removed since a change counter (each side keeps its own); `gmsky.LooseShape(n)`:
+        the pieces' points. Cleared with the shapes store.
+      - **Garry's Mod (`gmod/lua/gmsky/loose.lua`, both sides):** the server makes a
+        `gmsky_loose` entity per object (networked: its number), `PhysicsInitMultiConvex` from the
+        pieces, `SOLID_VPHYSICS`, custom collisions on (so bullets and the player trace the real
+        shape), **motion off right away**, invisible (Skyrim draws the real object; `render.lua`
+        already skips `gmsky_*`). Moved by Skyrim: set to the new pose. The client builds its own
+        physics for each entity from the same store (for movement prediction), as chunks do.
+        Builds: nearest first, at most 3 ms a tick (at least 5). Physgun and tool gun refuse them
+        (K2's job). Re-centre: moved with the anchor; new origin: all removed.
+      - **Garry's Mod's entity limit:** the wiki gives 8,192 entities, all networked ones
+        included (**not sure**; Source's original limit was 2,048). New copies stop while more than
+        7,600 entities exist, logged as "entity limit".
+      - **Logs (once a second):** Skyrim: bodies in range / sent / moved / gone, pieces and points
+        sent, ms. Garry's Mod (both sides): objects known, entities built, waiting, removed,
+        slowest build ms, entities in the game, the largest pair-record list (the S2b crash guard).
+      - *Test:* in the Bannered Mare: walk into a table of plates (blocked), shoot a bowl (the
+        bullet stops at it, impact effect), drop a prop on a barrel of food (rests on it), throw
+        a grenade among clutter (nothing moves yet), walk out and back in.
+        *Pass:* no crash; the counts match Skyrim's; nothing to see moves yet (that is K2).
+      *Built 2026-10-06 (not tested in game):* `skse/src/Loose.cpp` (`PerFrame`, `LOOSE K1:` line;
+      K0's detail lines now every 30 s), `Collision.cpp` (`Post`, `StreamEpoch`, moving `Props`
+      out of the ground), protocol v17, `gmod/module/src/loose.rs`, `gmod/lua/gmsky/loose.lua`.
     - **K2. Garry's Mod takes over.** The copy is unfrozen with Skyrim's speed; Skyrim sets its
       body keyframed and moves the object to Garry's Mod's pose every frame (new slot Garry's Mod
       -> Skyrim, blended between ticks like the player, `Smooth.cpp`). Hand-back on range exit,

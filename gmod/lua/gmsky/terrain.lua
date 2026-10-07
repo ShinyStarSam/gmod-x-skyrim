@@ -210,6 +210,7 @@ if SERVER then
 		ply:SetPos(Vector(pos.x + d.x, pos.y + d.y, pos.z + d.z))
 		if IsValid(T.ent) then T.ent:SetPos(na) end
 		if gmsky.chunks and gmsky.chunks.MoveAll then gmsky.chunks.MoveAll(na) end
+		if gmsky.loose and gmsky.loose.MoveAll then gmsky.loose.MoveAll(na) end
 		if T.holdPos then T.holdPos = T.holdPos + d end
 		local after = ply:GetPos()
 		T.recentres = T.recentres + 1
@@ -225,6 +226,7 @@ if SERVER then
 		if IsValid(T.ent) then gmsky.field.UseGrid(T.ent, nil) end
 		T.ground, T.builtId = nil, nil
 		if gmsky.chunks and gmsky.chunks.Clear then gmsky.chunks.Clear("new origin") end
+		if gmsky.loose and gmsky.loose.Clear then gmsky.loose.Clear("new origin") end
 	end
 
 	function T.UpdateGround(ply, anchored, connected)

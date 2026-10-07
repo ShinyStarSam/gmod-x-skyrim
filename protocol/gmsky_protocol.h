@@ -19,7 +19,7 @@
 #define GMSKY_MAP_SIZE (GMSKY_RING_OFFSET + GMSKY_RING_BYTES)
 #define GMSKY_MAGIC 0x594B534Du      // "MSKY": layout initialized and ready
 #define GMSKY_MAGIC_INIT 0x54494E49u // "INIT": one side is initializing right now
-#define GMSKY_VERSION 16u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain; 8: collision ring; 9: view punch; 10: GmskyActors; 11: GmskyHitboxes; 12: hit test; 13: hit events; 14: hurt events; 15: water_z; 16: radius
+#define GMSKY_VERSION 17u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain; 8: collision ring; 9: view punch; 10: GmskyActors; 11: GmskyHitboxes; 12: hit test; 13: hit events; 14: hurt events; 15: water_z; 16: radius; 17: loose objects in the collision ring
 #define GMSKY_HEARTBEAT_TIMEOUT_MS 2000u
 
 // GmskyPlayerState.flags
@@ -378,6 +378,8 @@ typedef struct GmskyShared {
 #define GMSKY_COL_PAD 0u     // no payload
 #define GMSKY_COL_CLEAR 1u   // payload: GmskyColClear. Drop every region; newer messages are this epoch.
 #define GMSKY_COL_REGION 2u  // payload: GmskyColRegion + GmskyColTri[count]. Replaces that region.
+#define GMSKY_COL_LOOSE 3u   // v17: payload GmskyColLoose [+ uint32_t counts[pieces] + float points[points][3]]
+#define GMSKY_COL_LOOSE_GONE 4u  // v17: payload GmskyColLooseGone
 
 typedef struct GmskyColMsgHeader {
     uint32_t type;   // GMSKY_COL_*
@@ -409,6 +411,41 @@ typedef struct GmskyColTri {
     float v[9];       // three corners, Garry's Mod units relative to the anchor
     uint32_t flags;   // GMSKY_TRI_*
 } GmskyColTri;
+
+// S2k-K1 (DESIGN.md "S2k"): one of Skyrim's loose Havok bodies (clutter, a dropped weapon, a
+// moveable static) near the player. Sent with its shape the first time, then again without it
+// whenever it moved. With GMSKY_LOOSE_SHAPE, `pieces` uint32_t point counts follow, then `points`
+// points (3 floats each, Garry's Mod units in the body's own frame): each piece is the convex
+// hull of its points.
+#define GMSKY_LOOSE_SHAPE 0x1u      // the pieces follow
+#define GMSKY_LOOSE_KEYFRAMED 0x2u  // Skyrim holds it still on purpose (displays, shops)
+#define GMSKY_LOOSE_JOINED 0x4u     // its reference has more than one body (hanging pots, chains)
+#define GMSKY_LOOSE_ASLEEP 0x8u     // Havok has it asleep
+
+typedef struct GmskyColLoose {
+    uint64_t id;          // the body's Havok address: stable while its 3D is loaded
+    uint32_t col_epoch;
+    uint32_t form_id;     // its reference (0 = none found)
+    uint32_t flags;       // GMSKY_LOOSE_*
+    uint32_t pieces;      // 0 without GMSKY_LOOSE_SHAPE
+    uint32_t points;      // all pieces' points together
+    uint16_t layer;       // Skyrim's collision layer (RE::COL_LAYER)
+    uint8_t motion;       // Havok's motion type (hkpMotion::MotionType)
+    uint8_t reserved;
+    float pos[3];         // the body's origin, Garry's Mod units relative to the anchor
+    float rot[9];         // its x, y, z axes in the world (3 floats each); both games are Z-up
+    float vel[3];         // Garry's Mod units per second
+    float mass;           // Havok's mass
+} GmskyColLoose;
+
+#define GMSKY_LOOSE_GONE_LEFT 1u     // out of range, or no longer in Havok's world
+#define GMSKY_LOOSE_GONE_LIMIT 2u    // no longer among the nearest kLooseMax
+
+typedef struct GmskyColLooseGone {
+    uint64_t id;
+    uint32_t col_epoch;
+    uint32_t reason;      // GMSKY_LOOSE_GONE_*
+} GmskyColLooseGone;
 
 // ---- Overlay picture block (Garry's Mod -> Skyrim; DESIGN.md "Step 2b in detail") ----
 // A second shared memory block, so the link block above (and GMSKY_VERSION) stay as they are.
@@ -711,6 +748,10 @@ GMSKY_ASSERT(sizeof(GmskyColClear) == 8);
 GMSKY_ASSERT(sizeof(GmskyColRegion) == 40);
 GMSKY_ASSERT(offsetof(GmskyColRegion, lo) == 24);
 GMSKY_ASSERT(sizeof(GmskyColTri) == 40);
+GMSKY_ASSERT(sizeof(GmskyColLoose) == 96);
+GMSKY_ASSERT(offsetof(GmskyColLoose, pos) == 32);
+GMSKY_ASSERT(offsetof(GmskyColLoose, mass) == 92);
+GMSKY_ASSERT(sizeof(GmskyColLooseGone) == 16);
 GMSKY_ASSERT(sizeof(GmskyOverlayCtl) == 56);
 GMSKY_ASSERT(offsetof(GmskyOverlayCtl, state) == 16);
 GMSKY_ASSERT(offsetof(GmskyOverlayCtl, frames_published) == 24);

@@ -17,7 +17,7 @@ pub const RING_BYTES: usize = 16 << 20;
 pub const MAP_SIZE: usize = RING_OFFSET + RING_BYTES;
 pub const MAGIC: u32 = 0x594B_534D;
 pub const MAGIC_INIT: u32 = 0x5449_4E49;
-pub const VERSION: u32 = 16; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain; 8: collision ring; 9: view punch; 10: Actors; 11: Hitboxes; 12: hit test; 13: hit events; 14: hurt events; 15: water_z; 16: radius
+pub const VERSION: u32 = 17; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain; 8: collision ring; 9: view punch; 10: Actors; 11: Hitboxes; 12: hit test; 13: hit events; 14: hurt events; 15: water_z; 16: radius; 17: loose objects in the collision ring
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
 
 pub const PF_ON_GROUND: u32 = 0x1;
@@ -38,6 +38,14 @@ pub const RING_DATA_BYTES: usize = RING_BYTES - RING_DATA_OFF;
 pub const COL_PAD: u32 = 0;
 pub const COL_CLEAR: u32 = 1;
 pub const COL_REGION: u32 = 2;
+pub const COL_LOOSE: u32 = 3;
+pub const COL_LOOSE_GONE: u32 = 4;
+pub const LOOSE_SHAPE: u32 = 0x1;
+pub const LOOSE_KEYFRAMED: u32 = 0x2;
+pub const LOOSE_JOINED: u32 = 0x4;
+pub const LOOSE_ASLEEP: u32 = 0x8;
+pub const LOOSE_GONE_LEFT: u32 = 1;
+pub const LOOSE_GONE_LIMIT: u32 = 2;
 pub const TRI_STAIR_HELPER: u32 = 0x1;
 /// S2i-1: the triangle's Skyrim material is a stair material (StoneStairs, WoodStairs, ...).
 pub const TRI_STAIRS: u32 = 0x2;
@@ -74,6 +82,33 @@ pub struct ColRegion {
 pub struct ColTri {
     pub v: [f32; 9],
     pub flags: u32,
+}
+
+/// S2k-K1: one of Skyrim's loose bodies (gmsky_protocol.h GmskyColLoose).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ColLoose {
+    pub id: u64,
+    pub col_epoch: u32,
+    pub form_id: u32,
+    pub flags: u32,
+    pub pieces: u32,
+    pub points: u32,
+    pub layer: u16,
+    pub motion: u8,
+    pub reserved: u8,
+    pub pos: [f32; 3],
+    pub rot: [f32; 9],
+    pub vel: [f32; 3],
+    pub mass: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ColLooseGone {
+    pub id: u64,
+    pub col_epoch: u32,
+    pub reason: u32,
 }
 
 pub const IN_FORWARD: u32 = 0x1;
@@ -593,6 +628,10 @@ const _: () = {
     assert!(size_of::<ColRegion>() == 40);
     assert!(offset_of!(ColRegion, lo) == 24);
     assert!(size_of::<ColTri>() == 40);
+    assert!(size_of::<ColLoose>() == 96);
+    assert!(offset_of!(ColLoose, pos) == 32);
+    assert!(offset_of!(ColLoose, mass) == 92);
+    assert!(size_of::<ColLooseGone>() == 16);
 };
 
 #[cfg(test)]

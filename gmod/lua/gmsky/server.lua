@@ -33,6 +33,8 @@ gmsky.Include("render")
 gmsky.Include("props")
 -- Step S2 (one collision system): Skyrim's collision as physics chunks (gmsky_ground physics).
 gmsky.Include("chunks")
+-- Step S2k-K1: Skyrim's loose objects as frozen physics copies (both sides).
+gmsky.Include("loose")
 -- Step S1 (one collision system): physics ground experiment (gmsky_test_physground).
 gmsky.Include("physground")
 if GetPlayer() and T then T.home = T.MeasureRoom(GetPlayer():GetPos() + Vector(0, 0, 40)) end

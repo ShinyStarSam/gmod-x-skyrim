@@ -7,6 +7,7 @@
 mod capture;
 mod d3d;
 mod hitboxes;
+mod loose;
 mod lua;
 mod physlist;
 mod present;
@@ -184,7 +185,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 66] = [
+    let funcs: [(&str, lua::CFn); 69] = [
         ("EndProcess", l_end_process),
         ("SkyrimExited", l_skyrim_exited),
         ("CloseGame", l_close_game),
@@ -215,6 +216,9 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("ShapesLattice", l_shapes_lattice),
         ("ShapesRegionsArrived", l_shapes_regions_arrived),
         ("ShapesChunkVersion", l_shapes_chunk_version),
+        ("LooseChanges", l_loose_changes),
+        ("LooseShape", l_loose_shape),
+        ("LooseStatus", l_loose_status),
         ("GraphicsInfo", l_graphics_info),
         ("WriteLogFile", l_write_log_file),
         ("D3DState", l_d3d_state),
@@ -1245,6 +1249,96 @@ unsafe extern "C" fn l_shapes_bounds(l: *mut State) -> c_int {
 
 /// gmsky.ShapesStatus(reset[, x, y, z]) -> regions, triangles, line: a status line for the log
 /// (since the last reset). With the player's position: what is stored where it is.
+// ---- S2k-K1: Skyrim's loose objects (loose.rs) ----
+
+/// Numbers per object in gmsky.LooseChanges' list.
+const LOOSE_STRIDE: usize = 18;
+
+/// gmsky.LooseChanges(generation, since) -> generation, counter, resync, list, gone: Skyrim's
+/// loose objects added or moved after change counter `since` (all of them if `resync`: drop
+/// everything first), as a flat list, 18 numbers each: n, flags (GMSKY_LOOSE_*), layer, motion,
+/// FormID, mass, position x, y, z (relative to the anchor), then the body's x, y, z axes (3
+/// numbers each); `gone`: the numbers of objects removed since. Nothing when not anchored to the
+/// store's origin.
+unsafe extern "C" fn l_loose_changes(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let generation = (a.tonumber)(l, 1) as u32;
+        let since = (a.tonumber)(l, 2).max(0.0) as u64;
+        let epoch = anchored_epoch();
+        with_shapes(|st| {
+            if epoch == 0 || st.origin_epoch != epoch {
+                return 0;
+            }
+            let c = st.loose.changes(generation, since);
+            (a.pushnumber)(l, c.generation as f64);
+            (a.pushnumber)(l, c.ver as f64);
+            (a.pushboolean)(l, c.resync as c_int);
+            (a.createtable)(l, (c.changed.len() * LOOSE_STRIDE) as c_int, 0);
+            let mut i = 1;
+            for o in &c.changed {
+                let head = [o.n as f64, o.flags as f64, o.layer as f64, o.motion as f64, o.form_id as f64, o.mass, o.pos[0], o.pos[1], o.pos[2]];
+                for v in head.iter().chain(o.rot.iter()) {
+                    (a.pushnumber)(l, *v);
+                    (a.rawseti)(l, -2, i);
+                    i += 1;
+                }
+            }
+            (a.createtable)(l, c.gone.len() as c_int, 0);
+            for (k, n) in c.gone.iter().enumerate() {
+                (a.pushnumber)(l, *n as f64);
+                (a.rawseti)(l, -2, k as c_int + 1);
+            }
+            5
+        })
+    })
+}
+
+/// gmsky.LooseShape(n) -> pieces: a list of flat lists (x, y, z, x, y, z, ...: one piece's points
+/// in the body's frame, Garry's Mod units), or nothing if object n isn't known.
+unsafe extern "C" fn l_loose_shape(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let n = (a.tonumber)(l, 1) as u32;
+        with_shapes(|st| {
+            let Some(o) = st.loose.get(n) else { return 0 };
+            (a.createtable)(l, o.pieces.len() as c_int, 0);
+            for (k, piece) in o.pieces.iter().enumerate() {
+                (a.createtable)(l, (piece.len() * 3) as c_int, 0);
+                let mut i = 1;
+                for p in piece {
+                    for v in p {
+                        (a.pushnumber)(l, *v as f64);
+                        (a.rawseti)(l, -2, i);
+                        i += 1;
+                    }
+                }
+                (a.rawseti)(l, -2, k as c_int + 1);
+            }
+            1
+        })
+    })
+}
+
+/// gmsky.LooseStatus([reset]) -> count, line: the loose objects stored and the messages since
+/// the last reset.
+unsafe extern "C" fn l_loose_status(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let reset = (a.toboolean)(l, 1) != 0;
+        let (count, line) = with_shapes(|st| {
+            let s = st.loose.stats;
+            let (pieces, points) = st.loose.totals();
+            let line = format!("loose store: {} objects, {} pieces, {} points (generation {}) | in: {} added, {} moved, {} gone, {} moves for unknown bodies, {} bad, {} ignored (old epoch)",
+                st.loose.len(), pieces, points, st.loose.generation, s.added, s.moved, s.gone, s.unknown, s.bad, s.ignored);
+            if reset {
+                st.loose.stats = loose::Stats::default();
+            }
+            (st.loose.len(), line)
+        });
+        (a.pushnumber)(l, count as f64);
+        lua::push_str(a, l, &line);
+        2
+    })
+}
+
 unsafe extern "C" fn l_shapes_status(l: *mut State) -> c_int {
     guarded(l, |a, _| {
         let reset = (a.toboolean)(l, 1) != 0;
