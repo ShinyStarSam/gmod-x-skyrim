@@ -2195,3 +2195,11 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 **Tested how:** user looked at far shadows and walked into walls and corners. User: "Flawless".
 **Result:** `size: player box half width 16.0 -> 10.9 (Skyrim's player radius 10.94)`. CAMERA lines: found 8.92..8.92 in 243 seconds, 8.92..15.00 in 8 and 15..15 in 10 (around loads, when Skyrim rebuilds its camera). No flicker, no walls cut.
 **Changed:** nothing; docs (README "works" list; DESIGN S2j done). S2j committed as one step.
+
+## 2026-10-06 S2k planned: Skyrim's loose objects in Garry's Mod's physics (plan only)
+
+**Changed:** `docs/DESIGN.md` §12, new step S2k (before S3): two ways to give each loose object one owner (A: Garry's Mod simulates the ones near the player and Skyrim follows; B: Skyrim keeps them and Garry's Mod sends pushes), steps K0-K6 for A, and how both differ from SkyCraft.
+**Why:** user: "Skyrim's loose objects should be able to be pushed around by the player, bullets, explosives, props, NPCs, etc etc anything in gmod should be able to interact with anything in Skyrim." Today loose objects aren't sent to Garry's Mod at all (`Collision.cpp` `Included()`).
+**Tested how:** nothing to test; no code changed. Checked `reference/SkyCraft`: it never makes Skyrim's loose objects solid for Minecraft; it only throws them with a Havok impulse on a Minecraft explosion (`Combat.cpp` `ApplyExplosion`).
+**Still broken / not tested:** everything in S2k. The user chose option A (Garry's Mod owns the loose objects near the player).
+**Next:** K0 (measure the loose bodies near the player, logs only) once the owner is chosen.

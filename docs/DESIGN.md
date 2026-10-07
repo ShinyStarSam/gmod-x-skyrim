@@ -2832,6 +2832,91 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
      (`useCustomNear` / `customNearDistance`), saved and put back when we stop driving.
      *Test 140:* "Flawless": no flicker, no walls cut. Found 8.92..8.92 in 243 of 261 seconds; 15
      only around loads. **S2j done.**
+- **S2k. Skyrim's loose objects in Garry's Mod's physics (proposed 2026-10-06 after S2j; the user
+  chose option A, Garry's Mod owns them, the same day).** User: "Skyrim's loose objects should be able to be pushed
+  around by the player, bullets, explosives, props, NPCs, etc etc anything in gmod should be able
+  to interact with anything in Skyrim." (Doors, levers and gates are a separate step after this:
+  they are fixed or animated bodies, not loose ones.)
+  - **Today.** Loose objects (plates, baskets, buckets, cabbages, dropped weapons) are Havok
+    bodies that move. `Collision.cpp` `Included()` only takes layers that don't move (static,
+    anim static, trees, props, terrain, ground, ...), so loose objects never reach Garry's Mod:
+    the player walks through them, bullets and props pass through them. The only link today: hits
+    on corpses push Skyrim's ragdoll (step 3d-2, a Havok impulse).
+  - **The core problem: two physics engines.** Skyrim simulates its objects in Havok; Garry's Mod
+    simulates its own in `vphysics`. For a prop to land on a basket *and* the basket to tip under
+    it, one engine must simulate both. So each loose object needs **one owner** at a time.
+  - **Option A (recommended): Garry's Mod owns the loose objects near the player**, the same way
+    it owns the player. Within a range of the player (start: 1,500 Skyrim units, at most 64
+    objects, nearest first), each loose object gets an invisible Garry's Mod physics object
+    (`gmsky_loose`) with the object's real Havok shape (its convex pieces) and mass. Garry's Mod
+    simulates it: the player, bullets, explosions, props, the physics gun, the gravity gun, even
+    welds and ropes then work through Garry's Mod's own code, unchanged. Skyrim switches its own
+    body to "keyframed" (moved by us, not by Havok) and moves the object to Garry's Mod's pose
+    every frame, so **Skyrim still draws its own object** with its own model, light and shadow,
+    and Skyrim's save keeps where it ended up (Skyrim saves moved objects itself; to be checked,
+    K4). When the object leaves the range (or Garry's Mod stops), Skyrim gets it back as a normal
+    Havok body with Garry's Mod's last speed.
+    - Cost: things *Skyrim* does to the object while Garry's Mod owns it (an arrow, a spell, a
+      shout, an NPC walking into it) don't move it on their own. They are forwarded to Garry's
+      Mod as pushes (K5), and NPCs get a physics shadow in Garry's Mod so they shove things (K6).
+  - **Option B: Skyrim keeps owning them** (SkyCraft's direction). Garry's Mod gets a frozen
+    copy that follows Skyrim's pose (so it blocks the player, bullets and props), and every
+    Garry's Mod contact is sent to Skyrim as a push (bullets as Havok impulses like corpses
+    today, explosions like SkyCraft's). Cheaper to start, but Garry's Mod sees each object as
+    immovable: a thrown prop bounces off a plate as off a wall and the plate jumps a frame later;
+    a prop resting on a basket can't tip it; the physics gun, welds and ropes can't hold one. That
+    is two engines fighting over the same thing, which is why A is recommended.
+  - **Differs from SkyCraft (both options, said plainly):** SkyCraft does **not** make Skyrim's
+    loose objects solid for Minecraft at all (its `Included()` skips them, like ours). Its only
+    link is one way: a Minecraft explosion throws Skyrim's loose objects with a Havok impulse
+    (`Combat.cpp` `ApplyExplosion`, MIT). Option B extends that idea; option A goes beyond it
+    (SkyCraft has no physics props, so it never needed an owner). Nothing in SkyCraft covers
+    letting the other game's physics simulate Skyrim's objects.
+  - **Steps (option A), each tested on its own, one commit each:**
+    - **K0. Measure (logs only, no behaviour change).** Skyrim, once a second: every Havok body
+      within 1,500 units of the player that isn't fixed, counted by collision layer and motion
+      type (dynamic, keyframed, fixed, ...), with its reference (FormID, base object name), mass,
+      shape kind (box, capsule, convex hull, list, mesh) and number of pieces. Also: bodies on
+      layers we already bake into the static chunks (`kProps`, `kAnimStatic`, ...) whose motion
+      type is **not** fixed, because a moving body baked into a chunk would make that chunk
+      rebuild whenever it moves (not checked until now). *Test:* stand in a house full of
+      clutter (Breezehome, the Riverwood Trader), knock a plate off a table with Skyrim's own
+      means if possible. *Pass:* the lines list the clutter with sensible masses and shapes, so
+      K1's shape conversion is built from real data, not guesses.
+    - **K1. Solid, but frozen.** Skyrim sends each loose object in range (new protocol block,
+      v17): an id (reference handle + FormID), pose, speed, mass, Havok material and its convex
+      pieces (vertex lists; a box or capsule becomes one piece). Garry's Mod builds `gmsky_loose`
+      (server and client, `PhysicsInitMultiConvex`), **motion off**, following Skyrim's pose.
+      Skyrim still owns everything. Not drawn by Garry's Mod (Skyrim draws the real object), and
+      not exported by `render.lua`. *Test:* walk into a basket (blocked), shoot a plate (bullet
+      stops, impact effect), drop a prop on a barrel (it rests on it). *Logs:* objects in range,
+      built, removed, pieces, build ms, largest pair-record list (the crash guard from S2b).
+    - **K2. Garry's Mod takes over.** The copy is unfrozen with Skyrim's speed; Skyrim sets its
+      body keyframed and moves the object to Garry's Mod's pose every frame (new slot Garry's Mod
+      -> Skyrim, blended between ticks like the player, `Smooth.cpp`). Hand-back on range exit,
+      Garry's Mod gone (heartbeat), a new origin, or the object picked up / disabled in Skyrim.
+      An object only becomes Garry's Mod's where the physics chunks under it are built (S2's
+      rule), otherwise it stays Skyrim's. *Test:* walk into a bucket (it slides), shoot a plate
+      (it flies), a grenade in a kitchen (clutter scatters), physics-gun a cabbage, stack props on
+      a table of clutter. *Logs:* owned / handed back, the gap between Garry's Mod's pose and
+      Skyrim's object (should stay under 1 unit), hand-backs and why.
+    - **K3. Surfaces.** Havok material -> Garry's Mod surface property (wood, metal, cloth,
+      ceramic, ...) so impacts sound and spark right and objects slide and bounce right. *Test:*
+      shoot a metal pot and a wooden bowl.
+    - **K4. Saves and loads.** Check that Skyrim keeps moved objects where Garry's Mod left them:
+      move a plate, save, load, quit and load. If Skyrim doesn't, the fix goes in its own step.
+    - **K5. Skyrim pushes reach Garry's Mod.** Skyrim's own forces on an owned object (arrows,
+      spells, shouts, Skyrim's explosions) become a push on the Garry's Mod copy. *How Skyrim
+      reports them is not known yet* (a keyframed body ignores impulses); found by reading the
+      game first, planned in detail then.
+    - **K6. Skyrim's NPCs shove things.** Skyrim's NPC stand-ins (`gmsky_actor`, trace-only
+      today) get a physics shadow (a moving box Garry's Mod's physics treats as solid and
+      pushing), so NPCs walking into clutter or props push them. **Not sure** this is safe
+      against the S2b crash (moving shadows near many meshes): logged first.
+  - **Not sure (logs will show):** what share of clutter shapes are convex hulls vs meshes
+    (meshes need splitting into convex pieces, K0 tells); whether keyframing a Skyrim body and
+    moving it every frame costs much with 64 objects; whether Skyrim's save keeps the moved
+    positions (K4); how Skyrim's own forces can be caught (K5).
 - **S3. Props, ragdolls and grenades on it.** Mostly free once S2 works. Added: a prop moving into
   a chunk that isn't built yet is frozen for that moment and released with its speed (like the
   player's hold; InfMap2 doesn't need this because it makes its terrain itself, instantly; we
