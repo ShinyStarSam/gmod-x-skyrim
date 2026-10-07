@@ -1,34 +1,43 @@
-# Handoff (2026-10-06, after S2i-4 passed and the S2g push-out was built; next in-game test is 136)
+# Handoff (2026-10-06, S2j done; next: collisions with doors, interactables and Skyrim's physics objects)
 
 Where things stand, for the next session. Read `AGENTS.md` first. Details:
 - `MODLOG.md` lists every change and test, newest at the end.
-- `docs/DESIGN.md` §12 is the plan: steps S2i (stairs), S3-S5 and S4's P1-P5.
+- `docs/DESIGN.md` §12 is the plan: steps S2i (stairs), S2j (size), S3-S5 and S4's P1-P5.
 - `STATUS.md` covers the stone-stairs problem, which is now resolved.
 
 ## Where we are
 
-- **Stairs (S2i) are done.** S2i-1 to S2i-3 (tests 128-134): the player walks Skyrim's stairs
-  smoothly on invisible ramps. S2i-4 (test 135, commit `ccb27f9`): the ramps are for the player
-  only (no physics object; `TestCollision` answers only traces with player clip). Bullets, props
-  and grenades meet the real steps.
-- **Current work: S2g, out of walls after a load (built, not committed, not tested in game).**
-  Tests 134-135: after loading, the player's box (wider than Skyrim's capsule) started 4 units
-  inside a tall wall, and the old lift-only unstick failed. Now `T.Unstick` first pushes the box
-  sideways out of walls (`gmsky.PushOut`, SkyCraft's push-out method), then lifts if still
-  inside. Unit tests (32) and the harness pass; on test 135's dump the push clears the wall.
-- Protocol is still **v15**.
+- **Done and committed:** stairs (S2i, tests 128-135), push out of walls after a load (S2g, test
+  136), the player's size and the camera's near distance (S2j, tests 137-140).
+  - Protocol **v16**: Skyrim sends its player capsule radius every frame; `gmod/lua/gmsky/size.lua`
+    sets the box to half width = that radius (10.9) on both sides.
+  - `skse/src/Camera.cpp` `ApplyNear`: while Garry's Mod drives the camera, the near distance
+    shrinks so the near rectangle's corners stay inside the body (8.92 instead of 15), set on the
+    frustum and on the world scene graph's custom near distance (otherwise Skyrim resets it and
+    far shadows flicker, test 139).
+- **Next step (the user's choice): collisions with doors, interactables and Skyrim's physics
+  objects.** Plan it in `docs/DESIGN.md` first (a new step, S2k), check `reference/SkyCraft` first.
 
-## The test waiting for the user (test 136)
+## Next step: what is known so far (not investigated yet)
 
-The user loads the same save as tests 134-135 and walks off right away.
-
-**Expect:**
-- the player can move at once (no stuck at the start)
-- server log: "UNSTICK #1: ... pushed out sideways 4.4 units from 1 walls; free there" (about 4-5
-  units), no "UNSTICK failed", no STUCK line at the start
-
-**Afterwards, save the logs yourself:** `tools\save_logs.ps1 -Test 136`. If it passes, commit S2g's
-fix as one step.
+- **Doors:** at test 136's door the player was blocked at x 71.5 (near (87, 552-586, 144) relative
+  to the anchor, logs of tests 136-137) where Skyrim's sent triangles have nothing: an invisible
+  wall. The user confirmed a door is there: "clearly doors don't work right now". Guess, not
+  checked: the door is a moving body (layer `kAnimStatic`), sent with the region; the region is
+  re-sent every second near the player (`kRefreshNear` in `skse/src/Collision.cpp`), and the
+  chunk is only rebuilt when its fingerprint changes, so a door's old pose (closed) may stay in
+  Garry's Mod's chunk, or the door's swing isn't sent at all. First: log what Skyrim sends for
+  that door (its body, layer, pose, each refresh) and what the chunk holds (`C.MeshAt` in STUCK
+  lines lists the chunk's own mesh at the contact point; test 138 onward).
+- **Skyrim's physics objects (loose clutter: plates, baskets, etc.):** `Collision.cpp`
+  `Included()` sends only kStatic, kAnimStatic, kTransparent, kTrees, kProps, kTerrain, kGround
+  and kStairHelper. kClutter (moving loose objects) is not sent, so they aren't solid for Garry's
+  Mod. They move, so they can't simply go into the static chunks (every move would rebuild a
+  chunk); they likely need their own entities that follow Skyrim's pose, and the other way
+  (Garry's Mod's player pushing them) is a separate question. Ask the user what they expect: block
+  the player only, or also get pushed around by the player.
+- Other interactables to look at: activators (levers, chains), containers, furniture, gates
+  (also `kAnimStatic`, like doors).
 
 ## Open items (the user picks the order)
 
