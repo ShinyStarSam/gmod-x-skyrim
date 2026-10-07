@@ -1,8 +1,8 @@
 # STATUS
 
-**Resolved (test 133, 2026-10-06):** the stone stairs work in game ("much, much, much better").
+**Resolved (test 133, 2026-10-06; ramps player-only since test 135):** the stone stairs work in game ("much, much, much better").
 The rough spots found in test 133 are fixed (S2i-3, MODLOG); test 134 confirmed it in game ("good").
-Ramps not being player-only is still open (parked by the user). Kept below as the record.
+Ramps not being player-only was fixed in S2i-4 (test 135). Kept below as the record.
 
 ## Goal
 Garry's Mod's player walks smoothly up and down Skyrim's stairs (step S2i: invisible,

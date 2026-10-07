@@ -2083,3 +2083,28 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 - Ramps still not player-only: the self-test FAILED again (a bullet-style trace hits the ramp). Real bullets: 10 fired, 0 hit a ramp (too few to tell).
 **Changed (test tool only):** `shapes.rs` test helper `walk` starts from the highest surface under the player's 32-unit box, not only under its centre. At stuck_4 the centre was over a gap, so the map came out empty and "0 cells walked".
 **Next:** S2i-4, ramps for the player only (DESIGN.md S2i).
+
+## 2026-10-06 S2i-4: ramps for the player only, with no physics object (built; not tested in game)
+
+**Changed:**
+- `gmod/lua/gmsky/chunks.lua`: the `gmsky_ramp` entity no longer builds a physics mesh. It is an invisible box (`SOLID_OBB`, custom collisions, bounds = the ramp's box plus 1 unit). `RAMP:TestCollision` answers only traces whose mask includes player clip (`CONTENTS_PLAYERCLIP`), which is the player's movement (`MASK_PLAYERSOLID`). Bullets, NPC movement and plain solid traces get nothing, and props and grenades can't touch it because there is no physics object. The server builds the ramp right after spawning it, with no wait for the physics engine (there is no mesh). The client builds its own on the next frame. Removing the entity forgets its triangles.
+  - Removed (one system): the `ShouldCollide` rule, the `SetupMove`/`FinishMove` movement marks and the "player clip" contents (`AfterBuild`). `hook.Remove` clears the old hooks after a Lua reload too.
+  - New self-test on the first ramp: player box and line traces must hit the ramp; bullet, solid and NPC traces must not. The server and client status lines add "TestCollision this second: asked, with player clip, hits, ms (slowest)".
+- `gmod/module/src/shapes.rs`: `RampSets` holds each side's ramp triangles per ramp entity number, with the anchor epoch. Its `sweep` uses the same box-against-triangle test as `gmsky.Sweep`. New unit test `kept_ramps_stop_a_falling_box`.
+- `gmod/module/src/lib.rs`: `gmsky.RampsInBox(..., id)` also keeps the triangles under that id for this side. New `gmsky.RampSweep(id, centre, half size, move)` and `gmsky.RampForget(id)`.
+- `gmod/harness/src/main.rs`: a 4-step staircase (stair material) through the collision ring; the ramp entity's `TestCollision` with the player's mask stops a falling box on the ramp (28.4, normal z 0.77, as worked out by hand), and with bullet, NPC and solid masks gives nothing. `gmsky_ramps 0` and a removed ramp give nothing.
+- `docs/DESIGN.md` S2i-4 plan; the old "not known" answered (contents don't make traces skip a physics object).
+
+**Why:** after tests 129-134 the ramps still stopped bullets, props and grenades. Two attempts with a physics mesh failed. The old trace ground (`gmsky_field`, tests 18-21) showed that a box with no physics, answering traces itself, gets the player's movement.
+**Same as SkyCraft:** its movement collider walks on stair ramps; its projectile ray skips them (`SkyRay.java`).
+**Tested how:** `cargo test --release -p gmsky-module`: 31 passed (one run of three had the old flaky `d3d::tests::knows_an_ex_device` fail; it makes a real Direct3D device and has nothing to do with this change); `cargo build --release`; `gmod_harness.exe`: HARNESS PASSED, including the two new ramp checks. **Not tested in game.**
+**Not sure:** that nothing in Garry's Mod moves the player with a mask lacking player clip (the STUCK lines would show it); the client's prediction on a ramp that was just replaced.
+**Next:** test 135.
+
+## 2026-10-06 In-game test 135: ramps are for the player only ("perfect")
+
+**Logs:** `build/logs-ingame-test-135/`.
+**Tested how:** user walked the stairs, shot the steps, threw a grenade and dropped a prop on a staircase. User: "Perfect".
+**Result:** `ramp SELF-TEST PASSED` (player box and line traces hit the ramp; bullet, solid and NPC traces hit nothing). 32 bullets, **0 hit a ramp**. Ramps answered 1,851 player-movement hits; slowest `TestCollision` 1.4 ms. 1 STUCK reading: right after loading, inside the ground at the anchor spot (as test 134's STUCK 1-3), not stairs.
+**Still broken:** the player starts inside the ground after loading (tests 134-135).
+**Next:** that load problem (it belongs to S2's ground), then S3.

@@ -21,8 +21,9 @@
 -- Rust store (one module per process). Logs: gmod_server.log / gmod_client.log.
 --
 -- S2i-2 (DESIGN.md S2i): ramps over Skyrim's stairs. Each chunk with stair noses in it gets a
--- second mesh, a `gmsky_ramp` entity (shape made in Rust, gmsky.RampsInBox), removed with its
--- chunk. Only the player's movement collides with it (the ShouldCollide hook below).
+-- `gmsky_ramp` entity (shape made in Rust, gmsky.RampsInBox), removed with its chunk. S2i-4: the
+-- ramp has no physics object; it answers traces itself (ENT:TestCollision) and only those that
+-- include player clip, which the player's movement does and bullets, NPCs and props don't.
 
 local gmsky = gmsky
 local C = gmsky.chunks or {}
@@ -226,11 +227,10 @@ function ENT:Build(flat, n)
 	if still then return false, still end
 	if CLIENT then
 		-- The server never has two chunks in one place, but the client may see a new chunk before
-		-- the old one's removal arrives: wait for it too. (Ramps of neighbouring chunks may overlap
-		-- each other: a ramp waits only for an older ramp of its own chunk.)
+		-- the old one's removal arrives: wait for it too.
 		for _, e in ipairs(ents.FindByClass(self:GetClass())) do
 			if e ~= self and e.gmskyBuilt and IsValid(e:GetPhysicsObject())
-				and (self.gmskyIsRamp and e:ChunkKey() == key or not self.gmskyIsRamp and Overlap(wlo, whi, e:GetPos() + e:GetBoxLo(), e:GetPos() + e:GetBoxHi())) then
+				and Overlap(wlo, whi, e:GetPos() + e:GetBoxLo(), e:GetPos() + e:GetBoxHi()) then
 				return false, string.format("%s, an older chunk entity here, still has its physics", e:ChunkName())
 			end
 		end
@@ -274,7 +274,6 @@ function ENT:Build(flat, n)
 		logMs = logMs + C.StepLog(self, st[1], flagFirst, steps[i + 1] and steps[i + 1][1] or "nothing")
 	end
 	local phys = self:GetPhysicsObject()
-	if self.AfterBuild and IsValid(phys) then self:AfterBuild(phys) end
 	self:DrawShadow(false)
 	self:AddSolidFlags(FSOLID_FORCE_WORLD_ALIGNED)
 	self:AddFlags(FL_STATICPROP)
@@ -352,34 +351,29 @@ if CLIENT then
 	end
 end
 
--- ---- S2i-2: the ramp entity (a copy of the chunk entity with its own triangles) ---------------
+-- ---- S2i-2: the ramp entity (shares the chunk entity's data and names) ------------------------
+-- S2i-4 (DESIGN.md S2i): no physics object. An invisible box over the ramp's triangles with
+-- custom collisions, so the engine asks RAMP:TestCollision for every trace crossing it (as the
+-- old trace ground gmsky_field, tests 18-21); the triangles stay in the module (gmsky.RampSweep).
+-- Tests 129-134 tried two ways with a physics mesh, a ShouldCollide rule during movement and the
+-- contents "player clip": traces with a bullet's mask still hit it, and props and grenades
+-- collide with any physics object. Same idea as SkyCraft (MIT): its movement collider walks on
+-- stair ramps, its projectile ray (SkyRay.java) skips them.
 local RAMP = {}
 for k, v in pairs(ENT) do RAMP[k] = v end
-RAMP.gmskyIsRamp = true
 function RAMP:ChunkKey() return "ramp " .. Key(self:GetCX(), self:GetCY(), self:GetCZ()) end
 function RAMP:ChunkName() return string.format("ramp %d %d %d", self:GetCX(), self:GetCY(), self:GetCZ()) end
 function RAMP:Initialize()
 	self:DrawShadow(false)
-	self:SetCustomCollisionCheck(true) -- the ShouldCollide hook below decides who touches it
-end
--- Test 129: the ShouldCollide rule below didn't keep traces off the ramp (the self-test's bullet
--- trace hit it). Second way: the ramp's contents become "player clip", which the player's
--- movement traces include (MASK_PLAYERSOLID) and bullets' don't (MASK_SHOT). Not sure the engine's
--- traces read a physics object's contents; the self-test and the bullet count say.
-function RAMP:AfterBuild(phys)
-	if not phys.SetContents then
-		C.rampContents = "PhysObj:SetContents missing"
-		return
-	end
-	phys:SetContents(CONTENTS_PLAYERCLIP)
-	C.rampContents = string.format("contents 0x%x (player clip 0x%x)", phys:GetContents(), CONTENTS_PLAYERCLIP)
+	-- The server builds in C.UpdateRamps, right after spawning; the client in Think.
 end
 
--- Client: this side's ramps for the chunk box (fingerprint compared with the server's).
+-- This side works out the ramps for the chunk box and keeps them for RampSweep (under this
+-- entity's number, the same on both sides). The client compares its fingerprint with the server's.
 function RAMP:Source()
 	local lo, hi = self:GetSrcLo(), self:GetSrcHi()
-	local flat, n, hash = gmsky.RampsInBox(lo.x, lo.y, lo.z, hi.x, hi.y, hi.z)
-	if hash ~= self:GetVersion() then
+	local flat, n, hash = gmsky.RampsInBox(lo.x, lo.y, lo.z, hi.x, hi.y, hi.z, self:EntIndex())
+	if CLIENT and flat and hash ~= self:GetVersion() then
 		C.rampMismatches = (C.rampMismatches or 0) + 1
 		gmsky.Log(string.format("chunks: %s: this side's ramps differ from the server's (fingerprint %s here, %s there, %d triangles here); built from this side's",
 			self:ChunkName(), tostring(hash), self:GetVersion(), n or 0))
@@ -387,18 +381,79 @@ function RAMP:Source()
 	return flat, n
 end
 
+-- Keeps this side's triangles and makes the entity the box traces ask. False if this side isn't
+-- anchored yet (no triangles).
+function RAMP:Build()
+	local t0 = SysTime()
+	local flat, n = self:Source()
+	if not flat then return false, "not anchored on this side yet" end
+	self:SetSolid(SOLID_OBB)
+	self:SetMoveType(MOVETYPE_NONE)
+	self:EnableCustomCollisions(true)
+	-- A unit of slack: a flat ramp's box would have no height.
+	self:SetCollisionBounds(self:GetBoxLo() - Vector(1, 1, 1), self:GetBoxHi() + Vector(1, 1, 1))
+	self:DrawShadow(false)
+	self.gmskyBuilt, self.gmskyTris = true, n
+	gmsky.Log(string.format("chunks: built %s (entity %d): %d triangles kept, no physics object, %.1f ms",
+		self:ChunkName(), self:EntIndex(), n or 0, (SysTime() - t0) * 1000))
+	return true
+end
+
+function RAMP:OnRemove()
+	if gmsky.RampForget then gmsky.RampForget(self:EntIndex()) end
+end
+
+if CLIENT then
+	-- Every frame until built (the client's movement prediction needs the ramp), then rarely.
+	function RAMP:Think()
+		if not self.gmskyBuilt and self:GetN() > 0 then self:Build() end
+		self:SetNextClientThink(self.gmskyBuilt and CurTime() + 1 or CurTime())
+		return true
+	end
+end
+
+C.ramps = C.ramps or CreateConVar("gmsky_ramps", "1", FCVAR_REPLICATED,
+	"1 = the player walks on ramps laid over Skyrim's stairs (S2i-2); 0 = ramps are ignored (for comparison)")
+
+-- Traces crossing the box: only those that include player clip (the player's movement,
+-- MASK_PLAYERSOLID) get an answer. startpos is the bottom of a moving box (gmsky_field_feet, test
+-- 19). Counted for the status lines.
+C.tc = C.tc or { asked = 0, answered = 0, hits = 0, ms = 0, worst = 0 }
+function RAMP:TestCollision(startpos, delta, isbox, extents, mask)
+	local s = C.tc
+	s.asked = s.asked + 1
+	if not mask or bit.band(mask, CONTENTS_PLAYERCLIP) == 0 or not self.gmskyBuilt or not C.ramps:GetBool() then return end
+	s.answered = s.answered + 1
+	local t0 = SysTime()
+	local ex, ey, ez = 0, 0, 0
+	if isbox then ex, ey, ez = extents.x, extents.y, extents.z end
+	local o = self:GetPos()
+	local cz = startpos.z - o.z
+	local feet = gmsky.field and gmsky.field.feet
+	if isbox and (not feet or feet:GetBool()) then cz = cz + ez end
+	local frac, nx, ny, nz = gmsky.RampSweep(self:EntIndex(), startpos.x - o.x, startpos.y - o.y, cz, ex, ey, ez, delta.x, delta.y, delta.z)
+	local ms = (SysTime() - t0) * 1000
+	s.ms, s.worst = s.ms + ms, math.max(s.worst, ms)
+	if not frac then return end
+	s.hits = s.hits + 1
+	return { HitPos = startpos + delta * frac, Fraction = frac, Normal = Vector(nx, ny, nz) }
+end
+
+-- "TestCollision this second: ..." for the status lines; resets the counts.
+function C.TestCollisionText()
+	local s = C.tc
+	local line = string.format("TestCollision this second: %d asked, %d with player clip, %d hits, %.2f ms (slowest %.3f ms)", s.asked, s.answered, s.hits, s.ms, s.worst)
+	s.asked, s.answered, s.hits, s.ms, s.worst = 0, 0, 0, 0, 0
+	return line
+end
+
 scripted_ents.Register(ENT, "gmsky_chunk")
 scripted_ents.Register(RAMP, "gmsky_ramp")
 
--- Player-only (S2i-2): a ramp collides only with a player whose movement is being worked out
--- right now (between SetupMove and FinishMove; both sides run these for prediction). Props, the
--- world, chunks, and bullets (fired after movement, in the weapon's think) get "no". Physics
--- never asks during movement, so its answer is always "no", as the hook requires.
-C.ramps = C.ramps or CreateConVar("gmsky_ramps", "1", FCVAR_REPLICATED,
-	"1 = the player walks on ramps laid over Skyrim's stairs (S2i-2); 0 = ramps are ignored (for comparison)")
-C.inMove = C.inMove or {}
-hook.Add("SetupMove", "gmsky_ramps_move", function(ply) C.inMove[ply] = true end)
-hook.Add("FinishMove", "gmsky_ramps_move", function(ply) C.inMove[ply] = nil end)
+-- The S2i-2 rules that S2i-4 replaces (gone after a Lua reload too).
+hook.Remove("SetupMove", "gmsky_ramps_move")
+hook.Remove("FinishMove", "gmsky_ramps_move")
+hook.Remove("ShouldCollide", "gmsky_ramps")
 -- Real bullets (test 129's self-test used Lua traces, which may filter differently from the
 -- engine's): every bullet's hit, counted by what it hit; status line.
 C.bullets = C.bullets or { shot = 0, ramp = 0 }
@@ -410,12 +465,6 @@ hook.Add("EntityFireBullets", "gmsky_ramps_bullets", function(_, data)
 		if cb then return cb(attacker, tr, dmg) end
 	end
 	return true
-end)
-hook.Add("ShouldCollide", "gmsky_ramps", function(a, b)
-	local ra, rb = a.gmskyIsRamp, b.gmskyIsRamp
-	if not ra and not rb then return end
-	local other = ra and b or a
-	return (other:IsPlayer() and C.inMove[other] and C.ramps:GetBool()) or false
 end)
 
 -- Chunks can't be picked up or removed with tools.
@@ -445,7 +494,7 @@ if CLIENT then
 		if #ents.FindByClass("gmsky_chunk") == 0 and next(C.dead) == nil then return end
 		local ramps, built = ents.FindByClass("gmsky_ramp"), 0
 		for _, e in ipairs(ramps) do built = built + (e.gmskyBuilt and 1 or 0) end
-		gmsky.Log(C.StatusLine() .. string.format("; ramps: %d entities (%d built), fingerprint mismatches so far %d", #ramps, built, C.rampMismatches or 0))
+		gmsky.Log(C.StatusLine() .. string.format("; ramps: %d entities (%d built), fingerprint mismatches so far %d; %s", #ramps, built, C.rampMismatches or 0, C.TestCollisionText()))
 	end)
 end
 
@@ -598,12 +647,9 @@ if SERVER then
 			local from = pos + Vector(0, 0, up)
 			parts[#parts + 1] = string.format("ahead from %.0f up: %s", up, TraceText(Hull(from, from + wish * 24)))
 		end
-		-- S2i-2: what the player's movement finds under the feet (ramps count only during movement).
-		local was = C.inMove[ply]
-		C.inMove[ply] = true
+		-- S2i-2: what the player's movement finds under the feet (ramps answer the player's mask).
 		parts[#parts + 1] = "below as movement sees it: " .. TraceText(util.TraceHull({ start = pos + Vector(0, 0, 2), endpos = pos - Vector(0, 0, 24),
 			mins = Vector(mins.x, mins.y, 0), maxs = Vector(maxs.x, maxs.y, 1), filter = ply, mask = MASK_PLAYERSOLID, collisiongroup = COLLISION_GROUP_PLAYER_MOVEMENT }))
-		C.inMove[ply] = was
 		-- Test 129: big stone stairs got no ramp; why, from the stair triangles around the feet.
 		local rp = pos - a
 		local check = gmsky.RampCheck and gmsky.RampCheck(rp.x - 48, rp.y - 48, rp.z - 24, rp.x + 48, rp.y + 48, rp.z + 40)
@@ -741,10 +787,10 @@ if SERVER then
 	-- its ramps worked out again (gmsky.RampsInBox); the ramp entity is replaced only when the
 	-- ramp's triangles changed. At most RAMP_BUILDS ramp builds a tick.
 	local RAMP_EVERY, RAMP_BUILDS = 5, 2
-	C.rampStats = C.rampStats or { builds = 0, waits = 0, computed = 0 }
+	C.rampStats = C.rampStats or { builds = 0, computed = 0 }
 
-	-- Self-test on the first ramp (half a second later, so the engine has it in its lists): line
-	-- traces down onto a ramp triangle's middle; what each one hits.
+	-- Self-test on the first ramp (half a second later): traces down onto a ramp triangle's
+	-- middle with each kind of mask; only the player's must hit the ramp (S2i-4).
 	local function SelfTest(ramp, flat, a)
 		local ply = player.GetAll()[1]
 		if not IsValid(ply) or not IsValid(ramp) then C.rampSelfTested = false return end
@@ -754,18 +800,16 @@ if SERVER then
 			if not tr.Hit then return "nothing" end
 			return string.format("%s at %.0f%%", IsValid(tr.Entity) and tr.Entity:GetClass() or tr.HitWorld and "the world" or "?", tr.Fraction * 100)
 		end
-		local was = C.inMove[ply]
-		C.inMove[ply] = true
-		local moving = util.TraceLine({ start = from, endpos = to, filter = ply, mask = MASK_PLAYERSOLID, collisiongroup = COLLISION_GROUP_PLAYER_MOVEMENT })
-		local movingHull = util.TraceHull({ start = from, endpos = to, mins = Vector(-2, -2, 0), maxs = Vector(2, 2, 1), filter = ply, mask = MASK_PLAYERSOLID, collisiongroup = COLLISION_GROUP_PLAYER_MOVEMENT })
-		C.inMove[ply] = nil
-		local outside = util.TraceLine({ start = from, endpos = to, filter = ply, mask = MASK_PLAYERSOLID, collisiongroup = COLLISION_GROUP_PLAYER_MOVEMENT })
+		local function Ramp(tr) return tr.Entity == ramp end
+		local box = { mins = Vector(-2, -2, 0), maxs = Vector(2, 2, 1) }
+		local player = util.TraceHull({ start = from, endpos = to, mins = box.mins, maxs = box.maxs, filter = ply, mask = MASK_PLAYERSOLID, collisiongroup = COLLISION_GROUP_PLAYER_MOVEMENT })
+		local playerLine = util.TraceLine({ start = from, endpos = to, filter = ply, mask = MASK_PLAYERSOLID })
 		local bullet = util.TraceLine({ start = from, endpos = to, filter = ply, mask = MASK_SHOT })
-		local nofilter = util.TraceLine({ start = from, endpos = to, mask = MASK_SOLID })
-		C.inMove[ply] = was
-		local pass = IsValid(moving.Entity) and moving.Entity == ramp and not (IsValid(bullet.Entity) and bullet.Entity:GetClass() == "gmsky_ramp")
-		gmsky.Log(string.format("chunks: ramp SELF-TEST %s on %s at (%.1f, %.1f, %.1f), ramp %s: player movement trace hits %s (box trace %s); the same trace outside movement hits %s; bullet trace hits %s; trace with no filter hits %s",
-			pass and "PASSED" or "FAILED", ramp:ChunkName(), c.x, c.y, c.z, tostring(C.rampContents), Hit(moving), Hit(movingHull), Hit(outside), Hit(bullet), Hit(nofilter)))
+		local solid = util.TraceLine({ start = from, endpos = to, mask = MASK_SOLID })
+		local npc = util.TraceHull({ start = from, endpos = to, mins = box.mins, maxs = box.maxs, filter = ply, mask = MASK_NPCSOLID })
+		local pass = Ramp(player) and Ramp(playerLine) and not Ramp(bullet) and not Ramp(solid) and not Ramp(npc)
+		gmsky.Log(string.format("chunks: ramp SELF-TEST %s on %s at (%.1f, %.1f, %.1f): player box trace hits %s, player line trace %s (both must be the ramp); bullet trace hits %s, solid trace %s, NPC box trace %s (none may be the ramp)",
+			pass and "PASSED" or "FAILED", ramp:ChunkName(), c.x, c.y, c.z, Hit(player), Hit(playerLine), Hit(bullet), Hit(solid), Hit(npc)))
 	end
 
 	function C.UpdateRamps(a, N)
@@ -796,29 +840,25 @@ if SERVER then
 									rlo.x, rlo.y, rlo.z = math.min(rlo.x, flat[i]), math.min(rlo.y, flat[i + 1]), math.min(rlo.z, flat[i + 2])
 									rhi.x, rhi.y, rhi.z = math.max(rhi.x, flat[i]), math.max(rhi.y, flat[i + 1]), math.max(rhi.z, flat[i + 2])
 								end
-								local still = C.StillInEngine("ramp " .. key, a + rlo, a + rhi)
-								if still then
-									C.rampStats.waits = C.rampStats.waits + 1
-								else
-									local r = ents.Create("gmsky_ramp")
-									r:SetCX(cx) r:SetCY(cy) r:SetCZ(cz) r:SetN(N)
-									r:SetVersion(hash)
-									r:SetBoxLo(rlo) r:SetBoxHi(rhi)
-									r:SetSrcLo(lo) r:SetSrcHi(hi)
-									r:SetPos(a)
-									r:SetAngles(Angle(0, 0, 0))
-									r:Spawn()
-									r:Build(flat, n)
-									e.gmskyRamp = r
-									rec.rampVer, rec.rampHash, rec.rampInfo = ver, hash, info
-									built = built + 1
-									C.rampStats.builds = C.rampStats.builds + 1
-									gmsky.Log(string.format("chunks: ramps for chunk %s: %d triangles; %d noses, %d strips, steepest %.1f degrees; bottoms %d (%d ends found no floor within 48 units); tops %d (%d landings not flush within 1 unit)",
-										key, n, noses, strips, steepest, bottoms, floating, tops, topsOff))
-									if not C.rampSelfTested then
-										C.rampSelfTested = true
-										timer.Simple(0.5, function() SelfTest(r, flat, a) end)
-									end
+								-- No physics object (S2i-4), so nothing to wait for in the engine.
+								local r = ents.Create("gmsky_ramp")
+								r:SetCX(cx) r:SetCY(cy) r:SetCZ(cz) r:SetN(N)
+								r:SetVersion(hash)
+								r:SetBoxLo(rlo) r:SetBoxHi(rhi)
+								r:SetSrcLo(lo) r:SetSrcHi(hi)
+								r:SetPos(a)
+								r:SetAngles(Angle(0, 0, 0))
+								r:Spawn()
+								r:Build()
+								e.gmskyRamp = r
+								rec.rampVer, rec.rampHash, rec.rampInfo = ver, hash, info
+								built = built + 1
+								C.rampStats.builds = C.rampStats.builds + 1
+								gmsky.Log(string.format("chunks: ramps for chunk %s: %d triangles; %d noses, %d strips, steepest %.1f degrees; bottoms %d (%d ends found no floor within 48 units); tops %d (%d landings not flush within 1 unit)",
+									key, n, noses, strips, steepest, bottoms, floating, tops, topsOff))
+								if not C.rampSelfTested then
+									C.rampSelfTested = true
+									timer.Simple(0.5, function() SelfTest(r, flat, a) end)
 								end
 							end
 						end
@@ -850,10 +890,10 @@ if SERVER then
 			end
 		end
 		local rs = C.rampStats
-		line = line .. string.format("; ramps (gmsky_ramps %d): %d entities, %d triangles, %d noses, %d strips (steepest %.1f degrees), bottoms %d (%d ends in the air), tops %d (%d not flush); this second: %d worked out, %d built, %d engine waits, bullets %d (%d hit a ramp)%s",
-			C.ramps:GetInt(), k.ents, k.n, k.noses, k.strips, k.steepest, k.bottoms, k.floating, k.tops, k.topsOff, rs.computed, rs.builds, rs.waits,
-			C.bullets.shot, C.bullets.ramp, C.rampSelfTested == nil and ", self-test not run yet" or "")
-		rs.computed, rs.builds, rs.waits = 0, 0, 0
+		line = line .. string.format("; ramps (gmsky_ramps %d): %d entities, %d triangles, %d noses, %d strips (steepest %.1f degrees), bottoms %d (%d ends in the air), tops %d (%d not flush); this second: %d worked out, %d built, bullets %d (%d hit a ramp), %s%s",
+			C.ramps:GetInt(), k.ents, k.n, k.noses, k.strips, k.steepest, k.bottoms, k.floating, k.tops, k.topsOff, rs.computed, rs.builds,
+			C.bullets.shot, C.bullets.ramp, C.TestCollisionText(), C.rampSelfTested == nil and ", self-test not run yet" or "")
+		rs.computed, rs.builds = 0, 0
 		C.bullets.shot, C.bullets.ramp = 0, 0
 		return line
 	end

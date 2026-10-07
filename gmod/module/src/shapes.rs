@@ -1069,6 +1069,54 @@ fn sweep_tri(t: &Tri, c: [f64; 3], e: [f64; 3], d: [f64; 3]) -> Option<(f64, [f6
     Some((enter, n))
 }
 
+/// S2i-4: each side's ramp triangles per ramp entity (its number), kept with the anchor epoch they
+/// were made in. The ramps have no physics object; the ramp entity's TestCollision sweeps the
+/// player's box against these (only for traces that include player clip), so nothing else ever
+/// touches them. Keyed by entity, not chunk: a replaced ramp's old entity is removed after the
+/// new one exists, and must not take the new one's triangles with it.
+#[derive(Default)]
+pub struct RampSets {
+    sets: HashMap<(u32, i32), (u32, Vec<Tri>)>,
+}
+
+impl RampSets {
+    /// Keeps `tris` as `side`'s ramp `id` (replacing what it had).
+    pub fn keep(&mut self, side: u32, id: i32, epoch: u32, tris: &[[f64; 9]]) {
+        self.sets.insert((side, id), (epoch, tris.iter().filter_map(|t| Tri::new(*t)).collect()));
+    }
+
+    pub fn forget(&mut self, side: u32, id: i32) {
+        self.sets.remove(&(side, id));
+    }
+
+    /// Like Store::sweep (box centre c, half size e, moving by d), against one kept ramp; nothing
+    /// for a ramp made in another epoch.
+    pub fn sweep(&self, side: u32, id: i32, epoch: u32, c: [f64; 3], e: [f64; 3], d: [f64; 3]) -> Option<(f64, [f64; 3])> {
+        let (made, tris) = self.sets.get(&(side, id))?;
+        if *made != epoch {
+            return None;
+        }
+        let mut lo = [0.0; 3];
+        let mut hi = [0.0; 3];
+        for k in 0..3 {
+            lo[k] = c[k].min(c[k] + d[k]) - e[k] - 0.01;
+            hi[k] = c[k].max(c[k] + d[k]) + e[k] + 0.01;
+        }
+        let mut best: Option<(f64, [f64; 3])> = None;
+        for t in tris {
+            if t.lo[0] <= hi[0] && t.hi[0] >= lo[0] && t.lo[1] <= hi[1] && t.hi[1] >= lo[1] && t.lo[2] <= hi[2] && t.hi[2] >= lo[2] {
+                if let Some((f, n)) = sweep_tri(t, c, e, d) {
+                    if best.map_or(true, |(b, _)| f < b) {
+                        best = Some((f, n));
+                    }
+                }
+            }
+        }
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        best.map(|(f, n)| (if len > 0.0 { (f - EPS / len).max(0.0) } else { f }, n))
+    }
+}
+
 /// The part of triangle v inside the box lo..hi, as triangles (Sutherland-Hodgman against the
 /// six faces, then a fan). A piece lying entirely on a high face (x = hi.x, ...) is dropped: it
 /// belongs to the neighbouring box, whose low face it is on. Pieces with no area are dropped.
@@ -1363,6 +1411,28 @@ mod tests {
         // Same steps without a stair material: no ramp.
         let p = store_with(&stairs_msg(0, 10.0, 12.0, true)).ramps_in_box([-136.0; 3], [136.0; 3]);
         assert_eq!((p.noses, p.tris.len()), (0, 0));
+    }
+
+    #[test]
+    fn kept_ramps_stop_a_falling_box() {
+        let r = store_with(&stairs_msg(gmsky_protocol::TRI_STAIRS, 10.0, 12.0, true)).ramps_in_box([-136.0; 3], [136.0; 3]);
+        let mut k = RampSets::default();
+        k.keep(1, 5, 7, &r.tris);
+        // A box (half size 4) dropped onto the middle of a ramp triangle stops on the ramp: its
+        // bottom ends at most a few units above that point (the slope under its corners).
+        let t = r.tris[0];
+        let m = [(t[0] + t[3] + t[6]) / 3.0, (t[1] + t[4] + t[7]) / 3.0, (t[2] + t[5] + t[8]) / 3.0];
+        let drop = |k: &RampSets, side, id, epoch| k.sweep(side, id, epoch, [m[0], m[1], m[2] + 40.0], [4.0; 3], [0.0, 0.0, -80.0]);
+        let (f, n) = drop(&k, 1, 5, 7).expect("the box lands on the ramp");
+        let bottom = m[2] + 36.0 - 80.0 * f;
+        assert!(bottom >= m[2] - 0.1 && bottom <= m[2] + 5.0, "bottom {bottom}, ramp {}", m[2]);
+        assert!(n[2] > 0.5, "normal {n:?}");
+        // The other side, another ramp and another epoch have no ramp here; forgotten: none.
+        assert!(drop(&k, 2, 5, 7).is_none());
+        assert!(drop(&k, 1, 6, 7).is_none());
+        assert!(drop(&k, 1, 5, 8).is_none());
+        k.forget(1, 5);
+        assert!(drop(&k, 1, 5, 7).is_none());
     }
 
     /// For working on a dump: what a walking player stands on around `at`, 4-unit cells, found by

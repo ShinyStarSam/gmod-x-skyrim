@@ -2703,10 +2703,59 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
      test 133 code) to 0 (one dump 4, one 1; both at a flight's side); what is left is at
      flights' sides and ends (steps of different lengths, a fan-shaped bottom step), away from
      where the player walks up. Test 132's dumps also improved (e.g. 527 to 479, 280 to 190).
+     *Test 134:* the user: "good". 6 STUCK readings, none on a missing or bumpy ramp.
+  3. **S2i-4, ramps for the player only (planned 2026-10-06 after test 134).** Two attempts failed
+     (tests 129-134): a `ShouldCollide` rule while the player's movement runs, then the physics
+     object's contents set to "player clip". A Lua trace with a bullet's mask still hit the ramp,
+     and props and grenades collide with it, because the ramp is a physics object. **The fix: the
+     ramp has no physics object at all.** It becomes what the old trace ground `gmsky_field` was
+     (proven in tests 18-21 and later): an invisible box (`SOLID_OBB`, custom collisions, bounds =
+     the ramp's box) whose `ENT:TestCollision(startpos, delta, isbox, extents, mask)` the engine
+     asks for every trace crossing it. It answers only when `mask` contains **player clip**
+     (`CONTENTS_PLAYERCLIP` 0x10000). The player's movement asks with `MASK_PLAYERSOLID` (logged
+     as 33636363 = 0x201400B in tests 19-102, player clip included). Bullets (`MASK_SHOT`), NPCs
+     (`MASK_NPCSOLID`) and plain solid traces (`MASK_SOLID`) don't include it, so they pass
+     through. Props, grenades and ragdolls are simulated by the physics engine, which never sees
+     an object with no physics, so they pass through too.
+     - **Rust:** `gmsky.RampsInBox` gets an optional seventh argument, the ramp entity's number.
+       With it, the module also keeps that ramp's triangles under (side, entity number), tagged
+       with the anchor epoch. `gmsky.RampSweep(id, box centre, half size, move)` sweeps a box
+       against them with the same box-against-triangle test as `gmsky.Sweep` and returns
+       fraction and normal. It answers nothing for another epoch. `gmsky.RampForget(id)` drops
+       them. Keyed by entity, not by chunk: a replaced ramp's old entity is removed after its
+       replacement exists, and must not take the new triangles with it. The entity number is the
+       same on both sides. Each Lua side (server, client) keeps its own sets: in single-player
+       both sides share one module, and their ramps can differ for a moment (test 134's race).
+     - **Lua (`chunks.lua`):** the ramp entity no longer builds a mesh. Server: spawn at the
+       anchor, keep the triangles, set up the box. Client: when the entity arrives, work out its
+       own ramp for the chunk box (fingerprint compared, as now) and set up the box. Removing the
+       entity forgets its triangles on that side. `gmsky_ramps 0` makes `TestCollision` answer
+       nothing (comparison switch, as now). Removed with it, so there is one rule: the
+       `ShouldCollide` hook, the movement marks (`SetupMove`/`FinishMove`) and the contents
+       change.
+     - **Logs:** a new self-test on the first ramp, from traces: a player box trace with
+       `MASK_PLAYERSOLID` must hit the ramp; a bullet trace (`MASK_SHOT`) and a plain solid trace
+       (`MASK_SOLID`) must not. It logs PASSED or FAILED with what each hit. The status line keeps
+       counting real bullets that hit a ramp, and adds `TestCollision` calls a second (asked /
+       answered / hits) and their Rust time.
+     - **Unit test (Rust):** a box dropped onto a kept ramp stops on it; another chunk's key, a
+       forgotten ramp and an old epoch give nothing.
+     - **Harness:** the ramp entity's `TestCollision` hits with the player mask and gives nothing
+       with the bullet mask.
+     - *Test (134 + 1):* walk the same stairs; shoot the steps, throw a grenade onto them, and drop
+       a prop on a staircase. *Pass:* walking feels the same as test 134; self-test PASSED;
+       bullets hitting a ramp 0; grenades and props land on the real steps (user's eye: they sit
+       on the steps, not on an invisible slope above them).
+     - **Not known:** whether anything in Garry's Mod moves the player with a mask that lacks
+       player clip (then the ramp wouldn't hold there; the STUCK lines would show it).
+     - **Changes S5:** the Rust sweep stays, since the ramps use it.
+     - **Same as SkyCraft:** its collider (`TriCollider.java`) walks on Skyrim's own stair
+       ramps, and its projectile ray (`SkyRay.java`) skips them: answered by who asks, not by a
+       physics object.
   **Differs from SkyCraft:** SkyCraft makes no ramps. It uses Skyrim's own invisible ramps (few:
   test 125 found 34 bodies) as floor only, and its own collider walks stairs (small footprint).
-  The material read is SkyCraft's code used for a new purpose. **Not known:** whether Garry's Mod
-  lets traces skip a physics object by its contents (the self-test says).
+  The material read is SkyCraft's code used for a new purpose. **Answered (tests 129-134):**
+  setting a physics object's contents does not make traces skip it.
 - **S3. Props, ragdolls and grenades on it.** Mostly free once S2 works. Added: a prop moving into
   a chunk that isn't built yet is frozen for that moment and released with its speed (like the
   player's hold; InfMap2 doesn't need this because it makes its terrain itself, instantly; we

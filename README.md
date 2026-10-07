@@ -144,8 +144,8 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   ground (props fall through it).
 - Stairs: invisible ramps are laid over Skyrim's staircases (found by Skyrim's stair materials),
   so the player walks up and down smoothly: the big stone stairs, curved flights, stacked-box
-  steps and steps just too steep to walk (tests 133-134). Not yet right: props, grenades and
-  bullets hit the ramps too (they should be for the player only).
+  steps and steps just too steep to walk (tests 133-134). The ramps are for the player only:
+  bullets, props and grenades meet the real steps (test 135).
 - Everything else in [docs/DESIGN.md](docs/DESIGN.md) §12.
 
 ## Credits

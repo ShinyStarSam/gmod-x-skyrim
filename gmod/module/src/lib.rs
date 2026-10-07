@@ -184,7 +184,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 62] = [
+    let funcs: [(&str, lua::CFn); 64] = [
         ("EndProcess", l_end_process),
         ("SkyrimExited", l_skyrim_exited),
         ("CloseGame", l_close_game),
@@ -207,6 +207,8 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("ShapesStatus", l_shapes_status),
         ("TrisInBox", l_tris_in_box),
         ("RampsInBox", l_ramps_in_box),
+        ("RampSweep", l_ramp_sweep),
+        ("RampForget", l_ramp_forget),
         ("RampCheck", l_ramp_check),
         ("DumpTris", l_dump_tris),
         ("ShapesLattice", l_shapes_lattice),
@@ -710,7 +712,7 @@ struct PendingTest {
 }
 static HIT_TEST: Mutex<Option<PendingTest>> = Mutex::new(None);
 
-/// gmsky.HitTestStart(id, fx, fy, fz) -> test id, or false and why: lays a 21 × 21 grid of rays along
+/// gmsky.HitTestStart(id, fx, fy, fz) -> test id, or false and why: lays a 21 Ã— 21 grid of rays along
 /// the view (f) over actor id, answers them from Garry's Mod's copy and asks Skyrim (server only).
 unsafe extern "C" fn l_hit_test_start(l: *mut State) -> c_int {
     guarded(l, |a, _| {
@@ -1002,17 +1004,22 @@ unsafe extern "C" fn l_tris_in_box(l: *mut State) -> c_int {
     })
 }
 
-/// gmsky.RampsInBox(lx, ly, lz, hx, hy, hz) -> flat, count, fingerprint, noses, strips, bottoms,
-/// bottom ends in the air, tops, tops not flush, steepest: S2i-2's ramps over Skyrim's stairs for a chunk's box (relative to
-/// the anchor; shapes::Store::ramps_in_box). `flat` holds 9 numbers per triangle; the fingerprint
-/// is a hex string. Nothing when not anchored to the store's epoch.
+/// gmsky.RampsInBox(lx, ly, lz, hx, hy, hz [, id]) -> flat, count, fingerprint, noses,
+/// strips, bottoms, bottom ends in the air, tops, tops not flush, steepest: S2i-2's ramps over
+/// Skyrim's stairs for a chunk's box (relative to the anchor; shapes::Store::ramps_in_box). `flat`
+/// holds 9 numbers per triangle; the fingerprint is a hex string. With `id` (S2i-4: the ramp
+/// entity's number), this side also keeps the triangles for gmsky.RampSweep. Nothing when not
+/// anchored to the store's epoch.
 unsafe extern "C" fn l_ramps_in_box(l: *mut State) -> c_int {
-    guarded(l, |a, _| {
+    guarded(l, |a, side| {
         let n = |i: c_int| (a.tonumber)(l, i);
         let epoch = anchored_epoch();
         let Some(r) = with_shapes(|st| (epoch != 0 && st.origin_epoch == epoch).then(|| st.ramps_in_box([n(1), n(2), n(3)], [n(4), n(5), n(6)]))) else {
             return 0;
         };
+        if (a.type_)(l, 7) == 3 {
+            with_ramps(|k| k.keep(side, (a.tonumber)(l, 7) as i32, epoch, &r.tris));
+        }
         (a.createtable)(l, (r.tris.len() * 9) as c_int, 0);
         let mut i = 1;
         for t in &r.tris {
@@ -1028,6 +1035,44 @@ unsafe extern "C" fn l_ramps_in_box(l: *mut State) -> c_int {
             (a.pushnumber)(l, v);
         }
         10
+    })
+}
+
+static RAMPS: Mutex<Option<shapes::RampSets>> = Mutex::new(None);
+
+fn with_ramps<R>(f: impl FnOnce(&mut shapes::RampSets) -> R) -> R {
+    let mut g = RAMPS.lock().unwrap_or_else(|e| e.into_inner());
+    f(g.get_or_insert_with(shapes::RampSets::default))
+}
+
+/// gmsky.RampSweep(id, bx, by, bz, ex, ey, ez, dx, dy, dz) -> fraction, nx, ny, nz, or nothing:
+/// where a box (centre b, half size e, relative to the anchor) moving by d first touches this
+/// side's kept ramp `id` (S2i-4; same rules as gmsky.Sweep). Nothing for a ramp kept in another
+/// anchor epoch.
+unsafe extern "C" fn l_ramp_sweep(l: *mut State) -> c_int {
+    guarded(l, |a, side| {
+        let n = |i: c_int| (a.tonumber)(l, i);
+        let epoch = anchored_epoch();
+        let hit = with_ramps(|k| k.sweep(side, n(1) as i32, epoch, [n(2), n(3), n(4)], [n(5), n(6), n(7)], [n(8), n(9), n(10)]));
+        match hit {
+            Some((f, nv)) => {
+                (a.pushnumber)(l, f);
+                for v in nv {
+                    (a.pushnumber)(l, v);
+                }
+                4
+            }
+            None => 0,
+        }
+    })
+}
+
+/// gmsky.RampForget(id): this side drops its kept ramp `id` (S2i-4).
+unsafe extern "C" fn l_ramp_forget(l: *mut State) -> c_int {
+    guarded(l, |a, side| {
+        let id = (a.tonumber)(l, 1) as i32;
+        with_ramps(|k| k.forget(side, id));
+        0
     })
 }
 
@@ -1527,7 +1572,7 @@ unsafe extern "C" fn l_status(l: *mut State) -> c_int {
     })
 }
 
-// ---- Geometry route step G3b (DESIGN.md §12): Garry's Mod's objects to Skyrim (render_out.rs) ----
+// ---- Geometry route step G3b (DESIGN.md Â§12): Garry's Mod's objects to Skyrim (render_out.rs) ----
 
 static RENDER_OUT: Mutex<Option<render_out::RenderOut>> = Mutex::new(None);
 static RENDER_OPEN_TRY: Mutex<u64> = Mutex::new(0);

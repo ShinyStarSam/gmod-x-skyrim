@@ -85,6 +85,7 @@ function RunConsoleCommand(name, value) HARNESS_CONVARS = HARNESS_CONVARS or {};
 function GetConVar(name) local v = (HARNESS_CONVARS or {})[name]; return v and { GetString = function() return v end } end
 FCVAR_ARCHIVE = 128
 FCVAR_REPLICATED = 8192
+CONTENTS_PLAYERCLIP = 65536
 -- HARNESS_CVARS[name] overrides a convar's value. The step B ground tests run on the ray grid;
 -- the step D tests switch gmsky_ground to shapes.
 -- gmsky_overlay_hidewindow 0: the harness never asks to move a window (step 2d-2).
@@ -200,6 +201,11 @@ fn clear_msg(col_epoch: u32, origin_epoch: u32) -> Vec<u8> {
 }
 
 fn region_msg(r: [i32; 3], col_epoch: u32, size: f32, tris: &[[f32; 9]]) -> Vec<u8> {
+    region_msg_flagged(r, col_epoch, size, tris, 0)
+}
+
+/// As region_msg, with GMSKY_TRI_* `flags` on every triangle.
+fn region_msg_flagged(r: [i32; 3], col_epoch: u32, size: f32, tris: &[[f32; 9]], flags: u32) -> Vec<u8> {
     let mut v = Vec::with_capacity(40 + 40 * tris.len());
     for x in r {
         v.extend_from_slice(&x.to_le_bytes());
@@ -215,7 +221,7 @@ fn region_msg(r: [i32; 3], col_epoch: u32, size: f32, tris: &[[f32; 9]]) -> Vec<
         for x in t {
             v.extend_from_slice(&x.to_le_bytes());
         }
-        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&flags.to_le_bytes());
     }
     v
 }
@@ -974,6 +980,51 @@ fn main() {
             println!("shapes: Rust vs Lua sweeps (cases hits mismatches lua-ms rust-ms ties): {r:?}");
             let ok = matches!(&r, Ok(Some(s)) if { let v: Vec<&str> = s.split(' ').collect(); v.len() == 6 && v[2] == "0" && v[1].parse::<u32>().unwrap_or(0) > 300 });
             check(ok, &format!("shapes: Rust sweep = field.lua sweep in 3000 random sweeps over {} regions: {r:?}", regions.len()));
+            // S2i-4: a ramp answers only traces that include player clip. Four steps (rise 10,
+            // run 12, stair material) at relative x 800-848, z 740-780, a floor in front; the
+            // ramp entity (at the anchor, world = relative + (-799, 0, -750)) keeps its triangles
+            // under its number, and its TestCollision is asked with each kind of mask.
+            let mut steps: Vec<[f32; 9]> = Vec::new();
+            for k in 0..4 {
+                let (x, z0, z1) = (800.0 + k as f32 * 12.0, 740.0 + k as f32 * 10.0, 750.0 + k as f32 * 10.0);
+                steps.push([x, -20.0, z0, x, 20.0, z0, x, 20.0, z1]);
+                steps.push([x, -20.0, z0, x, 20.0, z1, x, -20.0, z1]);
+                steps.push([x, -20.0, z1, x + 12.0, -20.0, z1, x + 12.0, 20.0, z1]);
+                steps.push([x, -20.0, z1, x + 12.0, 20.0, z1, x, 20.0, z1]);
+            }
+            let ground = [[740.0, -40.0, 740.0, 800.0, -40.0, 740.0, 800.0, 40.0, 740.0f32], [740.0, -40.0, 740.0, 800.0, 40.0, 740.0, 740.0, 40.0, 740.0]];
+            let (stair_regions, ground_regions) = (regions_of(&steps, 272.0), regions_of(&ground, 272.0));
+            for r in stair_regions.keys().chain(ground_regions.keys()).collect::<std::collections::BTreeSet<_>>() {
+                let mut msg = region_msg_flagged(*r, 2, 272.0, stair_regions.get(r).map_or(&[][..], |v| &v[..]), gmsky_protocol::TRI_STAIRS);
+                // The floor goes in unflagged, after the steps (count and flags patched in place).
+                let floor = ground_regions.get(r).map_or(&[][..], |v| &v[..]);
+                let n = u32::from_le_bytes(msg[16..20].try_into().unwrap()) + floor.len() as u32;
+                msg[16..20].copy_from_slice(&n.to_le_bytes());
+                for t in floor {
+                    for x in t {
+                        msg.extend_from_slice(&x.to_le_bytes());
+                    }
+                    msg.extend_from_slice(&0u32.to_le_bytes());
+                }
+                sky.ring_write(COL_REGION, &msg);
+            }
+            lua.run(ls, "hook.Run('Think')").unwrap();
+            let r = lua.run(ls, "local e = ents.Create('gmsky_ramp') function e:EntIndex() return 4321 end \
+                e:SetPos(Vector(-799, 0, -750)) e:SetN(1) e:SetCX(3) e:SetCY(0) e:SetCZ(2) e:SetSrcLo(Vector(700, -100, 700)) e:SetSrcHi(Vector(900, 100, 850)) \
+                e:SetBoxLo(Vector(780, -20, 730)) e:SetBoxHi(Vector(850, 20, 790)) HARNESS_RAMP = e \
+                local ok = e:Build() local _, n = gmsky.RampsInBox(700, -100, 700, 900, 100, 850) \
+                local function ask(mask) local tr = e:TestCollision(Vector(818 - 799, 0, 50), Vector(0, 0, -100), true, Vector(16, 16, 36), mask) \
+                  return tr and string.format('hit %.1f %.2f', tr.HitPos.z, tr.Normal.z) or 'nothing' end \
+                return string.format('%s %d | player %s | bullet %s | npc %s | solid %s', tostring(ok), n, ask(33636363), ask(1174421507), ask(33701899), ask(33570827))");
+            // The board under the box's uphill edge (stairs x 34): z 740 + 10 + 34 * 10 / 12 = 778.3
+            // relative, 28.3 in the world (28.4 with the 1/32-unit stand-off); its normal z 12 / sqrt(244) = 0.77.
+            // 8 triangles: 3 strips of 2 and the bottom strip.
+            check(r == Ok(Some("true 8 | player hit 28.4 0.77 | bullet nothing | npc nothing | solid nothing".into())),
+                &format!("ramp (S2i-4): TestCollision stops the player's box on the ramp; bullet, NPC and solid masks pass through: {r:?}"));
+            let r = lua.run(ls, "HARNESS_CVARS.gmsky_ramps = '0' local tr = HARNESS_RAMP:TestCollision(Vector(19, 0, 50), Vector(0, 0, -100), true, Vector(16, 16, 36), 33636363) \
+                HARNESS_CVARS.gmsky_ramps = nil HARNESS_RAMP:OnRemove() local gone = HARNESS_RAMP:TestCollision(Vector(19, 0, 50), Vector(0, 0, -100), true, Vector(16, 16, 36), 33636363) \
+                return tostring(tr) .. ' ' .. tostring(gone)");
+            check(r == Ok(Some("nil nil".into())), &format!("ramp (S2i-4): gmsky_ramps 0 and a removed ramp answer nothing: {r:?}"));
             // A new "clear" drops everything; the player is held again (in the air above nothing).
             sky.ring_write(COL_CLEAR, &clear_msg(3, 1));
             lua.run(ls, "hook.Run('Think') HARNESS_ADVANCE() hook.Run('Tick')").unwrap();
