@@ -1,4 +1,4 @@
-# Handoff (2026-10-06, after S2i-4 was built; next in-game test is 135)
+# Handoff (2026-10-06, after S2i-4 passed and the S2g push-out was built; next in-game test is 136)
 
 Where things stand, for the next session. Read `AGENTS.md` first. Details:
 - `MODLOG.md` lists every change and test, newest at the end.
@@ -7,36 +7,28 @@ Where things stand, for the next session. Read `AGENTS.md` first. Details:
 
 ## Where we are
 
-- **Current work: step S2i, invisible ramps over Skyrim's stairs.** Garry's Mod's player walks
-  Skyrim's ground as Garry's Mod physics objects (`gmsky_ground physics`). Skyrim's stairs are
-  steps that Source catches on, so smooth ramps are laid over every staircase.
-- **S2i-1 (test 128):** the Skyrim plugin marks triangles with Skyrim's stair materials.
-- **S2i-2 (test 133)** and **S2i-3 (test 134):** walking the stairs works, including the big stone
-  stairs, curved flights and stacked-box steps. User after test 134: "good". Commit `20d28d4`.
-- **S2i-4 (built, not committed, not tested in game):** ramps for the player only. The ramp has
-  no physics object. It is an invisible box whose `TestCollision` answers only traces that
-  include player clip (the player's movement). Bullets, NPCs, props and grenades pass through to
-  the real steps. Unit tests (31) and the harness pass, including a new ramp check.
-- Protocol is still **v15** (no protocol change).
+- **Stairs (S2i) are done.** S2i-1 to S2i-3 (tests 128-134): the player walks Skyrim's stairs
+  smoothly on invisible ramps. S2i-4 (test 135, commit `ccb27f9`): the ramps are for the player
+  only (no physics object; `TestCollision` answers only traces with player clip). Bullets, props
+  and grenades meet the real steps.
+- **Current work: S2g, out of walls after a load (built, not committed, not tested in game).**
+  Tests 134-135: after loading, the player's box (wider than Skyrim's capsule) started 4 units
+  inside a tall wall, and the old lift-only unstick failed. Now `T.Unstick` first pushes the box
+  sideways out of walls (`gmsky.PushOut`, SkyCraft's push-out method), then lifts if still
+  inside. Unit tests (32) and the harness pass; on test 135's dump the push clears the wall.
+- Protocol is still **v15**.
 
-## The test waiting for the user (test 135)
+## The test waiting for the user (test 136)
 
-The user:
-- walks the same stairs as test 134
-- shoots the steps of a staircase
-- throws a grenade onto a staircase
-- drops a prop (spawn menu) onto a staircase
+The user loads the same save as tests 134-135 and walks off right away.
 
 **Expect:**
-- walking feels the same as test 134
-- bullets, the grenade and the prop meet the real steps (no invisible slope above them)
-- server log: `ramp SELF-TEST PASSED`, "bullets N (0 hit a ramp)" in the status lines, and
-  "TestCollision this second: ... hits" above 0 while walking on stairs
+- the player can move at once (no stuck at the start)
+- server log: "UNSTICK #1: ... pushed out sideways 4.4 units from 1 walls; free there" (about 4-5
+  units), no "UNSTICK failed", no STUCK line at the start
 
-**Afterwards, save the logs yourself:** `tools\save_logs.ps1 -Test 135`. Then read
-`build\logs-ingame-test-135\`.
-
-If it passes: commit S2i-4 as one step.
+**Afterwards, save the logs yourself:** `tools\save_logs.ps1 -Test 136`. If it passes, commit S2g's
+fix as one step.
 
 ## Open items (the user picks the order)
 
@@ -44,10 +36,8 @@ If it passes: commit S2i-4 as one step.
    nothing noticed. Left alone.
 2. **Client/server ramp fingerprint mismatch:** a harmless timing race (MODLOG test 134). Could
    be logged only when it lasts, if it gets in the way.
-3. **Player stuck inside the ground right after loading** (test 134 STUCK 1-3, at the anchor
-   spot, no stairs). Not looked at.
-4. Bumps at the sides of flights (the real shape). Left alone on purpose.
-5. **After S2:**
+3. Bumps at the sides of flights (the real shape). Left alone on purpose.
+4. **After S2:**
    - S3: props, ragdolls and grenades on Skyrim's ground.
    - S4: props saved in Skyrim's world and save (P1-P5 in DESIGN.md).
    - S5: remove the old traced ground. **The Rust sweep stays: the ramps use it.**

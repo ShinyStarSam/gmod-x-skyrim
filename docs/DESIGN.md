@@ -2548,6 +2548,23 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
   (wider than Skyrim's capsule) overlaps the ground; inside a physics mesh it can't move. Every tick
   (physics mode, server): if the box starts inside a chunk, lift it to the lowest free spot up to 72
   units above and drop it onto what is below. Logged per lift.
+  *After tests 134-135* (the same save: right after loading, "UNSTICK failed ... no free spot
+  within 72 units above", the player stuck until it jumped out): the dumps show one straight wall,
+  122 units tall, 17 units from Skyrim's foot position. Skyrim's capsule fits there; the box's
+  corner reaches 21.6 units toward the wall, 4.2 units into it. Lifting can't clear a wall taller
+  than 72. **Push out sideways first, SkyCraft's method** (`TriCollider.pushOutOfWalls`, MIT,
+  credited): every Skyrim triangle overlapping the box's body from step height (18) to the head
+  is cut to that slab; for each one, the depth of the box into it along the triangle's horizontal
+  normal, pointing to the side the box's centre is on; the deepest one pushes the box out by that
+  depth plus 1/32 unit; up to 4 rounds (corners). In Rust (`Store::push_out`, `gmsky.PushOut`),
+  run once when the box is found inside a chunk; then, if still inside, the lift as before; then
+  the drop onto the ground. Logged: walls pushed from, distance moved, and whether it ended free.
+  **Differs from SkyCraft:** SkyCraft pushes a cylinder on every movement step; we push Source's
+  box only when it starts inside the ground (Source's own movement keeps it out after that), and
+  the depth is measured for a box (its half-width along the push direction), not a radius.
+  *Unit test:* a box 4 units into a tall wall ends just clear of it; a box in a corner clears both
+  walls; a box touching nothing isn't moved. *Test:* load the same save. *Pass:* an "UNSTICK" line
+  that says "pushed out", no "UNSTICK failed", no STUCK line at the start.
 - **S2h. Stairs: SkyCraft's stepping rule on top of Source's movement (approved and built
   2026-10-06, `gmod/lua/gmsky/stairs.lua`; not tested in game).** Test 125: Skyrim's invisible stair ramps exist for only a few stairs (34 ramp
   bodies in a session), so they can't fix most stairs. On stairs the player's box rests on the

@@ -346,16 +346,35 @@ if SERVER then
 	-- S2g: the player's box inside Skyrim's ground (tests 123 and 125: after a load, a door, a
 	-- fast travel the player is put at Skyrim's foot position, and Garry's Mod's 32-unit box,
 	-- wider than Skyrim's capsule, overlaps the ground; inside a physics mesh it can't move).
-	-- Lifted to the lowest free spot up to UNSTICK_UP above, in 2-unit steps, then dropped onto
-	-- what is under it. Logged.
+	-- After tests 134-135 (a wall taller than UNSTICK_UP 17 units from the feet; the box's corner
+	-- 4 units into it): first pushed sideways out of the walls it overlaps above step height
+	-- (gmsky.PushOut, SkyCraft's push out of walls, MIT); if still inside, lifted to the lowest
+	-- free spot up to UNSTICK_UP above, in 2-unit steps, then dropped onto what is under it. Logged.
 	local UNSTICK_UP = 72
 	T.stats.unsticks = T.stats.unsticks or 0
 	local function InsideChunk(ply, p)
 		local tr = util.TraceHull({ start = p, endpos = p, mins = ply:OBBMins(), maxs = ply:OBBMaxs(), filter = ply, mask = MASK_PLAYERSOLID })
 		return tr.StartSolid and IsValid(tr.Entity) and tr.Entity:GetClass() == "gmsky_chunk"
 	end
-	function T.Unstick(ply, pos)
+	function T.Unstick(ply, pos, a)
 		if not InsideChunk(ply, pos) then return end
+		local start, pushed = pos, ""
+		local x, y, n
+		if a and gmsky.PushOut then
+			x, y, n = gmsky.PushOut(pos.x - a.x, pos.y - a.y, pos.z - a.z, ply:OBBMaxs().x, ply:OBBMaxs().z, ply:GetStepSize())
+		end
+		if x and n > 0 then
+			local p = Vector(x + a.x, y + a.y, pos.z)
+			pushed = string.format("pushed out sideways %.1f units from %d walls", (p - pos):Length(), n)
+			if not InsideChunk(ply, p) then
+				ply:SetPos(p)
+				T.stats.unsticks = T.stats.unsticks + 1
+				gmsky.Log(string.format("terrain: UNSTICK #%d: the player's box was inside Skyrim's ground at (%.1f, %.1f, %.1f): %s; free there",
+					T.stats.unsticks, pos.x, pos.y, pos.z, pushed))
+				return
+			end
+			pos, pushed = p, pushed .. ", still inside; then "
+		end
 		for up = 2, UNSTICK_UP, 2 do
 			local p = pos + Vector(0, 0, up)
 			if not InsideChunk(ply, p) then
@@ -363,15 +382,15 @@ if SERVER then
 				local to = tr.StartSolid and p or tr.HitPos
 				ply:SetPos(to)
 				T.stats.unsticks = T.stats.unsticks + 1
-				gmsky.Log(string.format("terrain: UNSTICK #%d: the player's box was inside Skyrim's ground at (%.1f, %.1f, %.1f): lifted %.1f units (free %d above, then dropped onto %s)",
-					T.stats.unsticks, pos.x, pos.y, pos.z, to.z - pos.z, up, tr.Hit and (IsValid(tr.Entity) and tr.Entity:GetClass() or "the world") or "nothing"))
+				gmsky.Log(string.format("terrain: UNSTICK #%d: the player's box was inside Skyrim's ground at (%.1f, %.1f, %.1f): %slifted %.1f units (free %d above, then dropped onto %s)",
+					T.stats.unsticks, start.x, start.y, start.z, pushed, to.z - pos.z, up, tr.Hit and (IsValid(tr.Entity) and tr.Entity:GetClass() or "the world") or "nothing"))
 				return
 			end
 		end
 		if not T.unstickFailLogged then
 			T.unstickFailLogged = true
-			gmsky.Log(string.format("terrain: UNSTICK failed: the player's box is inside Skyrim's ground at (%.1f, %.1f, %.1f) and no free spot within %d units above (logged once)",
-				pos.x, pos.y, pos.z, UNSTICK_UP))
+			gmsky.Log(string.format("terrain: UNSTICK failed: the player's box is inside Skyrim's ground at (%.1f, %.1f, %.1f) and no free spot within %d units above%s (logged once)",
+				start.x, start.y, start.z, UNSTICK_UP, pushed ~= "" and " (" .. pushed .. "lifting found nothing)" or ""))
 		end
 	end
 
@@ -403,7 +422,7 @@ if SERVER then
 			T.Hold(ply, pos, WAIT_CHUNKS)
 			gmsky.Log(string.format("terrain: HOLD at (%.0f, %.0f, %.0f): %s", pos.x, pos.y, pos.z, WAIT_CHUNKS))
 		end
-		if ready and not noclip and not T.holding then T.Unstick(ply, ply:GetPos()) end
+		if ready and not noclip and not T.holding then T.Unstick(ply, ply:GetPos(), a) end
 	end
 
 	-- While held: no movement, no falling.

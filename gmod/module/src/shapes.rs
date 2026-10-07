@@ -1069,6 +1069,74 @@ fn sweep_tri(t: &Tri, c: [f64; 3], e: [f64; 3], d: [f64; 3]) -> Option<(f64, [f6
     Some((enter, n))
 }
 
+/// Whether triangle t and the box (centre c, half size e) overlap (no separating axis).
+fn overlaps(t: &Tri, c: [f64; 3], e: [f64; 3]) -> bool {
+    let axis = |a: [f64; 3]| {
+        let len = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+        len < 1e-6 || axis_times(t, c, e, [0.0; 3], [a[0] / len, a[1] / len, a[2] / len]).is_some()
+    };
+    if !axis([1.0, 0.0, 0.0]) || !axis([0.0, 1.0, 0.0]) || !axis([0.0, 0.0, 1.0]) || !axis(t.n) {
+        return false;
+    }
+    let edges = [
+        [t.v[3] - t.v[0], t.v[4] - t.v[1], t.v[5] - t.v[2]],
+        [t.v[6] - t.v[3], t.v[7] - t.v[4], t.v[8] - t.v[5]],
+        [t.v[0] - t.v[6], t.v[1] - t.v[7], t.v[2] - t.v[8]],
+    ];
+    edges.iter().all(|u| axis([0.0, u[2], -u[1]]) && axis([-u[2], 0.0, u[0]]) && axis([u[1], -u[0], 0.0]))
+}
+
+impl Store {
+    /// S2g after test 135: pushes the player's box (feet, half width, height) sideways out of the
+    /// Skyrim triangles its body overlaps from `step` above the feet to the head. Adapted from
+    /// SkyCraft (MIT) `TriCollider.pushOutOfWalls`: each overlapping piece (cut to that slab) is
+    /// measured along its horizontal normal, towards the side the box's centre is on; the deepest
+    /// pushes the box out by its depth plus EPS; up to 4 rounds (corners). SkyCraft pushes a
+    /// cylinder by its radius; this is a box, so the depth uses the box's half width along the
+    /// push. Flat pieces (floors, ceilings) are left to the lift. Returns the new feet x, y and
+    /// the number of pushes.
+    pub fn push_out(&self, feet: [f64; 3], half: f64, height: f64, step: f64) -> (f64, f64, usize) {
+        let (mut x, mut y) = (feet[0], feet[1]);
+        let (zlo, zhi) = (feet[2] + step, feet[2] + height - 0.02);
+        let mut pushes = 0;
+        for _ in 0..4 {
+            let c = [x, y, (zlo + zhi) / 2.0];
+            let e = [half, half, (zhi - zlo) / 2.0];
+            let (lo, hi) = ([x - half - 1.0, y - half - 1.0, zlo], [x + half + 1.0, y + half + 1.0, zhi]);
+            let (stairs, others) = self.gather(lo, hi, 0.0);
+            let mut best = (0.0, [0.0; 2]);
+            for t in stairs.iter().chain(others.iter()) {
+                let hl = (t.n[0] * t.n[0] + t.n[1] * t.n[1]).sqrt();
+                if hl < 0.1 {
+                    continue;
+                }
+                for piece in clip_to_box(&t.v, lo, hi) {
+                    let Some(p) = Tri::new(piece) else { continue };
+                    if !overlaps(&p, c, e) {
+                        continue;
+                    }
+                    let mut u = [t.n[0] / hl, t.n[1] / hl];
+                    if (x - p.v[0]) * u[0] + (y - p.v[1]) * u[1] < 0.0 {
+                        u = [-u[0], -u[1]];
+                    }
+                    let reach = (0..3).map(|i| (p.v[3 * i] - x) * u[0] + (p.v[3 * i + 1] - y) * u[1]).fold(f64::NEG_INFINITY, f64::max);
+                    let depth = reach + half * (u[0].abs() + u[1].abs());
+                    if depth > best.0 {
+                        best = (depth, u);
+                    }
+                }
+            }
+            if best.0 <= EPS {
+                break;
+            }
+            x += best.1[0] * (best.0 + EPS);
+            y += best.1[1] * (best.0 + EPS);
+            pushes += 1;
+        }
+        (x, y, pushes)
+    }
+}
+
 /// S2i-4: each side's ramp triangles per ramp entity (its number), kept with the anchor epoch they
 /// were made in. The ramps have no physics object; the ramp entity's TestCollision sweeps the
 /// player's box against these (only for traces that include player clip), so nothing else ever
@@ -1414,6 +1482,24 @@ mod tests {
     }
 
     #[test]
+    fn push_out_clears_walls() {
+        // Walls 140 tall: x = wx (across y) and y = wy (across x); a floor at z = 0.
+        let wall_x = |wx: f32| [[wx, -100.0, -10.0, wx, 100.0, -10.0, wx, 100.0, 130.0], [wx, -100.0, -10.0, wx, 100.0, 130.0, wx, -100.0, 130.0]];
+        let wall_y = |wy: f32| [[-100.0, wy, -10.0, 100.0, wy, -10.0, 100.0, wy, 130.0], [-100.0, wy, -10.0, 100.0, wy, 130.0, -100.0, wy, 130.0]];
+        let floor = [[-100.0, -100.0, 0.0, 100.0, -100.0, 0.0, 100.0, 100.0, 0.0f32], [-100.0, -100.0, 0.0, 100.0, 100.0, 0.0, -100.0, 100.0, 0.0]];
+        let store = |tris: Vec<[f32; 9]>| store_with(&region_payload(0, 0, 0, 1, [-136.0; 3], 272.0, &tris));
+        let push = |s: &Store| s.push_out([0.0, 0.0, 0.0], 16.0, 72.0, 18.0);
+        // Test 135's case: the box 4 units into a tall wall ends just clear of it.
+        let (x, y, n) = push(&store([wall_x(12.0).to_vec(), floor.to_vec()].concat()));
+        assert!((x - (12.0 - 16.0 - EPS)).abs() < 1e-9 && y == 0.0 && n == 1, "{x} {y} {n}");
+        // A corner: both walls.
+        let (x, y, n) = push(&store([wall_x(12.0).to_vec(), wall_y(-10.0).to_vec(), floor.to_vec()].concat()));
+        assert!((x - (12.0 - 16.0 - EPS)).abs() < 1e-9 && (y - (-10.0 + 16.0 + EPS)).abs() < 1e-9 && n == 2, "{x} {y} {n}");
+        // The floor alone, and a wall out of reach: not moved.
+        assert_eq!(push(&store([wall_x(40.0).to_vec(), floor.to_vec()].concat())), (0.0, 0.0, 0));
+    }
+
+    #[test]
     fn kept_ramps_stop_a_falling_box() {
         let r = store_with(&stairs_msg(gmsky_protocol::TRI_STAIRS, 10.0, 12.0, true)).ramps_in_box([-136.0; 3], [136.0; 3]);
         let mut k = RampSets::default();
@@ -1606,6 +1692,8 @@ mod tests {
                     }
                 }
             }
+            let (ox, oy, pushes) = s.push_out([px, py, pz], 16.0, 72.0, 18.0);
+            println!("    push out of walls (S2g): {pushes} pushes, moved ({:.2}, {:.2})", ox - px, oy - py);
             let (nb, big, near, cells) = bumps(&s, &ramp, lo, hi, [px, py, pz]);
             println!("    bumps on ramps/stairs within 48 units (1-unit cells, over 2 units high, not at the sides): {nb} ({big} of 6+ units, {near} within 24 units) over {cells} cells walked");
             if std::env::var("GMSKY_DUMP_MAP").map_or(false, |d| path.to_string_lossy().contains(&d)) {

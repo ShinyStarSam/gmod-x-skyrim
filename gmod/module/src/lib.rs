@@ -184,7 +184,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 64] = [
+    let funcs: [(&str, lua::CFn); 65] = [
         ("EndProcess", l_end_process),
         ("SkyrimExited", l_skyrim_exited),
         ("CloseGame", l_close_game),
@@ -209,6 +209,7 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("RampsInBox", l_ramps_in_box),
         ("RampSweep", l_ramp_sweep),
         ("RampForget", l_ramp_forget),
+        ("PushOut", l_push_out),
         ("RampCheck", l_ramp_check),
         ("DumpTris", l_dump_tris),
         ("ShapesLattice", l_shapes_lattice),
@@ -1073,6 +1074,24 @@ unsafe extern "C" fn l_ramp_forget(l: *mut State) -> c_int {
         let id = (a.tonumber)(l, 1) as i32;
         with_ramps(|k| k.forget(side, id));
         0
+    })
+}
+
+/// gmsky.PushOut(fx, fy, fz, half, height, step) -> x, y, pushes: the player's box (feet f
+/// relative to the anchor, half width, height) pushed sideways out of the Skyrim triangles its
+/// body overlaps above `step` (S2g after test 135; shapes::Store::push_out, after SkyCraft).
+/// Nothing when not anchored to the store's epoch.
+unsafe extern "C" fn l_push_out(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let n = |i: c_int| (a.tonumber)(l, i);
+        let epoch = anchored_epoch();
+        let Some((x, y, pushes)) = with_shapes(|st| (epoch != 0 && st.origin_epoch == epoch).then(|| st.push_out([n(1), n(2), n(3)], n(4), n(5), n(6)))) else {
+            return 0;
+        };
+        for v in [x, y, pushes as f64] {
+            (a.pushnumber)(l, v);
+        }
+        3
     })
 }
 

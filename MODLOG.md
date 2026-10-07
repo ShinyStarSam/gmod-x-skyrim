@@ -2108,3 +2108,28 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 **Result:** `ramp SELF-TEST PASSED` (player box and line traces hit the ramp; bullet, solid and NPC traces hit nothing). 32 bullets, **0 hit a ramp**. Ramps answered 1,851 player-movement hits; slowest `TestCollision` 1.4 ms. 1 STUCK reading: right after loading, inside the ground at the anchor spot (as test 134's STUCK 1-3), not stairs.
 **Still broken:** the player starts inside the ground after loading (tests 134-135).
 **Next:** that load problem (it belongs to S2's ground), then S3.
+
+## 2026-10-06 S2g: push the player sideways out of walls after a load (built; not tested in game)
+
+**Changed:**
+- `gmod/module/src/shapes.rs`: `Store::push_out`, adapted from SkyCraft (MIT) `TriCollider.pushOutOfWalls`. Every Skyrim triangle the box's body overlaps from step height to the head is cut to that slab. Each one is measured along its horizontal normal, toward the side the box's centre is on. The deepest pushes the box out by its depth plus 1/32 unit, up to 4 rounds. New `overlaps` (box vs triangle). Unit test `push_out_clears_walls`: a box 4 into a tall wall, a corner, a floor alone and a wall out of reach. The offline dump test prints the push for each dump.
+- `gmod/module/src/lib.rs`: `gmsky.PushOut(feet, half width, height, step)`.
+- `gmod/lua/gmsky/terrain.lua` `T.Unstick`: pushes sideways first. If still inside, it lifts (as before) from the pushed spot. The UNSTICK lines say which was done.
+- `gmod/harness/src/main.rs`: `PushOut` leaves a box standing on a floor where it is.
+- `docs/DESIGN.md` S2g *after tests 134-135*.
+
+**Why:** tests 134-135, the same save: right after loading, "UNSTICK failed ... no free spot within 72 units above", and the player was stuck until they jumped out. The dumps show one straight wall, 122 units tall, 17 units from Skyrim's foot position. Garry's Mod's box reaches 21.6 units toward it, so its corner is 4.2 units into the wall, and lifting can't clear a wall that tall.
+**Differs from SkyCraft:** SkyCraft pushes a cylinder on every movement step; this pushes Source's box once, when it starts inside the ground, and measures the depth for a box (its half width along the push), not a radius.
+**Tested how:** `cargo test --release -p gmsky-module`: 32 passed. On the real dumps offline: test 135's spawn spot is pushed 4.4 units away from the wall in 1 push (test 134's: 5.0); an independent overlap check (Python, separating axes) finds 0 triangles touching the box there afterwards (2 before). Test 134's L-turn stairs spot: 0 pushes (nothing to push from). `cargo build --release`; harness PASSED. **Not tested in game.**
+**Next:** test 136.
+
+## 2026-10-06 In-game test 136: push-out works; a wall in the physics that Skyrim's triangles don't have; "the player is too big"
+
+**Logs:** `build/logs-ingame-test-136/` with 24 STUCK dumps.
+**Tested how:** user loaded the save, walked around, went through doors. User: "the player is just too big atm I can't fit properly through some places. Might want to consider changing the player size or shape".
+**Result:**
+- Push-out: 4 unsticks, all freed the player. Load: pushed 8.2, still inside, then lifted 0.4. After a door: pushed 11.0. Another: pushed 7.5. Load again: lifted 10.1. No stuck at the start.
+- 1 "UNSTICK failed", at (87.0, 552.3, 143.8), followed by STUCK 19-24 at the same spot: the player's x stays at exactly 87.5 while y slides 555-586, against a wall at the box's face (x 71.5) at every height. **Skyrim's triangles (the dumps) have nothing there:** 0 triangles overlap the box at the failed spot, and nothing blocks moving west, by an independent check. The chunk there (-1 -1 0) was rebuilt 4 times in 4 s just before (each 4,737 triangles, server and client alike), so something there moved (a door?). Not explained yet: the game's collision and Skyrim's data disagree at that spot.
+- Other STUCK readings: stairs at walls and doorways (2-4, 15-16), falls (12-13), against NPC stand-ins (5).
+- Skyrim's scale check: Garry's Mod units per Skyrim unit 0.5311 (eye) / 0.5461 (height).
+**Next:** measure Skyrim's player collision shape (to size Garry's Mod's box), and log what the game's own collision holds where a STUCK happens.

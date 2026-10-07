@@ -915,6 +915,9 @@ fn main() {
             let r = lua.run(ls, "local T = gmsky.terrain local tr = HARNESS_ENTS.gmsky_field.TestCollision(T.ent, Vector(0, 0, 50), Vector(0, 0, -100), true, Vector(16, 16, 36), 0) \
                 return tr and string.format('%.4f %.1f %.2f', tr.Fraction, tr.HitPos.z, tr.Normal.z) or 'nil'");
             check(r == Ok(Some("0.5997 -10.0 1.00".into())), &format!("shapes: entity's TestCollision stops a falling box on Skyrim's floor: {r:?}"));
+            // S2g after test 135: standing on that floor, nothing to push out of.
+            let r = lua.run(ls, "local x, y, n = gmsky.PushOut(800, 0, 740, 16, 72, 18) return string.format('%.1f %.1f %d', x, y, n)");
+            check(r == Ok(Some("800.0 0.0 0".into())), &format!("shapes: PushOut leaves a box standing on a floor where it is: {r:?}"));
             let r = lua.run(ls, "local e = gmsky.terrain.ent local a, b = e:GetBoundsLo(), e:GetBoundsHi() return string.format('%d %d %d %d %d %d', a.x, a.y, a.z, b.x, b.y, b.z)");
             check(r == Ok(Some("543 -273 271 817 273 817".into())), &format!("shapes: entity bounds cover the regions: {r:?}"));
 
