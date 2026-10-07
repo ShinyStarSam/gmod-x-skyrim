@@ -2253,3 +2253,12 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 **Changed:** nothing; docs (`README.md` works / doesn't work; `docs/DESIGN.md` S2k K1 result: K2 must stop Skyrim's player body pushing them).
 **Not tested:** bullets and props against the copies (the user didn't mention them).
 **Next:** K2.
+
+## 2026-10-07 MIT license and GitHub upload
+
+**Changed:** added `LICENSE` (MIT, © 2026 ShinyStarSam); `.gitignore` whitelists `LICENSE`; `README.md` has a License section.
+**Why:** the user is sharing the project on GitHub (github.com/ShinyStarSam/gmod-x-skyrim) and wants it open source.
+**Tested how:** before uploading, checked every commit in history for game files, decompiled code and credentials.
+**Result:** no game files, decompiled code or credentials found. GitHub's own starting commit (title-only README and the same LICENSE) was replaced by this history, at the user's request.
+**Still broken / not tested:** no code changed.
+**Next:** K2.

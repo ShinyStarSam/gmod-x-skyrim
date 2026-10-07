@@ -185,3 +185,8 @@ by chasmlol (MIT). Details and license text: [THIRD-PARTY-NOTICES.md](THIRD-PART
 | `logs/` | Runtime logs (not tracked) |
 | `build/` | Build output (not tracked) |
 | `reference/` | Read-only SkyCraft clone (not tracked) |
+
+## License
+
+MIT. See [LICENSE](LICENSE). Third-party code keeps its own license: see
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
