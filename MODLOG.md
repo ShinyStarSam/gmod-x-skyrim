@@ -2133,3 +2133,65 @@ User: they alt-tabbed several times during test 22, gameplay was "buttery smooth
 - Other STUCK readings: stairs at walls and doorways (2-4, 15-16), falls (12-13), against NPC stand-ins (5).
 - Skyrim's scale check: Garry's Mod units per Skyrim unit 0.5311 (eye) / 0.5461 (height).
 **Next:** measure Skyrim's player collision shape (to size Garry's Mod's box), and log what the game's own collision holds where a STUCK happens.
+
+## 2026-10-06 S2j-1: measure Skyrim's player collision; STUCK lines read the game's own mesh (built; not tested in game)
+
+**Changed:**
+- `skse/src/Probe.cpp`: with the status lines, `player collision (size check after test 136)`: the character controller's radius, height, actorHeight, scale and centre fields (raw), its collision and bumper bounds, and each of its two shapes' box size in Skyrim units and Garry's Mod units (×0.5311). The whole read is inside a fault guard. Logging only.
+- `gmod/lua/gmsky/chunks.lua`: a STUCK line blocked by a chunk (box trace from just above step height) adds `C.MeshAt`: the blocking chunk's own physics mesh (`PhysObj:GetMeshConvexes`) at the hit point, with up to 4 triangles' corners, relative to the anchor like the dumps.
+- `docs/DESIGN.md`: S2j (player size): measure, then resize. The shape options are written there; the choice is the user's.
+
+**Why:** test 136. The user says the player is too big to fit through some places. At one spot the game blocked the player where Skyrim's triangles have nothing.
+**Tested how:** `cmake --build --preset release` in `skse/` (built; the post-build step copied `gmsky.dll` to Skyrim's `Data\SKSE\Plugins`, as always); `cargo build --release`; harness PASSED (it loads `chunks.lua`, but the STUCK path isn't exercised). **Not tested in game.**
+**Not sure:** that the controller's `radius` / `height` fields are in Havok units (the shapes' boxes are converted for sure); which of the two shapes is the sneaking one.
+
+## 2026-10-06 S2j-2: the player's box sized from Skyrim's capsule, rule B (built; not tested in game)
+
+**Changed:**
+- Protocol **v16** (`protocol/gmsky_protocol.h`, `protocol/src/lib.rs`): `GmskySkyrimState` gains `radius` (the player's collision capsule radius, Garry's Mod units; 0 = unknown) and a reserved word; the struct grows 56 -> 64 bytes, so everything after it in shared memory moves 8 bytes (layout checks updated on both sides).
+- `skse/src/Probe.cpp`: `RadiusGmod`: half the narrower side of the character controller's standing shape's box (for a capsule, its radius) x 0.5311, written every frame; the size-check line also says what was sent.
+- `gmod/module/src/lib.rs`: `gmsky.PlayerRadius()`.
+- New `gmod/lua/gmsky/size.lua` (both sides, included after water): twice a second, the player's standing and crouched boxes get half width = radius / 1.41 (the user's choice, rule B: the box's corners stay inside Skyrim's capsule), heights kept; `gmsky_size_from_skyrim 0` = Garry's Mod's own 16. Every change logged (`size: player box half width ...`).
+- `gmod/harness/src/main.rs`: the fake player's boxes can be set; radius 13 -> half width 9.2 standing and crouched, heights 72 / 36 kept; no radius -> 16.
+- `docs/DESIGN.md` S2j: rule B chosen, as built.
+
+**Why:** test 136, the user: the player is too big to fit through some places; chose rule B.
+**Tested how:** `cargo test --release` (workspace): module 32 passed, protocol 12 passed (layout checks); `cmake --build --preset release` in `skse/` (copied to Skyrim's Plugins as always); `cargo build --release`; harness PASSED including the two new size checks. **Not tested in game.** Skyrim's real radius is still unmeasured: the test shows it.
+**Also from the user:** test 136's phantom wall was at a door, so doors don't work yet. Not looked at in this step; S2j-1's mesh listing in STUCK lines is there to show what the game's collision holds at a door.
+
+## 2026-10-06 In-game test 137: the box sized from Skyrim; rule B too small ("I see through walls"); box now as wide as Skyrim's player (not tested in game)
+
+**Logs:** `build/logs-ingame-test-137/`.
+**Tested how:** user walked the narrow places and a door. User: "Let's make it a little bigger because I see through certain walls if I get closer to it."
+**Result:**
+- Skyrim's player collision: a list shape (type 9), box 40 x 55 x 128 Skyrim units standing, 43 x 58.5 x 135 the second shape; raw radius 0.257 Havok (18 Skyrim units), height 1.829 Havok (128); collision bound extents 21.5 x 21.5 x 67.5. Radius sent 10.62 Garry's Mod units; both sides set half width 16.0 -> 7.5 (rule B).
+- Seeing through walls: at 7.5 the eye gets within about 14 Skyrim units of a wall; Skyrim's own body keeps its camera about 20 away, which its camera's near distance is made for.
+- Door: the player was again blocked at x 71.5 at test 136's door (UNSTICK failed at (78.4, 552.8, 144.0), STUCK lines there). The new mesh listing said "0 triangles within 2 units", but it looked at the wrong point: a box trace's HitPos is the box's centre, 7.5 units from the contact. So the door's phantom wall is at x 71.5 in both tests.
+**Changed:**
+- `gmod/lua/gmsky/size.lua`: half width = Skyrim's player radius (10.6), not radius / 1.41; harness expects 13 for radius 13.
+- `skse/src/Probe.cpp`: the size-check line adds the camera's near distance (`fNearDistance:Display`).
+- `gmod/lua/gmsky/chunks.lua`: the STUCK mesh listing looks at the contact point (HitPos stepped back along the normal by the box's reach).
+**Tested how:** `cmake --build --preset release` in `skse/` (copied as always); `cargo build --release`; harness PASSED. **Not tested in game.**
+
+## 2026-10-06 In-game test 138: the size fits; the camera still cuts walls; near distance now fitted to the body (not tested in game)
+
+**Logs:** `build/logs-ingame-test-138/`.
+**Tested how:** user walked close to walls and through the narrow places. User: "It fit well but the camera still goes through walls."
+**Result:** both sides set half width 16.0 -> 10.6. Skyrim's camera near distance 15.0 (8.0 Garry's Mod units). FOV: Garry's Mod 100 -> Skyrim 115.63 across the 16:9 screen (frustum right 1.5890). The near rectangle's corners are 2.03 x the near distance from the eye: 30.5 Skyrim units, past the body's 20.
+**Changed:** `skse/src/Camera.cpp` `ApplyNear` / `RestoreNear`: while the camera is driven, the world camera's near distance = 0.9 x the player's half width / the corner factor, at most Skyrim's own (expected 8.85; corners within 18); Skyrim's own comes back when we stop. The CAMERA status line adds the near distance set, its reach, and what was found before setting it. `skse/src/Probe.cpp`/`.h`: `Probe::PlayerHalfWidth()` (Skyrim units, from the radius sent each frame). `docs/DESIGN.md` S2j *after test 138*.
+**Tested how:** `cmake --build --preset release` in `skse/` (copied as always). **Not tested in game.** Not sure the value stays after our write: the status line says.
+
+## 2026-10-06 In-game test 139: far shadows flicker; Skyrim reset the near distance on some frames; now set on the world scene graph too (not tested in game)
+
+**Logs:** `build/logs-ingame-test-139/`.
+**Tested how:** user played with the near-distance fix. User: "Shadows look really weird at a distance, they flicker in and out." (Nothing said about walls.)
+**Result:** every CAMERA line: `near distance set 8.92 ... found before setting 8.92..15.00`. Skyrim writes its own 15 back on some frames, so the near distance flips between 8.92 and 15.
+**Changed:** `skse/src/Camera.cpp` `ApplyNear` / `RestoreNear`: also set the world scene graph's `useCustomNear` / `customNearDistance` (saved first, put back when we stop driving).
+**Tested how:** `cmake --build --preset release` in `skse/` (copied as always). **Not tested in game.** Not sure this is the place Skyrim rebuilds it from; the status line says.
+
+## 2026-10-06 In-game test 140: S2j works (player size, camera near distance)
+
+**Logs:** `build/logs-ingame-test-140/`.
+**Tested how:** user looked at far shadows and walked into walls and corners. User: "Flawless".
+**Result:** `size: player box half width 16.0 -> 10.9 (Skyrim's player radius 10.94)`. CAMERA lines: found 8.92..8.92 in 243 seconds, 8.92..15.00 in 8 and 15..15 in 10 (around loads, when Skyrim rebuilds its camera). No flicker, no walls cut.
+**Changed:** nothing; docs (README "works" list; DESIGN S2j done). S2j committed as one step.

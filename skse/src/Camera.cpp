@@ -21,6 +21,7 @@
 #include "Camera.h"
 
 #include "Input.h"
+#include "Probe.h"
 #include "Puppet.h"
 
 namespace gmsky::Camera
@@ -50,6 +51,12 @@ namespace gmsky::Camera
 		// Skyrim's FOV, saved while Garry's Mod's is in use.
 		bool g_fovSaved = false;
 		float g_savedWorldFov = 0.0f, g_fovInUse = 0.0f, g_fovGmod = 0.0f, g_aspect = 0.0f;
+		// S2j after test 138: the camera's near distance we set (0 = not set), what we found there
+		// before setting it each frame (ours again = it stays; Skyrim's = it is reset every frame),
+		// and the reach of the near rectangle's corners.
+		bool g_nearCustomSaved = false, g_savedUseCustomNear = false;
+		float g_savedCustomNear = 0.0f;
+		float g_nearSet = 0.0f, g_nearFoundMin = 1e9f, g_nearFoundMax = 0.0f, g_nearReach = 0.0f, g_nearOwn = 0.0f;
 		std::string g_why = "not started";
 
 		RE::NiPoint3 Col(const RE::NiMatrix3& a_m, int a_c)
@@ -78,8 +85,78 @@ namespace gmsky::Camera
 			return { f, f * -1.0f, u, u * -1.0f, r, r * -1.0f };
 		}
 
+		// Skyrim's own camera near distance (fNearDistance:Display), 15 by default.
+		float OwnNear()
+		{
+			auto* ini = RE::INISettingCollection::GetSingleton();
+			auto* s = ini ? ini->GetSetting("fNearDistance:Display") : nullptr;
+			return s && s->GetFloat() > 0.0f ? s->GetFloat() : 15.0f;
+		}
+
+		// S2j after test 138 ("the camera still goes through walls"): the camera can't draw closer
+		// than a flat rectangle at its near distance, and with a wide view (115.6 degrees) that
+		// rectangle's corners reach about twice the near distance from the eye: 30.5 Skyrim units,
+		// past the player's 20-unit half width, so a wall the box keeps 20 away was cut. The near
+		// distance now shrinks so the corners stay within 90% of the half width (Skyrim's own when
+		// that is smaller). Set on the world camera's frustum while we drive the camera.
+		void ApplyNear()
+		{
+			auto* cam = RE::Main::WorldRootCamera();
+			const float half = Probe::PlayerHalfWidth();
+			if (!cam || half <= 0.0f) {
+				return;
+			}
+			auto& f = cam->GetRuntimeData2().viewFrustum;
+			if (f.bOrtho) {
+				return;
+			}
+			g_nearFoundMin = std::min(g_nearFoundMin, f.fNear);
+			g_nearFoundMax = std::max(g_nearFoundMax, f.fNear);
+			const float r = std::max(std::fabs(f.fLeft), std::fabs(f.fRight));
+			const float t = std::max(std::fabs(f.fTop), std::fabs(f.fBottom));
+			const float k = std::sqrt(1.0f + r * r + t * t);  // corner distance per unit of near distance
+			g_nearOwn = OwnNear();
+			const float nearDist = std::clamp(0.9f * half / k, 1.0f, g_nearOwn);
+			// Test 139: written only here, Skyrim put its own 15 back now and then (found
+			// 8.92..15.00), so the near distance jumped between frames and far shadows flickered.
+			// The world scene graph's own custom near distance is what Skyrim rebuilds it from.
+			if (auto* sg = RE::Main::WorldRootNode()) {
+				auto& d = sg->GetRuntimeData();
+				if (!g_nearCustomSaved) {
+					g_nearCustomSaved = true;
+					g_savedUseCustomNear = d.useCustomNear;
+					g_savedCustomNear = d.customNearDistance;
+				}
+				d.useCustomNear = true;
+				d.customNearDistance = nearDist;
+			}
+			f.fNear = nearDist;
+			g_nearSet = nearDist;
+			g_nearReach = nearDist * k;
+		}
+
+		void RestoreNear()
+		{
+			if (g_nearCustomSaved) {
+				if (auto* sg = RE::Main::WorldRootNode()) {
+					auto& d = sg->GetRuntimeData();
+					d.useCustomNear = g_savedUseCustomNear;
+					d.customNearDistance = g_savedCustomNear;
+				}
+				g_nearCustomSaved = false;
+			}
+			if (g_nearSet > 0.0f) {
+				if (auto* cam = RE::Main::WorldRootCamera()) {
+					cam->GetRuntimeData2().viewFrustum.fNear = OwnNear();
+				}
+				logger::info("CAMERA near distance back to Skyrim's own {:.1f}", OwnNear());
+				g_nearSet = 0.0f;
+			}
+		}
+
 		void RestoreFov(RE::PlayerCamera* a_camera)
 		{
+			RestoreNear();
 			if (g_fovSaved && a_camera) {
 				a_camera->GetRuntimeData2().worldFOV = g_savedWorldFov;
 				logger::info("CAMERA FOV back to Skyrim's own {:.1f}", g_savedWorldFov);
@@ -191,6 +268,7 @@ namespace gmsky::Camera
 				sky->root->world.translate = a_view.eye;
 			}
 			ApplyFov(a_camera, a_view.fovDeg);
+			ApplyNear();
 			// Pass the new rotation and position down to the render camera under the root.
 			RE::NiUpdateData update{};
 			root->UpdateDownwardPass(update, 0);
@@ -342,10 +420,13 @@ namespace gmsky::Camera
 			g_why.empty() ? "" : " | not turning: " + g_why);
 		if (g_placed) {
 			logger::info("CAMERA eye (step 4): placed {} times; Garry's Mod eye height {:.1f}..{:.1f} -> camera {:.1f}..{:.1f} Skyrim units above the feet; moved Skyrim's own camera by {:.1f} avg {:.1f} max; view punch max {:.2f} deg; FOV {:.1f} (Skyrim's own {:.1f}); "
-				"Skyrim's frustum right {:.4f}, Garry's Mod's half-view tangent {:.4f} (equal = same view)",
+				"Skyrim's frustum right {:.4f}, Garry's Mod's half-view tangent {:.4f} (equal = same view); near distance set {:.2f} (Skyrim's own {:.1f}; its corners reach {:.1f}, the player's half width {:.1f}), found before setting {:.2f}..{:.2f} (equal to the set value = it stays)",
 				g_placed, g_eyeMin, g_eyeMax, g_heightMin, g_heightMax, g_moveSum / g_placed, g_moveMax, g_punchMax, g_fovInUse,
 				g_fovSaved ? g_savedWorldFov : 0.0f, FrustumRight(),
-				g_fovGmod > 0.0f && g_aspect > 0.0f ? std::tan(double(g_fovGmod) * 0.5 * kPi / 180.0) * g_aspect / (4.0 / 3.0) : 0.0);
+				g_fovGmod > 0.0f && g_aspect > 0.0f ? std::tan(double(g_fovGmod) * 0.5 * kPi / 180.0) * g_aspect / (4.0 / 3.0) : 0.0,
+				g_nearSet, g_nearOwn, g_nearReach, Probe::PlayerHalfWidth(), g_nearFoundMin < 1e8f ? g_nearFoundMin : 0.0f, g_nearFoundMax);
+			g_nearFoundMin = 1e9f;
+			g_nearFoundMax = 0.0f;
 		}
 		g_cameraCalls = g_turnedAfterCamera = g_turnedAfterPlayer = g_devCount = g_placed = 0;
 		g_devSum = g_devMax = g_moveSum = g_moveMax = g_punchMax = 0.0f;

@@ -184,7 +184,7 @@ pub unsafe extern "C" fn gmsky_close(_l: *mut State, side: u32) -> c_int {
 
 unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
     (a.createtable)(l, 0, 8);
-    let funcs: [(&str, lua::CFn); 65] = [
+    let funcs: [(&str, lua::CFn); 66] = [
         ("EndProcess", l_end_process),
         ("SkyrimExited", l_skyrim_exited),
         ("CloseGame", l_close_game),
@@ -242,6 +242,7 @@ unsafe fn register_functions(a: &Api, l: *mut State, side: u32) {
         ("ConsoleWindow", l_console_window),
         ("ConsoleKey", l_console_key),
         ("WaterZ", l_water_z),
+        ("PlayerRadius", l_player_radius),
         ("RenderTexture", l_render_texture),
         ("RenderModel", l_render_model),
         ("RenderFrame", l_render_frame),
@@ -1481,6 +1482,20 @@ unsafe extern "C" fn l_water_z(l: *mut State) -> c_int {
             return 0;
         }
         (a.pushnumber)(l, anchor[2] + k.water_z as f64);
+        1
+    })
+}
+
+/// gmsky.PlayerRadius() -> r: Skyrim's player collision capsule radius in Garry's Mod units (S2j);
+/// nothing while Skyrim hasn't sent one.
+unsafe extern "C" fn l_player_radius(l: *mut State) -> c_int {
+    guarded(l, |a, _| {
+        let Ok(m) = mapping() else { return 0 };
+        let Some((k, _)) = m.shared().skyrim_state.read() else { return 0 };
+        if !(k.radius > 0.0) {
+            return 0;
+        }
+        (a.pushnumber)(l, k.radius as f64);
         1
     })
 }

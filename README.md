@@ -122,8 +122,17 @@ Skyrim world. Both games run at the same time and talk through shared memory, th
   own onto Skyrim (tests 81-89). Indoors, Skyrim's shadow-casting torches and fires shadow them too,
   using Skyrim's own shadow maps, and they cast shadows from those lights onto Skyrim and onto each
   other (tests 94-95).
+- **The player is as wide as Skyrim's player** (S2j, tests 137-140): Garry's Mod's box is sized
+  from Skyrim's player collision (half width 10.9 instead of 16), so it fits through the same
+  places; the camera no longer cuts into walls up close, and far shadows are steady
+  (`gmsky_size_from_skyrim 0` goes back to Garry's Mod's own size). After a load, the player is
+  pushed sideways out of walls (test 136).
 
 ## What doesn't work yet
+
+- **Doors and Skyrim's movable objects:** a door can leave an invisible wall where it was (test
+  136), and Skyrim's loose objects (clutter that physics moves) aren't solid for Garry's Mod's
+  player yet. Next step.
 
 - Garry's Mod's **effects** are invisible in Skyrim (tracers, explosions, the physgun beam, sprites); planned as step G7.
 - A prop dragged with the physgun lags a little behind the view; phong values not fine-tuned (polish list).

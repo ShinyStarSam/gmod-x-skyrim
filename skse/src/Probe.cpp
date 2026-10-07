@@ -35,6 +35,7 @@ namespace gmsky::Probe
 		// Skyrim moved the player somewhere else (load door, fast travel): new origin.
 		uint32_t g_placeKey = 0;
 		float g_logTimer = 0.0f;
+		float g_halfWidth = 0.0f;  // S2j: the player's half width sent last frame, Skyrim units
 		RE::NiPoint3 g_lastLogPos{};
 		bool g_haveLastLogPos = false;
 
@@ -52,6 +53,103 @@ namespace gmsky::Probe
 			if (d > 180.0) d -= 360.0;
 			if (d <= -180.0) d += 360.0;
 			return d;
+		}
+
+		// After test 136 ("the player is too big"): Skyrim's own player collision, to size Garry's
+		// Mod's box from it. Everything read inside a fault guard; Skyrim units (Havok x a_k).
+		struct ControllerRead
+		{
+			float radius = 0, height = 0, actorHeight = 0, scale = 0, center = 0;
+			float bound[6]{};   // collisionBound centre, extents
+			float bumper[6]{};  // bumperCollisionBound centre, extents
+			int   type[2]{ -1, -1 };
+			float size[2][3]{};  // each shape's box (no rotation): width x, depth y, height z
+		};
+
+		bool ReadController(const RE::bhkCharacterController* a_c, float a_k, ControllerRead& a_out)
+		{
+			__try {
+				a_out.radius = a_c->radius;
+				a_out.height = a_c->height;
+				a_out.actorHeight = a_c->actorHeight;
+				a_out.scale = a_c->scale;
+				a_out.center = a_c->center;
+				const RE::BSBound* bounds[2] = { &a_c->collisionBound, &a_c->bumperCollisionBound };
+				float* outs[2] = { a_out.bound, a_out.bumper };
+				for (int b = 0; b < 2; ++b) {
+					outs[b][0] = bounds[b]->center.x;
+					outs[b][1] = bounds[b]->center.y;
+					outs[b][2] = bounds[b]->center.z;
+					outs[b][3] = bounds[b]->extents.x;
+					outs[b][4] = bounds[b]->extents.y;
+					outs[b][5] = bounds[b]->extents.z;
+				}
+				alignas(16) const float identity[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0 };
+				for (int i = 0; i < 2; ++i) {
+					const RE::bhkShape* bs = a_c->shapes[i].get();
+					const auto* shape = bs ? static_cast<const RE::hkpShape*>(bs->referencedObject.get()) : nullptr;
+					if (!shape) {
+						continue;
+					}
+					a_out.type[i] = static_cast<int>(shape->type);
+					RE::hkAabb box;
+					shape->GetAabbImpl(*reinterpret_cast<const RE::hkTransform*>(identity), 0.0f, box);
+					alignas(16) float mn[4], mx[4];
+					_mm_store_ps(mn, box.min.quad);
+					_mm_store_ps(mx, box.max.quad);
+					for (int k = 0; k < 3; ++k) {
+						a_out.size[i][k] = (mx[k] - mn[k]) * a_k;
+					}
+				}
+				return true;
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				return false;
+			}
+		}
+
+		// S2j: the player's capsule radius in Garry's Mod units, sent to Garry's Mod (which sizes
+		// its box from it): half the narrower side of the first (standing) shape's box, which for a
+		// capsule is its radius whatever unit the controller's own `radius` field is in. 0 if
+		// unknown.
+		float RadiusGmod(RE::PlayerCharacter* a_player)
+		{
+			auto* c = a_player->GetCharController();
+			ControllerRead r;
+			if (!c || !ReadController(c, RE::bhkWorld::GetWorldScaleInverse(), r) || r.type[0] < 0) {
+				return 0.0f;
+			}
+			const float half = 0.5f * std::min(r.size[0][0], r.size[0][1]);
+			return half > 1.0f && half < 200.0f ? half * float(kGmodPerSkyrim) : 0.0f;
+		}
+
+		// Test 137 ("I see through certain walls"): Skyrim's camera near distance (Display INI).
+		std::string NearDistanceText()
+		{
+			auto* ini = RE::INISettingCollection::GetSingleton();
+			auto* s = ini ? ini->GetSetting("fNearDistance:Display") : nullptr;
+			return s ? fmt::format("{:.1f} (Garry's Mod units {:.1f})", s->GetFloat(), s->GetFloat() * kGmodPerSkyrim) : std::string("not found");
+		}
+
+		std::string ControllerText(RE::PlayerCharacter* a_player)
+		{
+			auto* c = a_player->GetCharController();
+			if (!c) {
+				return "no character controller";
+			}
+			const float k = RE::bhkWorld::GetWorldScaleInverse();
+			ControllerRead r;
+			if (!ReadController(c, k, r)) {
+				return "controller read FAULTED";
+			}
+			std::string shapes;
+			for (int i = 0; i < 2; ++i) {
+				shapes += fmt::format("; shape {}: type {} box {:.1f} x {:.1f} x {:.1f} (Garry's Mod units {:.1f} x {:.1f} x {:.1f})", i, r.type[i],
+					r.size[i][0], r.size[i][1], r.size[i][2], r.size[i][0] * kGmodPerSkyrim, r.size[i][1] * kGmodPerSkyrim, r.size[i][2] * kGmodPerSkyrim);
+			}
+			return fmt::format("radius {:.3f} height {:.3f} actorHeight {:.3f} scale {:.3f} center {:.3f} (raw fields; Havok x{:.2f} = Skyrim units) | collision bound centre ({:.1f}, {:.1f}, {:.1f}) extents ({:.1f}, {:.1f}, {:.1f}) | bumper bound centre ({:.1f}, {:.1f}, {:.1f}) extents ({:.1f}, {:.1f}, {:.1f}){}",
+				r.radius, r.height, r.actorHeight, r.scale, r.center, k, r.bound[0], r.bound[1], r.bound[2], r.bound[3], r.bound[4], r.bound[5],
+				r.bumper[0], r.bumper[1], r.bumper[2], r.bumper[3], r.bumper[4], r.bumper[5], shapes) +
+				fmt::format(" | radius sent to Garry's Mod {:.2f} | camera near distance {}", RadiusGmod(a_player), NearDistanceText());
 		}
 
 		void PublishOrigin(RE::PlayerCharacter* a_player, const RE::NiPoint3& a_pos)
@@ -125,6 +223,7 @@ namespace gmsky::Probe
 					controller ? show(controller->waterHeight) : std::string("-"), show(cellWater),
 					state && state->IsSwimming() ? "yes" : "no", Puppet::IsActive() ? "on" : "off");
 			}
+			logger::info("  player collision (size check after test 136): {}", ControllerText(a_player));
 			if (height > 0.0f) {
 				logger::info("  scale check: gmod standing eye 64 / skyrim camera-minus-feet {:.1f} = {:.4f}; gmod hull 72 / skyrim height {:.1f} = {:.4f}; current guess {:.4f}",
 					eye, eye > 0.0f ? 64.0 / eye : 0.0, height, 72.0 / height, kGmodPerSkyrim);
@@ -172,6 +271,8 @@ namespace gmsky::Probe
 		Arms::Reset("game loaded");
 		logger::info("game loaded: will publish a new origin on the next frame");
 	}
+
+	float PlayerHalfWidth() { return g_halfWidth; }
 
 	void PerFrame(RE::PlayerCharacter* a_player, float a_delta)
 	{
@@ -228,6 +329,8 @@ namespace gmsky::Probe
 		s.heading_rad = a_player->data.angle.z;
 		s.pitch_rad = a_player->data.angle.x;
 		s.height = a_player->GetHeight();
+		s.radius = RadiusGmod(a_player);
+		g_halfWidth = float(s.radius / kGmodPerSkyrim);
 		s.cell_form_id = cell ? cell->GetFormID() : 0;
 		s.flags = Combat::PlayerInCombat() ? GMSKY_SF_IN_COMBAT : 0u;
 		// Step 4b: the water surface where the player is (Skyrim's own "relevant water height" for

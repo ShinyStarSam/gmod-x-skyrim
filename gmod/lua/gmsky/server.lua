@@ -25,6 +25,8 @@ gmsky.Include("hurt")
 gmsky.Include("respawn")
 -- Phase 4 step 4b: swimming in Skyrim's water (both sides).
 gmsky.Include("water")
+-- Step S2j: the player's box sized from Skyrim's player capsule (both sides).
+gmsky.Include("size")
 -- Geometry route step G6: marks what the player holds, so Skyrim places it relative to its camera.
 gmsky.Include("render")
 -- Step S0 (one collision system): physics objects against Skyrim's ground (log only).

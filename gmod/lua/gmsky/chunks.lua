@@ -637,6 +637,30 @@ if SERVER then
 		print("gmsky_dump_tris: " .. tostring(count) .. " triangles -> " .. tostring(path))
 	end)
 
+	-- The chunk's physics mesh around point p (relative to the anchor; the chunk sits at the
+	-- anchor, so its mesh is in the same frame): triangles whose box comes within 2 units of p, up
+	-- to 4 listed with their corners.
+	function C.MeshAt(ent, p, normal)
+		local phys = ent:GetPhysicsObject()
+		if not IsValid(phys) or not phys.GetMeshConvexes then return ent:ChunkName() .. ": no physics mesh to read" end
+		local convexes = phys:GetMeshConvexes()
+		local near, total = {}, 0
+		for _, cv in ipairs(convexes or {}) do
+			for i = 1, #cv - 2, 3 do
+				total = total + 1
+				local v1, v2, v3 = cv[i].pos, cv[i + 1].pos, cv[i + 2].pos
+				if p.x >= math.min(v1.x, v2.x, v3.x) - 2 and p.x <= math.max(v1.x, v2.x, v3.x) + 2
+					and p.y >= math.min(v1.y, v2.y, v3.y) - 2 and p.y <= math.max(v1.y, v2.y, v3.y) + 2
+					and p.z >= math.min(v1.z, v2.z, v3.z) - 2 and p.z <= math.max(v1.z, v2.z, v3.z) + 2 then
+					near[#near + 1] = string.format("(%.1f %.1f %.1f) (%.1f %.1f %.1f) (%.1f %.1f %.1f)", v1.x, v1.y, v1.z, v2.x, v2.y, v2.z, v3.x, v3.y, v3.z)
+				end
+			end
+		end
+		return string.format("the blocking chunk %s's physics mesh at the hit (%.1f, %.1f, %.1f), normal (%.2f, %.2f, %.2f): %d of its %d triangles (%d convexes) within 2 units%s%s",
+			ent:ChunkName(), p.x, p.y, p.z, normal.x, normal.y, normal.z, #near, total, #(convexes or {}),
+			#near > 0 and ": " or "", table.concat(near, "; ", 1, math.min(#near, 4)))
+	end
+
 	local function StuckReport(ply, a, wish)
 		local pos, mins, maxs = ply:GetPos(), ply:OBBMins(), ply:OBBMaxs()
 		local function Hull(from, to)
@@ -646,6 +670,18 @@ if SERVER then
 		for _, up in ipairs({ 0, ply:GetStepSize(), 36 }) do
 			local from = pos + Vector(0, 0, up)
 			parts[#parts + 1] = string.format("ahead from %.0f up: %s", up, TraceText(Hull(from, from + wish * 24)))
+		end
+		-- Test 136: a wall in the game's collision that Skyrim's triangles (the dump) don't have.
+		-- What the blocking chunk's own physics mesh holds at the hit point (relative to the anchor,
+		-- like the dump), for comparing offline.
+		local from = pos + Vector(0, 0, ply:GetStepSize() + 1)
+		local block = Hull(from, from + wish * 24)
+		if block.Hit and IsValid(block.Entity) and block.Entity:GetClass() == "gmsky_chunk" then
+			-- A box trace's HitPos is the box's centre, not the contact (test 137): step back from it
+			-- along the normal by the box's reach that way.
+			local n = block.HitNormal
+			local reach = math.abs(n.x) * maxs.x + math.abs(n.y) * maxs.y
+			parts[#parts + 1] = C.MeshAt(block.Entity, block.HitPos - a - Vector(n.x, n.y, 0) * reach, n)
 		end
 		-- S2i-2: what the player's movement finds under the feet (ramps answer the player's mask).
 		parts[#parts + 1] = "below as movement sees it: " .. TraceText(util.TraceHull({ start = pos + Vector(0, 0, 2), endpos = pos - Vector(0, 0, 24),

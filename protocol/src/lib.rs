@@ -17,7 +17,7 @@ pub const RING_BYTES: usize = 16 << 20;
 pub const MAP_SIZE: usize = RING_OFFSET + RING_BYTES;
 pub const MAGIC: u32 = 0x594B_534D;
 pub const MAGIC_INIT: u32 = 0x5449_4E49;
-pub const VERSION: u32 = 15; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain; 8: collision ring; 9: view punch; 10: Actors; 11: Hitboxes; 12: hit test; 13: hit events; 14: hurt events; 15: water_z
+pub const VERSION: u32 = 16; // 2: Input; 3: applied input in PlayerState; 4: tick stamps; 5: Terrain; 6: noclip_presses; 7: anchor-relative Terrain; 8: collision ring; 9: view punch; 10: Actors; 11: Hitboxes; 12: hit test; 13: hit events; 14: hurt events; 15: water_z; 16: radius
 pub const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
 
 pub const PF_ON_GROUND: u32 = 0x1;
@@ -124,6 +124,9 @@ pub struct SkyrimState {
     pub flags: u32,
     /// Water surface where the player is, Garry's Mod units relative to the anchor (if SF_WATER).
     pub water_z: f32,
+    /// The player's collision capsule radius, Garry's Mod units (0 = unknown; v16, S2j).
+    pub radius: f32,
+    pub reserved0: u32,
 }
 
 #[repr(C)]
@@ -529,7 +532,7 @@ const _: () = {
     assert!(offset_of!(Header, gmod_heartbeat) == 32);
     assert!(size_of::<Origin>() == 32);
     assert!(offset_of!(Origin, skyrim_origin) == 8);
-    assert!(size_of::<SkyrimState>() == 56);
+    assert!(size_of::<SkyrimState>() == 64);
     assert!(offset_of!(SkyrimState, heading_rad) == 32);
     assert!(offset_of!(SkyrimState, cell_form_id) == 44);
     assert!(size_of::<PlayerState>() == 160);
@@ -550,40 +553,40 @@ const _: () = {
     assert!(offset_of!(Slot<Origin>, data) == 8);
     assert!(offset_of!(Shared, origin) == 40);
     assert!(offset_of!(Shared, skyrim_state) == 80);
-    assert!(offset_of!(Shared, player_state) == 144);
-    assert!(offset_of!(Shared, input) == 312);
+    assert!(offset_of!(Shared, player_state) == 152);
+    assert!(offset_of!(Shared, input) == 320);
     assert!(size_of::<Terrain>() == 16952);
     assert!(offset_of!(Terrain, center) == 16);
     assert!(offset_of!(Terrain, skyrim_frame) == 40);
     assert!(offset_of!(Terrain, height) == 48);
-    assert!(offset_of!(Shared, terrain) == 360);
+    assert!(offset_of!(Shared, terrain) == 368);
     assert!(size_of::<Actor>() == 72);
     assert!(offset_of!(Actor, yaw_deg) == 20);
     assert!(offset_of!(Actor, level) == 36);
     assert!(offset_of!(Actor, name) == 40);
     assert!(size_of::<Actors>() == 16 + 72 * MAX_ACTORS);
-    assert!(offset_of!(Shared, actors) == 17320);
+    assert!(offset_of!(Shared, actors) == 17328);
     assert!(size_of::<HitPart>() == 32);
     assert!(offset_of!(HitPart, kind) == 28);
     assert!(size_of::<HitActor>() == 16);
     assert!(offset_of!(Hitboxes, actors) == 32);
     assert!(size_of::<Hitboxes>() == 32 + 16 * HB_MAX_ACTORS + 32 * HB_MAX_PARTS);
-    assert!(offset_of!(Shared, hitboxes) == 21952);
+    assert!(offset_of!(Shared, hitboxes) == 21960);
     assert!(size_of::<HitTestRay>() == 24);
     assert!(size_of::<HitTestRequest>() == 16 + 24 * HT_MAX_RAYS);
     assert!(size_of::<HitTestAnswer>() == 12);
     assert!(offset_of!(HitTestResult, answers) == 32);
     assert!(size_of::<HitTestResult>() == 32 + 12 * HT_MAX_RAYS + 4);
-    assert!(offset_of!(Shared, hit_test_request) == 38760);
-    assert!(offset_of!(Shared, hit_test_result) == 38760 + 8 + 10600);
+    assert!(offset_of!(Shared, hit_test_request) == 38768);
+    assert!(offset_of!(Shared, hit_test_result) == 38768 + 8 + 10600);
     assert!(size_of::<HitEvent>() == 52);
     assert!(offset_of!(HitEvent, dmg_type) == 40);
     assert!(size_of::<HitEvents>() == 8 + 52 * EV_MAX);
-    assert!(offset_of!(Shared, hit_events) == 54704);
+    assert!(offset_of!(Shared, hit_events) == 54712);
     assert!(size_of::<HurtEvent>() == 16);
     assert!(size_of::<HurtEvents>() == 8 + 16 * HURT_MAX);
-    assert!(offset_of!(Shared, hurt_events) == 54704 + 3336);
-    assert!(size_of::<Shared>() == 54704 + 3336 + 520);
+    assert!(offset_of!(Shared, hurt_events) == 54712 + 3336);
+    assert!(size_of::<Shared>() == 54712 + 3336 + 520);
     assert!(size_of::<Shared>() <= SLOTS_SIZE);
     assert!(size_of::<ColMsgHeader>() == 8);
     assert!(size_of::<ColClear>() == 8);

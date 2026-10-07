@@ -99,6 +99,7 @@ function CreateConVar(name, default)
 end
 function math.NormalizeAngle(a) return (a + 180) % 360 - 180 end
 function math.Clamp(v, lo, hi) return math.max(lo, math.min(hi, v)) end
+function math.Round(v, d) local m = 10 ^ (d or 0) return math.floor(v * m + 0.5) / m end
 -- Garry's Mod's real IN_* values
 IN_ATTACK, IN_JUMP, IN_DUCK, IN_FORWARD, IN_BACK = 1, 2, 4, 8, 16
 IN_MOVELEFT, IN_MOVERIGHT, IN_ATTACK2, IN_RELOAD, IN_SPEED, IN_WALK = 512, 1024, 2048, 8192, 131072, 262144
@@ -174,8 +175,12 @@ function ply:SetVelocity() end
 function ply:GetGroundEntity() return nil end
 function ply:GetAimVector() return Vector(1, 0, 0) end
 function ply:GetClass() return "player" end
-function ply:GetHull() return Vector(-16, -16, 0), Vector(16, 16, 72) end
-function ply:GetHullDuck() return Vector(-16, -16, 0), Vector(16, 16, 36) end
+-- The player's boxes (S2j: size.lua sets them).
+HARNESS_HULL = { Vector(-16, -16, 0), Vector(16, 16, 72), Vector(-16, -16, 0), Vector(16, 16, 36) }
+function ply:GetHull() return HARNESS_HULL[1], HARNESS_HULL[2] end
+function ply:GetHullDuck() return HARNESS_HULL[3], HARNESS_HULL[4] end
+function ply:SetHull(lo, hi) HARNESS_HULL[1], HARNESS_HULL[2] = lo, hi end
+function ply:SetHullDuck(lo, hi) HARNESS_HULL[3], HARNESS_HULL[4] = lo, hi end
 -- Weapons (step 3a): HARNESS_WEAPONS = list made with HARNESS_WEAPON, HARNESS_ACTIVE = held one.
 function HARNESS_WEAPON(class, slot, pos)
 	return { GetClass = function() return class end, GetSlot = function() return slot end,
@@ -885,6 +890,24 @@ fn main() {
             check(r == Ok(Some("7 1 65 -1.0 0.0 25.5 1 4225 700.0".into())), &format!("ReadGridFile reads a recorded grid: {r:?}"));
             let r = lua.run(ls, "local ok, err = gmsky.ReadGridFile('../secret.bin') return tostring(ok) .. ' ' .. err");
             check(r == Ok(Some("false bad path \"../secret.bin\"".into())), &format!("ReadGridFile refuses '..': {r:?}"));
+        }
+
+        // S2j: the player's box is as wide as Skyrim's player (half width = its radius, after test
+        // 137), standing and crouched, heights kept; no radius: Garry's Mod's own 16.
+        {
+            let mut st = gmsky_protocol::SkyrimState::default();
+            st.frame = 9;
+            st.radius = 13.0;
+            sky.shared().skyrim_state.write(&st);
+            let size = "HARNESS_TIME = (HARNESS_TIME or 0) + 1 hook.Run('Think') local lo, hi = HARNESS_PLY_HULL() \
+                return string.format('%.1f %.1f %.1f %.1f', hi.x, hi.z, HARNESS_HULL[4].x, HARNESS_HULL[4].z)";
+            lua.run(ls, "function HARNESS_PLY_HULL() return HARNESS_HULL[1], HARNESS_HULL[2] end").unwrap();
+            let r = lua.run(ls, size);
+            check(r == Ok(Some("13.0 72.0 13.0 36.0".into())), &format!("size (S2j): radius 13 from Skyrim -> box half width 13 standing and crouched, heights kept: {r:?}"));
+            st.radius = 0.0;
+            sky.shared().skyrim_state.write(&st);
+            let r = lua.run(ls, size);
+            check(r == Ok(Some("16.0 72.0 16.0 36.0".into())), &format!("size (S2j): no radius -> Garry's Mod's own 16: {r:?}"));
         }
 
         // 8d. Skyrim's collision shapes (re-plan step D): collision ring -> the module's store ->

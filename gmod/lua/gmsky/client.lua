@@ -11,6 +11,8 @@ gmsky.Include("field")
 gmsky.Include("standins")
 -- Phase 4 step 4b: swimming in Skyrim's water (movement prediction).
 gmsky.Include("water")
+-- Step S2j: the player's box sized from Skyrim's player capsule (both sides).
+gmsky.Include("size")
 -- Phase 2a: the overlay experiment (gmsky_test_overlay).
 gmsky.Include("overlay")
 -- Phase 2a after test 31: why 2D drawing writes no alpha (gmsky_test_alpha2d).

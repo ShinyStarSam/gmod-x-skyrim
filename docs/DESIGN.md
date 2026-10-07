@@ -2773,6 +2773,65 @@ code from it. Credited in THIRD-PARTY-NOTICES as an idea source when we build on
   test 125 found 34 bodies) as floor only, and its own collider walks stairs (small footprint).
   The material read is SkyCraft's code used for a new purpose. **Answered (tests 129-134):**
   setting a physics object's contents does not make traces skip it.
+- **S2j. The player's size (proposed 2026-10-06 after test 136).** User: "the player is just too
+  big atm I can't fit properly through some places. Might want to consider changing the player
+  size or shape". Garry's Mod's player is a 32 x 32 x 72 box (standing; 36 tall crouched); at
+  the measured scale (0.5311 Garry's Mod units per Skyrim unit) that is 60 x 60 x 136 Skyrim
+  units. Skyrim's player is an upright capsule (round), whose size has never been measured.
+  1. **S2j-1, measure (logging only):** the Skyrim plugin logs the player's character
+     controller with the status lines: its radius, height, actorHeight, scale and centre fields,
+     its two bounds, and each of its two shapes' size (standing, and probably sneaking), in
+     Skyrim and Garry's Mod units (`Probe.cpp` `ControllerText`, read inside a fault guard).
+     Garry's Mod: every STUCK line blocked by a chunk also lists that chunk's own physics mesh at
+     the hit point (`C.MeshAt`), to explain test 136's wall that Skyrim's triangles don't have.
+     *Test:* walk anywhere, stand, sneak. *Pass:* the controller line has numbers.
+  2. **S2j-2, resize (after the numbers):** `ply:SetHull` / `SetHullDuck` on both sides (the
+     client predicts movement with the same box), the width from Skyrim's capsule. Shape:
+     Source's player movement only knows an upright box, never round. A box as wide as the
+     capsule fits every straight doorway Skyrim's player fits, but its corners stick out about
+     41% further on diagonals; a box whose corners stay inside the capsule (width = diameter /
+     1.41) fits everywhere Skyrim's does, but is narrower than Skyrim's player against walls.
+     The choice is the user's. A truly round player would mean replacing Source's movement
+     collision for the player (as SkyCraft replaces Minecraft's), a large change to ask about
+     first. Height stays 72 (the scale is set by height). The eye height and the hit boxes Skyrim's
+     NPCs aim at are not changed.
+     *Chosen 2026-10-06: rule B.* Built together with S2j-1 (test 137 wasn't run in between), so
+     one test measures and resizes: protocol **v16** adds `GmskySkyrimState.radius` (Garry's Mod
+     units: half the narrower side of the controller's standing shape's box, which for a capsule
+     is its radius, times the scale), written every frame. `gmod/lua/gmsky/size.lua` (both sides,
+     twice a second): half width = radius / 1.41 (rounded to 0.1, kept within 4-24), on the
+     standing and crouched boxes, heights kept; `gmsky_size_from_skyrim 0` puts back Garry's Mod's
+     own 16. Each change is logged. The unstick and the STUCK lines read the box from the player,
+     so they follow.
+     *After test 137:* Skyrim's player collision is a list shape 40 x 55 x 128 Skyrim units
+     (raw radius 18, bounds +-21.5); radius sent 10.6 Garry's Mod units, so rule B gave half width
+     7.5. User: "I see through certain walls if I get closer to it". The eye got closer to walls
+     (about 14 Skyrim units) than Skyrim's own camera ever does (about 20, its body's half width),
+     inside the camera's near distance. **Changed to half width = Skyrim's radius (10.6)**, the
+     user's "a little bigger": the eye keeps Skyrim's own distance from walls; 21.2 wide instead
+     of the original 32; only the box's corners stick out past Skyrim's body on diagonals. The
+     Skyrim log adds the camera's near distance (`fNearDistance:Display`) to check this.
+     *After test 138:* the size fits ("It fit well"), but "the camera still goes through walls".
+     The near distance is 15 Skyrim units (8.0 Garry's Mod units), under the half width, so the
+     reasoning above was incomplete: the camera can't draw closer than a flat rectangle at the
+     near distance, and with the user's wide view (Garry's Mod FOV 100 = 115.6 degrees across a
+     16:9 screen; tangents 1.589 across, 0.894 up) its corners are 2.03 times the near distance from
+     the eye: 30.5 Skyrim units, past the 20-unit half width. **Fix, camera side** (`Camera.cpp`
+     `ApplyNear`): while Garry's Mod drives the camera, the world camera's near distance is set
+     each frame to 90% of the player's half width divided by that corner factor (from the
+     frustum's current tangents), never above Skyrim's own: 8.85 here, the corners within 18 of
+     the eye. Skyrim's own value comes back when we stop driving. Only memory changes, no game
+     file. Cost: less depth precision far away (15 -> 8.85, mild). **Not known:** whether Skyrim
+     resets the near distance every frame after our write (the status line shows what we find
+     before writing: ours = it stays). **Differs from SkyCraft:** SkyCraft doesn't change the
+     near distance.
+     *After test 139:* "Shadows look really weird at a distance, they flicker in and out." The log
+     found 8.92..15.00 before each write: Skyrim puts its own 15 back on some frames, so the near
+     distance jumped between frames (and with it far shadows). Now the near distance is also set
+     where Skyrim rebuilds it from: the world scene graph's custom near distance
+     (`useCustomNear` / `customNearDistance`), saved and put back when we stop driving.
+     *Test 140:* "Flawless": no flicker, no walls cut. Found 8.92..8.92 in 243 of 261 seconds; 15
+     only around loads. **S2j done.**
 - **S3. Props, ragdolls and grenades on it.** Mostly free once S2 works. Added: a prop moving into
   a chunk that isn't built yet is frozen for that moment and released with its speed (like the
   player's hold; InfMap2 doesn't need this because it makes its terrain itself, instantly; we

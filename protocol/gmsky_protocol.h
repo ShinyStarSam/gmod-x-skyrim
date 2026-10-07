@@ -19,7 +19,7 @@
 #define GMSKY_MAP_SIZE (GMSKY_RING_OFFSET + GMSKY_RING_BYTES)
 #define GMSKY_MAGIC 0x594B534Du      // "MSKY": layout initialized and ready
 #define GMSKY_MAGIC_INIT 0x54494E49u // "INIT": one side is initializing right now
-#define GMSKY_VERSION 15u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain; 8: collision ring; 9: view punch; 10: GmskyActors; 11: GmskyHitboxes; 12: hit test; 13: hit events; 14: hurt events; 15: water_z
+#define GMSKY_VERSION 16u  // 2: GmskyInput; 3: applied input in PlayerState; 4: tick stamps; 5: GmskyTerrain; 6: noclip_presses; 7: anchor-relative GmskyTerrain; 8: collision ring; 9: view punch; 10: GmskyActors; 11: GmskyHitboxes; 12: hit test; 13: hit events; 14: hurt events; 15: water_z; 16: radius
 #define GMSKY_HEARTBEAT_TIMEOUT_MS 2000u
 
 // GmskyPlayerState.flags
@@ -79,6 +79,8 @@ typedef struct GmskySkyrimState {
     uint32_t cell_form_id;
     uint32_t flags;     // GMSKY_SF_*
     float water_z;      // water surface where the player is, Garry's Mod units relative to the anchor (if GMSKY_SF_WATER; v15)
+    float radius;       // the player's collision capsule radius, Garry's Mod units (0 = unknown; v16, S2j)
+    uint32_t reserved0;
 } GmskySkyrimState;
 #define GMSKY_SF_IN_COMBAT 0x1u  // someone is fighting the player (step 3f: no calm spot now)
 #define GMSKY_SF_WATER 0x2u      // water_z is valid: there is water here (step 4b)
@@ -647,7 +649,7 @@ GMSKY_ASSERT(offsetof(GmskyHeader, skyrim_heartbeat) == 24);
 GMSKY_ASSERT(offsetof(GmskyHeader, gmod_heartbeat) == 32);
 GMSKY_ASSERT(sizeof(GmskyOrigin) == 32);
 GMSKY_ASSERT(offsetof(GmskyOrigin, skyrim_origin) == 8);
-GMSKY_ASSERT(sizeof(GmskySkyrimState) == 56);
+GMSKY_ASSERT(sizeof(GmskySkyrimState) == 64);
 GMSKY_ASSERT(offsetof(GmskySkyrimState, heading_rad) == 32);
 GMSKY_ASSERT(offsetof(GmskySkyrimState, cell_form_id) == 44);
 GMSKY_ASSERT(sizeof(GmskyPlayerState) == 160);
@@ -668,41 +670,41 @@ GMSKY_ASSERT(offsetof(GmskyInput, noclip_presses) == 36);
 GMSKY_ASSERT(offsetof(GmskyOriginSlot, data) == 8);
 GMSKY_ASSERT(offsetof(GmskyShared, origin) == 40);
 GMSKY_ASSERT(offsetof(GmskyShared, skyrim_state) == 80);
-GMSKY_ASSERT(offsetof(GmskyShared, player_state) == 144);
-GMSKY_ASSERT(offsetof(GmskyShared, input) == 312);
+GMSKY_ASSERT(offsetof(GmskyShared, player_state) == 152);
+GMSKY_ASSERT(offsetof(GmskyShared, input) == 320);
 GMSKY_ASSERT(sizeof(GmskyTerrain) == 16952);
 GMSKY_ASSERT(offsetof(GmskyTerrain, center) == 16);
 GMSKY_ASSERT(offsetof(GmskyTerrain, skyrim_frame) == 40);
 GMSKY_ASSERT(offsetof(GmskyTerrain, height) == 48);
-GMSKY_ASSERT(offsetof(GmskyShared, terrain) == 360);
+GMSKY_ASSERT(offsetof(GmskyShared, terrain) == 368);
 GMSKY_ASSERT(sizeof(GmskyActor) == 72);
 GMSKY_ASSERT(offsetof(GmskyActor, yaw_deg) == 20);
 GMSKY_ASSERT(offsetof(GmskyActor, level) == 36);
 GMSKY_ASSERT(offsetof(GmskyActor, name) == 40);
 GMSKY_ASSERT(sizeof(GmskyActors) == 16 + 72 * GMSKY_MAX_ACTORS);
-GMSKY_ASSERT(offsetof(GmskyShared, actors) == 17320);
+GMSKY_ASSERT(offsetof(GmskyShared, actors) == 17328);
 GMSKY_ASSERT(sizeof(GmskyHitPart) == 32);
 GMSKY_ASSERT(offsetof(GmskyHitPart, kind) == 28);
 GMSKY_ASSERT(sizeof(GmskyHitActor) == 16);
 GMSKY_ASSERT(offsetof(GmskyHitboxes, actors) == 32);
 GMSKY_ASSERT(sizeof(GmskyHitboxes) == 32 + 16 * GMSKY_HB_MAX_ACTORS + 32 * GMSKY_HB_MAX_PARTS);
-GMSKY_ASSERT(offsetof(GmskyShared, hitboxes) == 21952);
+GMSKY_ASSERT(offsetof(GmskyShared, hitboxes) == 21960);
 GMSKY_ASSERT(sizeof(GmskyHitTestRay) == 24);
 GMSKY_ASSERT(sizeof(GmskyHitTestRequest) == 16 + 24 * GMSKY_HT_MAX_RAYS);
 GMSKY_ASSERT(sizeof(GmskyHitTestAnswer) == 12);
 GMSKY_ASSERT(offsetof(GmskyHitTestResult, answers) == 32);
 GMSKY_ASSERT(sizeof(GmskyHitTestResult) == 32 + 12 * GMSKY_HT_MAX_RAYS + 4);
 GMSKY_ASSERT(offsetof(GmskyShared, hitboxes) + 8 + sizeof(GmskyHitboxes) == offsetof(GmskyShared, hit_test_request));
-GMSKY_ASSERT(offsetof(GmskyShared, hit_test_request) == 38760);
-GMSKY_ASSERT(offsetof(GmskyShared, hit_test_result) == 38760 + 8 + 10600);
+GMSKY_ASSERT(offsetof(GmskyShared, hit_test_request) == 38768);
+GMSKY_ASSERT(offsetof(GmskyShared, hit_test_result) == 38768 + 8 + 10600);
 GMSKY_ASSERT(sizeof(GmskyHitEvent) == 52);
 GMSKY_ASSERT(offsetof(GmskyHitEvent, dmg_type) == 40);
 GMSKY_ASSERT(sizeof(GmskyHitEvents) == 8 + 52 * GMSKY_EV_MAX);
-GMSKY_ASSERT(offsetof(GmskyShared, hit_events) == 54704);
+GMSKY_ASSERT(offsetof(GmskyShared, hit_events) == 54712);
 GMSKY_ASSERT(sizeof(GmskyHurtEvent) == 16);
 GMSKY_ASSERT(sizeof(GmskyHurtEvents) == 8 + 16 * GMSKY_HURT_MAX);
-GMSKY_ASSERT(offsetof(GmskyShared, hurt_events) == 54704 + 3336);
-GMSKY_ASSERT(sizeof(GmskyShared) == 54704 + 3336 + 520);
+GMSKY_ASSERT(offsetof(GmskyShared, hurt_events) == 54712 + 3336);
+GMSKY_ASSERT(sizeof(GmskyShared) == 54712 + 3336 + 520);
 GMSKY_ASSERT(sizeof(GmskyShared) <= GMSKY_SLOTS_SIZE);
 GMSKY_ASSERT(sizeof(GmskyColMsgHeader) == 8);
 GMSKY_ASSERT(sizeof(GmskyColClear) == 8);
